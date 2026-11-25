@@ -1959,21 +1959,42 @@ def verify_outside(entries):
     except OSError:
         raise Tampered()
 
-def open_stage(parent):
-    # A fresh file beside the target, under a short name of its own that does not depend on the target's name (a long name plus a suffix can pass what a folder allows), made exclusively:
-    # a name that is already there is never removed or used, another is tried. Returns (the name, the descriptor)
-    for _ in range(32):
-        temp = ".universe-" + os.urandom(6).hex()
+def make_stage(parent):
+    # A fresh private folder inside the folder held as parent (so the same file system), where each file or link is made and then renamed into place from. Only root can change what is inside it, so what is
+    # published is exactly what was checked. A name that is taken is never removed to make room: another one is tried. Returns (name, descriptor, identity)
+    for _ in range(5):
+        name = ".uc-" + os.urandom(4).hex()
         try:
-            return temp, os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            os.mkdir(name, 0o700, dir_fd=parent)
         except FileExistsError:
             continue
-    raise OSError(errno.EEXIST, "no free name")
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        except OSError:
+            raise Tampered()
+        info = os.fstat(fd)
+        # The folder opened must be the one just made: a folder, ours, closed to everyone else, on the same file system (anything else means the name was swapped meanwhile)
+        if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or (info.st_mode & 0o7777) != 0o700 or info.st_dev != os.fstat(parent).st_dev:
+            os.close(fd)
+            raise Tampered()
+        return name, fd, (info.st_dev, info.st_ino)
+    raise Tampered()
+
+def reopen_stage(parent, item):
+    # The private folder is found again by its name, and is used only when it is the very folder that was made (same device and number, ours, closed to everyone else): a folder the agent put there
+    # under that name, or moved over from another place, is never used
+    fd = os.open(item["stage"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    info = os.fstat(fd)
+    if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or (info.st_mode & 0o7777) != 0o700 or (info.st_dev, info.st_ino) != item["stage_ident"]:
+        os.close(fd)
+        raise Tampered()
+    return fd
 
 def install_outside(entries):
-    # Two steps. First EVERY file is written beside its target under a name of its own and checked (read again from the copy, hashed again as it is written): a copy that changed after the
-    # check, or anything else that goes wrong while reading, stops here with nothing put in place. Only then each is moved over its target, and a link is made. What can still fail in the
-    # second step is a name swapped at that moment in a folder the agent can write, or a target that is a folder; files already moved stay, and what is left of the staging is removed again
+    # Two steps. First EVERY file and link is made in a private folder of its own beside its target and checked (read again from the copy, hashed again as it is written): a copy that changed after the
+    # check, or anything else that goes wrong while reading, stops here with nothing put in place. Only then each is renamed over its target, from the private folder to the target's folder, both held as
+    # descriptors. What can still fail in the second step is a folder swapped at that moment in a folder the agent can write (refused), or a target that is a folder; what was already moved stays, and the
+    # private folders that are left are removed again
     count = 0
     staged = []
     root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
@@ -1991,17 +2012,33 @@ def install_outside(entries):
                 try:
                     if kind == "l":
                         check_link(entry)
-                        staged.append({"kind": "l", "parts": parts, "value": value})
+                        stage_name, stage, stage_ident = make_stage(parent)
+                        item = {"kind": "l", "parts": parts, "stage": stage_name, "stage_ident": stage_ident, "ident": None}
+                        staged.append(item)
+                        try:
+                            os.symlink(value, "f", dir_fd=stage)
+                            made = os.lstat("f", dir_fd=stage)
+                            item["ident"] = (made.st_dev, made.st_ino)
+                        finally:
+                            os.close(stage)
                         continue
-                    # Copied from the descriptor that was checked, hashed again as it is copied, written beside the target. The set-user-id and set-group-id bits are never put back
+                    # Copied from the descriptor that was checked, hashed again as it is copied, written in the private folder. The set-user-id and set-group-id bits are never put back
                     fd, info = open_entry(entry)
                     try:
-                        temp, out = open_stage(parent)
+                        stage_name, stage, stage_ident = make_stage(parent)
                     except BaseException:
                         os.close(fd)
                         raise
-                    item = {"kind": "f", "parts": parts, "temp": temp, "ident": None}
+                    item = {"kind": "f", "parts": parts, "stage": stage_name, "stage_ident": stage_ident, "ident": None}
                     staged.append(item)
+                    try:
+                        try:
+                            out = os.open("f", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=stage)
+                        except BaseException:
+                            os.close(fd)
+                            raise
+                    finally:
+                        os.close(stage)
                     digest = hashlib.sha256()
                     with os.fdopen(fd, "rb") as source, os.fdopen(out, "wb") as sink:
                         for chunk in iter(lambda: source.read(1 << 20), b""):
@@ -2014,6 +2051,7 @@ def install_outside(entries):
                             os.fchown(sink.fileno(), 0, 0)
                         os.fchmod(sink.fileno(), mode & 0o1777)
                         os.utime(sink.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+                        os.fsync(sink.fileno())
                         done = os.fstat(sink.fileno())
                         item["ident"] = (done.st_dev, done.st_ino)
                 finally:
@@ -2024,46 +2062,52 @@ def install_outside(entries):
                 except OSError:
                     raise Tampered()
                 try:
-                    name = item["parts"][-1]
-                    if item["kind"] == "l":
-                        try:
-                            os.unlink(name, dir_fd=parent)
-                        except FileNotFoundError:
-                            pass
-                        os.symlink(item["value"], name, dir_fd=parent)
+                    try:
+                        stage = reopen_stage(parent, item)
+                    except OSError:
+                        raise Tampered()
+                    try:
+                        # Looked at through the held folder just before it is moved: it must still be the very file or link that was made and checked (one name, nothing else linked to it)
+                        now = os.lstat("f", dir_fd=stage)
+                        regular = statmod.S_ISREG(now.st_mode) and now.st_nlink == 1
+                        if (item["kind"] == "f" and not regular) or (item["kind"] == "l" and not statmod.S_ISLNK(now.st_mode)) or (now.st_dev, now.st_ino) != item["ident"]:
+                            raise Tampered()
+                        os.rename("f", item["parts"][-1], src_dir_fd=stage, dst_dir_fd=parent)
                         item["placed"] = True
                         count += 1
-                        continue
-                    # The name is looked at again just before it is moved: it must still be the very file that was written and checked (one name, nothing else linked to it)
-                    now = os.lstat(item["temp"], dir_fd=parent)
-                    if not statmod.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != item["ident"] or now.st_nlink != 1:
-                        raise Tampered()
-                    os.replace(item["temp"], name, src_dir_fd=parent, dst_dir_fd=parent)
-                    item["placed"] = True
-                    # And after: what is at the target must be that file. A folder the agent can write is the only place a name can be swapped between the two looks, and what was put there is taken away again
-                    published = os.lstat(name, dir_fd=parent)
-                    if (published.st_dev, published.st_ino) != item["ident"]:
-                        try:
-                            os.unlink(name, dir_fd=parent)
-                        except OSError:
-                            pass
-                        raise Tampered()
-                    count += 1
+                    finally:
+                        os.close(stage)
+                    try:
+                        os.rmdir(item["stage"], dir_fd=parent)
+                        item["stage"] = None
+                    except OSError:
+                        pass
                 finally:
                     os.close(parent)
         except BaseException:
-            # Whatever was staged and not moved is taken away again (by name, in a folder reached without following a link; a name that is not ours cannot be one of these random names)
+            # What was made and not moved is taken away again, and so are the private folders: each is opened again by name and used only when it is the folder that was made
             for item in staged:
-                if item["kind"] != "f" or item.get("placed"):
+                if not item.get("stage"):
                     continue
                 try:
                     parent = open_steps(root_fd, item["parts"][:-1])
                 except OSError:
                     continue
                 try:
-                    os.unlink(item["temp"], dir_fd=parent)
-                except OSError:
-                    pass
+                    try:
+                        stage = reopen_stage(parent, item)
+                    except (OSError, Tampered):
+                        continue
+                    try:
+                        os.unlink("f", dir_fd=stage)
+                    except OSError:
+                        pass
+                    finally:
+                        os.close(stage)
+                    try:
+                        os.rmdir(item["stage"], dir_fd=parent)
+                    except OSError:
+                        pass
                 finally:
                     os.close(parent)
             raise

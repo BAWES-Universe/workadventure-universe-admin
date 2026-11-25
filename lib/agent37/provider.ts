@@ -44,7 +44,7 @@ export const WATCH_LINK_SECONDS = 60;
 /** A resting machine wakes in 5 to 15 seconds, a cold one in about two minutes, and its health answers 502 for a few seconds more. */
 const READY_WITHIN_MS = 4 * 60_000;
 /** Where the current `universe-cold` is put on a machine before a pack-away (a root-only folder the file scan skips, next to the list). */
-const COLD_SCRIPT = '/usr/local/share/universe/cold/universe-cold';
+const COLD_SCRIPT = '/usr/local/share/universe/cold-bin/universe-cold';
 const POLL_MS = 3_000;
 /** A copy saved this long before the machine went to sleep, or later, is the machine as it was left. */
 const FRESH_COPY_MS = 5 * 60_000;
@@ -347,7 +347,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * once, and `universe-up` is run again.
    */
   async ready(ref: string): Promise<void> {
-    let instance = await this.settle(ref);
+    const instance = await this.settle(ref);
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
@@ -584,14 +584,14 @@ export class Agent37ComputerProvider implements ComputerProvider {
         for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
           const piece = text.subarray(at, at + LIST_SEND_PIECE).toString('base64');
           const write = at === 0
-            ? `umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && printf %s '${piece}' | base64 -d > ${COLD_SCRIPT}.new`
+            ? `umask 077 && mkdir -p ${dir} && chown root:root ${dir} && chmod 755 ${dir} && printf %s '${piece}' | base64 -d > ${COLD_SCRIPT}.new`
             : `umask 077 && printf %s '${piece}' | base64 -d >> ${COLD_SCRIPT}.new`;
           const put = await run(write, String(at));
           if (put.exitCode !== 0 || put.truncated) throw new Error('The computer could not take the current script');
         }
         const summed = await run(`sha256sum ${COLD_SCRIPT}.new`, 'sum');
         if (summed.exitCode !== 0 || summed.truncated || /^([0-9a-f]{64})\s/.exec(summed.stdout)?.[1] !== sha) throw new Error('The current script did not arrive whole on the computer');
-        const moved = await run(`mv -f ${COLD_SCRIPT}.new ${COLD_SCRIPT}`, 'move');
+        const moved = await run(`chmod 644 ${COLD_SCRIPT}.new && mv -f ${COLD_SCRIPT}.new ${COLD_SCRIPT}`, 'move');
         if (moved.exitCode !== 0 || moved.truncated) throw new Error('The computer could not put the current script in place');
         return;
       } catch (error) {
@@ -680,11 +680,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
     const started = this.now();
     await this.settle(ref);
-    // `finish` runs as root and puts files back: it is ALWAYS the current script, sent here and checked as for a pack-away, never the one the machine was made with (an older one installs what is in the
-    // home folder, which is what the list exists to stop). `restore` runs as the computer's own user and cannot read the root-only folder, so it stays the installed one
+    // Every command of a restore runs from the CURRENT script, sent here and checked as for a pack-away, never from the one the machine was made with (an older `finish` ignores the list and copies what the agent
+    // left in the home folder, an older `restore` leaves the old proxy lines, an older script has no `list-put`). The folder it is put in can be read by the computer's own user, which `restore` runs as.
+    // A script that could not be put there says nothing about the copy: that is thrown, not a copy that did not check out
     await this.installCold(ref);
     const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
-    const restored = await this.client.exec(ref, `universe-cold restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
+    const restored = await this.client.exec(ref, `python3 ${COLD_SCRIPT} restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
     if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
       const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
       return { ok: false, reason, ms: this.now() - started };

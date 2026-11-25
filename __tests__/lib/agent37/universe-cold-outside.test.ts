@@ -17,6 +17,8 @@ import { imageFiles } from '@/lib/agent37/image-files';
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const run = describe;
 const rootTest = isRoot ? it : it.skip;
+const canDropRoot = isRoot && spawnSync('setpriv', ['--version']).status === 0;
+const raceTest = canDropRoot ? it : it.skip;
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'universe-cold-outside-'));
 const script = path.join(dir, 'universe-cold');
@@ -690,7 +692,7 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     const done = spawnSync('python3', [harness, script], { input, encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: fsRoot } });
     return { stdout: done.stdout, status: done.status };
   }
-  const stagedNames = (folder: string) => fs.readdirSync(folder).filter((name) => name.startsWith('.universe-'));
+  const stagedNames = (folder: string) => fs.readdirSync(folder).filter((name) => name.startsWith('.uc-') || name.startsWith('.universe-'));
 
   it('a file that grows past what is left of the size limit while it is copied stops the copy (outside_too_big) and no part of it stays in the copy folder', () => {
     const w = world();
@@ -721,9 +723,9 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(fs.readFileSync(path.join(outside, 'opt/grow/big'), 'utf8')).toBe('x'.repeat(100));
   });
 
-  it('a name at the longest a folder allows (243 bytes) is copied and put back, and a file of the new computer that happens to be named like the old staging name is never touched', () => {
+  it('a name at the longest a folder allows (255 bytes) is copied and put back, and a file of the new computer that happens to be named like the old staging name is never touched', () => {
     const w = world();
-    const long = 'n'.repeat(243);
+    const long = 'n'.repeat(255);
     fs.writeFileSync(path.join(w.fsA, 'opt/tool', long), 'long');
     const manifest = packed(w);
     expect(manifest.files.some((entry) => entry[1] === `/opt/tool/${long}`)).toBe(true);
@@ -737,21 +739,21 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(stagedNames(path.join(w.fsB, 'opt/tool'))).toEqual([]);
   });
 
-  it('a staging name that is already taken is never used or removed: another is tried', () => {
+  it('a staging folder name that is already taken is never used or removed: another is tried', () => {
     const w = world();
     const manifest = packed(w);
-    // Every name the script could pick first is occupied by a file of someone else
+    // The first name the script would pick is a folder of someone else (with a file in it)
     const done = patched(w, w.fsB, 'finish', [
       'real_urandom = os.urandom',
-      'taken = [b"\\x01" * 6, b"\\x02" * 6]',
+      'taken = [b"\\x01" * 4]',
       'def fixed(n):',
-      '    return taken.pop(0) if n == 6 and taken else real_urandom(n)',
+      '    return taken.pop(0) if n == 4 and taken else real_urandom(n)',
       'os.urandom = fixed',
-      'os.makedirs(os.path.join(mod.FSROOT, "opt/tool"), exist_ok=True)',
-      'open(os.path.join(mod.FSROOT, "opt/tool/.universe-" + ("01" * 6)), "w").write("someone else")',
+      'os.makedirs(os.path.join(mod.FSROOT, "opt/tool/.uc-01010101"), exist_ok=True)',
+      'open(os.path.join(mod.FSROOT, "opt/tool/.uc-01010101/mine"), "w").write("someone else")',
     ].join('\n'), JSON.stringify({ outside: manifest }));
     expect(done.stdout).toMatch(/finished=1 .* outside=applied\n/);
-    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/.universe-' + '01'.repeat(6)), 'utf8')).toBe('someone else');
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/.uc-01010101/mine'), 'utf8')).toBe('someone else');
     expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/run.sh'), 'utf8')).toBe('#!/bin/sh\necho hi\n');
   });
 
@@ -762,7 +764,7 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
       'real_lstat = os.lstat',
       'swapped = []',
       'def look(target, *args, **kwargs):',
-      '    if isinstance(target, str) and target.startswith(".universe-") and not swapped:',
+      '    if target == "f" and "dir_fd" in kwargs and not swapped:',
       '        swapped.append(1)',
       '        fd = os.open(".attacker", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=kwargs["dir_fd"])',
       '        os.write(fd, b"attacker")',
@@ -776,8 +778,7 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     for (const folder of ['etc', 'opt/tool']) {
       if (!fs.existsSync(path.join(w.fsB, folder))) continue;
       for (const name of fs.readdirSync(path.join(w.fsB, folder))) {
-        const content = fs.readFileSync(path.join(w.fsB, folder, name), 'utf8');
-        expect(content).not.toBe('attacker');
+        if (fs.statSync(path.join(w.fsB, folder, name)).isFile()) expect(fs.readFileSync(path.join(w.fsB, folder, name), 'utf8')).not.toBe('attacker');
       }
       expect(stagedNames(path.join(w.fsB, folder))).toEqual([]);
     }
@@ -847,10 +848,12 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
       'real_lstat = os.lstat',
       'linked = []',
       'def look(target, *args, **kwargs):',
-      '    if isinstance(target, str) and target.startswith(".universe-") and not linked:',
+      '    got = real_lstat(target, *args, **kwargs)',
+      '    if target == "f" and "dir_fd" in kwargs and not linked and os.path.stat.S_ISREG(got.st_mode):',
       '        linked.append(1)',
-      '        os.link(target, ".kept", src_dir_fd=kwargs["dir_fd"], dst_dir_fd=kwargs["dir_fd"])',
-      '    return real_lstat(target, *args, **kwargs)',
+      '        os.link(target, os.path.join(mod.FSROOT, "etc/.kept"), src_dir_fd=kwargs["dir_fd"], follow_symlinks=False)',
+      '        got = real_lstat(target, *args, **kwargs)',
+      '    return got',
       'os.lstat = look',
     ].join('\n'), JSON.stringify({ outside: manifest }));
     expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
@@ -858,22 +861,169 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(stagedNames(path.join(w.fsB, 'etc'))).toEqual([]);
   });
 
-  it('the target swapped for another file right after the move is refused and taken away again: the attacker\'s file is never what a finished restore leaves', () => {
+  it('every file is put in place by a rename from its private folder to the target\'s folder, both held as descriptors (the name looked up again is the target\'s, never a staging name)', () => {
     const w = world();
     const manifest = packed(w);
     const done = patched(w, w.fsB, 'finish', [
-      'real_replace = os.replace',
-      'def replace(src, dst, *args, **kwargs):',
-      '    real_replace(src, dst, *args, **kwargs)',
-      '    fd = kwargs["dst_dir_fd"]',
-      '    out = os.open(".attacker", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)',
-      '    os.write(out, b"attacker")',
-      '    os.close(out)',
-      '    os.rename(".attacker", dst, src_dir_fd=fd, dst_dir_fd=fd)',
-      'os.replace = replace',
+      'real_rename = os.rename',
+      'def rename(src, dst, *args, **kwargs):',
+      '    print("rename:%s:%s:%s" % (src, os.path.basename(str(dst)), kwargs.get("src_dir_fd") is not None and kwargs.get("dst_dir_fd") is not None and kwargs["src_dir_fd"] != kwargs["dst_dir_fd"]))',
+      '    return real_rename(src, dst, *args, **kwargs)',
+      'os.rename = rename',
     ].join('\n'), JSON.stringify({ outside: manifest }));
-    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
-    expect(fs.existsSync(path.join(w.fsB, 'etc/app.conf'))).toBe(false);
+    expect(done.stdout).toMatch(/finished=1/);
+    const moves = done.stdout.split('\n').filter((line) => line.startsWith('rename:f:'));
+    expect(moves.map((line) => line.split(':')[2]).sort()).toEqual(['app.conf', 'latest', 'run.sh']);
+    for (const move of moves) expect(move.endsWith(':True')).toBe(true);
+  });
+
+  const left = (w: World) => fs.readdirSync(w.fsB, { recursive: true }).map(String).filter((name) => path.basename(name).startsWith('.uc-') || name.endsWith('.universe-new'));
+
+  it('no staging folder is left behind after a good finish or after a refused one, and a link replaces a file at the target in one step', () => {
+    const w = world();
+    const list = packed(w);
+    fs.mkdirSync(path.join(w.fsB, 'opt/tool'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsB, 'opt/tool/latest'), 'a file where the link goes');
+    expect(finishWith(w, list).stdout).toMatch(/finished=1/);
+    expect(fs.readlinkSync(path.join(w.fsB, 'opt/tool/latest'))).toBe('run.sh');
+    expect(left(w)).toEqual([]);
+    // A file that changed in the copy after prepack: refused, and nothing is left
+    const v = world();
+    const again = packed(v);
+    fs.appendFileSync(path.join(v.outside, 'etc/app.conf'), 'x');
+    expect(finishWith(v, again).stdout).toContain('finished=0 reason=outside_tampered');
+    expect(left(v)).toEqual([]);
+  });
+
+  raceTest('between the checks and the rename the agent can change nothing inside the staging folder, and a staging folder it swapped in meanwhile publishes nothing', () => {
+    // The hook runs just before the rename that publishes: the agent tries to rename the staged file (must be refused), then renames the staging folder away and puts its own with a different file
+    const w = world();
+    const list = packed(w);
+    const parent = path.join(w.fsB, 'opt/tool');
+    fs.mkdirSync(parent, { recursive: true });
+    for (const folder of [dir, path.dirname(w.fsB), w.fsB, path.join(w.fsB, 'opt')]) fs.chmodSync(folder, 0o755);
+    spawnSync('chown', ['-R', '1000:1000', parent]);
+    const agentCode = path.join(dir, `agent-${++counter}.py`);
+    fs.writeFileSync(agentCode, [
+      'import os, sys',
+      'parent, stage = sys.argv[1], sys.argv[2]',
+      'try:',
+      '    os.rename(os.path.join(parent, stage, "f"), os.path.join(parent, stage, "g"))',
+      '    print("renamed-inside")',
+      'except PermissionError:',
+      '    print("refused-inside")',
+      'os.rename(os.path.join(parent, stage), os.path.join(parent, ".moved"))',
+      'os.mkdir(os.path.join(parent, stage), 0o700)',
+      'open(os.path.join(parent, stage, "f"), "w").write("EVIL")',
+    ].join('\n'));
+    const harness = path.join(dir, `publish-race-${counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, subprocess, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'real_rename = os.rename',
+      'stages = {}',
+      'def stage_of(held, parent_fd):',
+      '    mine = os.fstat(held).st_ino',
+      '    return [n for n in os.listdir(parent_fd) if n.startswith(".uc-") and os.stat(n, dir_fd=parent_fd).st_ino == mine][0]',
+      'real_mkdir = os.mkdir',
+      'def seen_mkdir(target, *args, **kwargs):',
+      '    real_mkdir(target, *args, **kwargs)',
+      '    if str(target).startswith(".uc-"):',
+      '        stages["name"] = str(target)',
+      'os.mkdir = seen_mkdir',
+      'done = {"n": 0}',
+      'def racing(src, dst, *args, **kwargs):',
+      '    if src == "f" and "src_dir_fd" in kwargs and dst == "run.sh" and not done["n"]:',
+      '        done["n"] = 1',
+      '        ran = subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "python3", sys.argv[2], sys.argv[3], stage_of(kwargs["src_dir_fd"], kwargs["dst_dir_fd"])], capture_output=True, text=True)',
+      '        print("agent:" + ran.stdout.strip().replace("\\n", ",") + ran.stderr.strip())',
+      '    return real_rename(src, dst, *args, **kwargs)',
+      'os.rename = racing',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, agentCode, parent], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+    expect(done.stdout).toContain('agent:refused-inside');
+    expect(done.stdout).toMatch(/finished=1/);
+    // What was published is what was hashed, owned by root, not what the agent put in a folder of its own name
+    expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('#!/bin/sh\necho hi\n');
+    expect(fs.statSync(path.join(parent, 'run.sh')).uid).toBe(0);
+  });
+
+  raceTest('a staging folder the agent swapped in between the mkdir and the open is refused, and the target is untouched', () => {
+    const w = world();
+    const list = packed(w);
+    const parent = path.join(w.fsB, 'opt/tool');
+    fs.mkdirSync(parent, { recursive: true });
+    for (const folder of [dir, path.dirname(w.fsB), w.fsB, path.join(w.fsB, 'opt')]) fs.chmodSync(folder, 0o755);
+    fs.writeFileSync(path.join(parent, 'run.sh'), 'what was there');
+    spawnSync('chown', ['-R', '1000:1000', parent]);
+    const agentCode = path.join(dir, `agent-${++counter}.py`);
+    fs.writeFileSync(agentCode, [
+      'import os, sys',
+      'parent, stage = sys.argv[1], sys.argv[2]',
+      'os.rename(os.path.join(parent, stage), os.path.join(parent, ".gone"))',
+      'os.mkdir(os.path.join(parent, stage), 0o700)',
+    ].join('\n'));
+    const harness = path.join(dir, `stage-swap-${counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, subprocess, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'real_mkdir = os.mkdir',
+      'def swapping(target, *args, **kwargs):',
+      '    real_mkdir(target, *args, **kwargs)',
+      '    if str(target).startswith(".uc-") and "dir_fd" in kwargs and "run.sh" in os.listdir(kwargs["dir_fd"]):',
+      '        subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "python3", sys.argv[2], sys.argv[3], str(target)], check=True)',
+      'os.mkdir = swapping',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, agentCode, parent], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+    expect(done.stdout).toContain('finished=0 reason=outside_tampered');
+    expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
+  });
+  raceTest('a staging folder the agent swapped in after the checks, before the move, is refused: nothing is published from it and the target is untouched', () => {
+    const w = world();
+    const list = packed(w);
+    const parent = path.join(w.fsB, 'opt/tool');
+    fs.mkdirSync(parent, { recursive: true });
+    for (const folder of [dir, path.dirname(w.fsB), w.fsB, path.join(w.fsB, 'opt')]) fs.chmodSync(folder, 0o755);
+    fs.writeFileSync(path.join(parent, 'run.sh'), 'what was there');
+    spawnSync('chown', ['-R', '1000:1000', parent]);
+    const agentCode = path.join(dir, `agent-${++counter}.py`);
+    fs.writeFileSync(agentCode, [
+      'import os, sys',
+      'parent = sys.argv[1]',
+      'for name in os.listdir(parent):',
+      '    if name.startswith(".uc-"):',
+      '        os.rename(os.path.join(parent, name), os.path.join(parent, ".gone-" + name))',
+      '        os.mkdir(os.path.join(parent, name), 0o700)',
+      '        open(os.path.join(parent, name, "f"), "w").write("EVIL")',
+    ].join('\n'));
+    const harness = path.join(dir, `reopen-swap-${counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, subprocess, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'real = mod.reopen_stage',
+      'done = {"n": 0}',
+      'def swapping(parent_fd, item):',
+      '    if not done["n"] and item["parts"][-1] == "run.sh":',
+      '        done["n"] = 1',
+      '        subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "python3", sys.argv[2], sys.argv[3]], check=True)',
+      '    return real(parent_fd, item)',
+      'mod.reopen_stage = swapping',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, agentCode, parent], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+    expect(done.stdout).toContain('finished=0 reason=outside_tampered');
+    expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
   });
 
   it('the old-proxy clean-up follows no link: a link at a settings file, or a link where a folder of it belongs, is left alone and what it points at is never rewritten; a plain file is cleaned', () => {

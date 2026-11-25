@@ -928,6 +928,32 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await computerView(brick.botId, brick.personId, NOW)).toMatchObject({ olderCopyUsed: true });
     });
 
+    it('a computer that cannot be made ready for the newest copy (restoreInto THROWS) ends the return: the older copy is not tried, the computer is removed, and the next job tries the newest copy again', async () => {
+      const brick = await idleBrick();
+      const older = await storeArchive(brick.botId, new Response('older').body as ReadableStream<Uint8Array>);
+      await markVerified(older.id, 5);
+      const newer = await storeArchive(brick.botId, new Response('newer').body as ReadableStream<Uint8Array>);
+      await markVerified(newer.id, 5);
+      await prisma.computerArchive.update({ where: { id: older.id }, data: { createdAt: new Date('2026-10-30T10:00:00Z') } });
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', providerRef: null } });
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async () => {
+        throw new Error('The computer could not take the current script');
+      };
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW);
+      expect(started).toMatchObject({ ok: false, reason: 'broken_start' });
+      // One computer was made and removed; the older copy never went on a computer
+      expect(names().filter((call) => call.startsWith('remove:') || call.startsWith('confirmRemoved:') || call.startsWith('create:'))).toEqual([`create:${brick.botId}`, `remove:fake-${brick.botId}`, `confirmRemoved:fake-${brick.botId}`]);
+      expect(provider.restored).toEqual([]);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null, olderCopyUsed: false });
+      // Later the NEWEST copy is the one tried again
+      provider.restoreInto = original;
+      provider.restoreResults = [];
+      const again = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Try again' }, new Date(NOW.getTime() + 2 * 60 * 60_000));
+      expect(again).toMatchObject({ ok: true });
+      expect(provider.restored.map((entry) => entry.source.sha256)).toEqual([newer.sha256]);
+    });
+
     it('leaves the Brick cold, with no computer left billing, when no copy restores', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);

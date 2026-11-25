@@ -546,9 +546,13 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         throw new ColdError('The return was taken over', 'busy');
       }
       let result: RestoreResult;
+      // A throw is the computer's trouble (the current script could not be put on it, it could not be reached), and says nothing about this copy: the return ends here, the computer is removed, and the
+      // Brick goes back to cold to be tried again later with the NEWEST copy. Only a result that says the copy did not check out moves on to the older copy
+      let threw = false;
       try {
         result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '', outside: outsideOf(archive) });
       } catch (error) {
+        threw = true;
         result = { ok: false, reason: words(error), ms: 0 };
       }
       if (result.ok) {
@@ -565,7 +569,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         return { ref: made.ref, from: archive.createdAt, olderCopyUsed: at > 0 };
       }
       lastReason = result.reason ?? 'unknown';
-      console.error(`[Computer] A copy did not restore (${lastReason})${at + 1 < archives.length ? '; the older one is tried' : ''}`);
+      console.error(`[Computer] A copy did not restore (${lastReason})${!threw && at + 1 < archives.length ? '; the older one is tried' : ''}`);
       // A computer with half a restore is never used: it is removed, and the next copy goes on a fresh one. A return that was taken over meanwhile leaves
       // the computer to the one that took over (the provider hands the same machine to the next return for this Brick)
       try {
@@ -577,6 +581,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         console.error('[Computer] Could not remove a half-restored computer:', words(error));
         throw new ColdError(`The copy did not restore (${lastReason}) and its computer could not be removed yet`, 'restore');
       }
+      if (threw) return giveBack(new ColdError(`The computer could not be made ready for the copy (${lastReason})`, 'restore'));
     }
     return giveBack(new ColdError(`No copy restored (${lastReason})`, 'restore'));
   }, 'restoring');
