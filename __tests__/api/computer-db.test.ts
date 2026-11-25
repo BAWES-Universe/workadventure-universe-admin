@@ -42,6 +42,7 @@ import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { pauseJob } from '@/lib/computer-job-controls';
+import { controlInternals } from '@/lib/computer';
 import {
   computerView,
   continueWindDown,
@@ -1418,15 +1419,26 @@ run('a Brick’s computer, in a real database', () => {
       try {
         // A holder that fails before it takes the lock ends the wait with its own error
         await Promise.race([gotLock, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
+        let reached = false;
+        const met = new Promise<void>((resolve) => {
+          controlInternals.onLineBusy = (botId) => {
+            if (botId === sara.brickId) {
+              reached = true;
+              resolve();
+            }
+          };
+        });
         reading = startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
-        // The reader is at the claim: it finds the line lock held and keeps trying for it (a try-lock), so it is still going, neither refused nor started, a while later
-        await Promise.race([new Promise((resolve) => setTimeout(resolve, 800)), reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
+        // The reader is at the claim: the seam says it found the line lock held (it keeps trying for it, a try-lock), and it has neither been refused nor started
+        await Promise.race([met, reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
+        expect(reached).toBe(true);
         await takeOver(sara.brickId, sara.id, minutes(2));
         // The take over looked for running jobs, found none (the reader is not running yet), and the waiting job is the person's
         expect(lookedAt.length).toBeGreaterThan(0);
         expect(lookedAt.every((found) => found === 0)).toBe(true);
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'waiting', control: 'person' });
       } finally {
+        controlInternals.onLineBusy = () => undefined;
         spy.mockRestore();
         release();
         await Promise.allSettled([holder, reading]);

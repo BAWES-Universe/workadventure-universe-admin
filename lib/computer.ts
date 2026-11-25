@@ -1561,6 +1561,7 @@ async function claimMachineFor(job: { id: string; botId: string; writes: boolean
       rowLockWait(),
     );
     if (decided !== 'line_busy') return decided;
+    if (busySince === null) controlInternals.onLineBusy(job.botId);
     busySince ??= Date.now();
     if (Date.now() - busySince >= 15_000) return { ok: false, why: 'busy' };
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -4713,6 +4714,8 @@ export const controlInternals = {
   restIfUnheld,
   recordComputerTime,
   recordJobVisits,
+  /** Test seam: called the first time a start's claim finds the Brick's line held (it then keeps trying); a no-op in production. A test sets it to know the start has reached its claim, never to guess it by a delay. */
+  onLineBusy: ((): void => undefined) as (botId: string) => void,
   /** The person's own ending of ONE job (Cancel): exactly what Stop does for each job, for this one only. */
   endByPerson: (jobId: string, now: Date, options: { advance: boolean; only?: string; /** The job holds the machine: an ending already committed (a kept intent, a decided cutoff) governs instead of the person's stop. */ held?: boolean }) => endJob(jobId, 'stopped', 'person', now, options.advance, options.only, true, null, false, options.held ? { personStop: true } : {}),
 };

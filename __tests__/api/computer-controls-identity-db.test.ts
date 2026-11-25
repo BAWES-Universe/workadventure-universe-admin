@@ -1213,15 +1213,25 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         // The moment the command has its locks (the holders it will pause were read under the line lock), the first job tries to start
         beforeLockOf(target, async () => {
           let ended: Error | null = null;
+          let reached = false;
+          const met = new Promise<void>((resolve) => {
+            controlInternals.onLineBusy = (botId) => {
+              if (botId === sara.brickId) {
+                reached = true;
+                resolve();
+              }
+            };
+          });
           late = controlInternals.tryStart(jobId, minutes(2));
           // Observed from the moment it starts: a start that ends (or fails) before it reaches the lock fails the wait, whichever way it ended
           late.then(
             () => (ended = new Error('the competing start ended without waiting on the line lock')),
             (error) => (ended = error instanceof Error ? error : new Error(String(error))),
           );
-          // The start finds THIS Brick's line lock held by the command and keeps trying for it (a try-lock, so it never waits while holding the computer's row): it has neither ended nor started when the command goes on
-          await new Promise((resolve) => setTimeout(resolve, 800));
+          // The start finds THIS Brick's line lock held by the command and keeps trying for it (a try-lock, so it never waits while holding the computer's row): the seam says it reached the held line, and it has neither ended nor started
+          await Promise.race([met, late.then(() => undefined, () => undefined)]);
           expect((() => ended)()).toBeNull();
+          expect(reached).toBe(true);
           seenDuring.push((await jobOf(jobId)).status);
         });
         const answer = await moveJobFirst(sara.brickId, sara.id, target, { pauseRunning: true }, minutes(2), command());
@@ -1230,6 +1240,7 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         expect(seenDuring).toEqual(['queued']);
         await late;
       } finally {
+        controlInternals.onLineBusy = () => undefined;
         await Promise.allSettled([late]);
       }
     });
