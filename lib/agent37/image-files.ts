@@ -1327,7 +1327,10 @@ def remove_tree(parent_fd, name):
         os.close(fd)
     os.rmdir(name, dir_fd=parent_fd)
 
-def copy_into(outside_fd, root_fd, path):
+class TooBig(Exception):
+    pass
+
+def copy_into(outside_fd, root_fd, path, budget):
     # One path of the computer copied into the folder held open as outside_fd: both ends are reached one step at a time without following a link, so a folder swapped for a link
     # while this runs fails the copy (or lands in the real folder, which is held open), never somewhere else. Returns (the list entry, bytes)
     parts = path.lstrip("/").split("/")
@@ -1350,18 +1353,31 @@ def copy_into(outside_fd, root_fd, path):
             if not statmod.S_ISREG(seen.st_mode):
                 raise OSError("not a regular file")
             out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-            with os.fdopen(out, "wb") as writer:
-                digest = hashlib.sha256()
-                for chunk in iter(lambda: reader.read(1 << 20), b""):
-                    digest.update(chunk)
-                    writer.write(chunk)
-                writer.flush()
-                os.fchmod(writer.fileno(), seen.st_mode & 0o7777)
-                os.utime(writer.fileno(), ns=(seen.st_atime_ns, seen.st_mtime_ns))
-                if os.getuid() == 0:
-                    os.fchown(writer.fileno(), UID, GID)
-                # Read AFTER the hand-over (a change of owner clears the set-user-id bits, and the list must say the mode the copy has now)
-                done = os.fstat(writer.fileno())
+            try:
+                with os.fdopen(out, "wb") as writer:
+                    digest = hashlib.sha256()
+                    taken = 0
+                    for chunk in iter(lambda: reader.read(1 << 20), b""):
+                        # A file that grew after the scan counted it is held to what is left of the size limit as it is read, never read to its end first
+                        taken += len(chunk)
+                        if taken > budget:
+                            raise TooBig()
+                        digest.update(chunk)
+                        writer.write(chunk)
+                    writer.flush()
+                    os.fchmod(writer.fileno(), seen.st_mode & 0o7777)
+                    os.utime(writer.fileno(), ns=(seen.st_atime_ns, seen.st_mtime_ns))
+                    if os.getuid() == 0:
+                        os.fchown(writer.fileno(), UID, GID)
+                    # Read AFTER the hand-over (a change of owner clears the set-user-id bits, and the list must say the mode the copy has now)
+                    done = os.fstat(writer.fileno())
+            except TooBig:
+                # The part that was written is not kept
+                try:
+                    os.unlink(name, dir_fd=parent)
+                except OSError:
+                    pass
+                raise
             return ["f", path, done.st_size, done.st_mode & 0o7777, digest.hexdigest()], done.st_size
     finally:
         os.close(parent)
@@ -1543,7 +1559,8 @@ def prepack():
                     if logical(current).startswith("/usr/local/share/universe"):
                         dirs[:] = []
                         continue
-                    for name in names:
+                    # A link to a folder is listed with the folders (and never walked); it is a file of the computer like any other link, so it is looked at here
+                    for name in names + [d for d in dirs if os.path.islink(os.path.join(current, d))]:
                         path = logical(os.path.join(current, name))
                         if skipped(path):
                             continue
@@ -1578,7 +1595,10 @@ def prepack():
             root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
             for path in found:
                 try:
-                    entry, size = copy_into(outside_fd, root_fd, path)
+                    entry, size = copy_into(outside_fd, root_fd, path, MAX_BYTES - out_bytes)
+                except TooBig:
+                    blocked = "outside_too_big"
+                    break
                 except OSError:
                     blocked = "outside_not_copied"
                     break
@@ -1749,15 +1769,10 @@ def restore():
 # in the usual settings files, the apt setting, git's system setting, the hosts-file block and the old settings file). Never touches anything else.
 LEGACY = "127.0.0.1:3128"
 
-def clean_file(path):
-    # Takes the old-proxy lines out of one settings file, in place. Nothing when it is not there or has none
-    try:
-        with open(path) as handle:
-            lines = handle.read().split("\n")
-    except (OSError, UnicodeDecodeError):
-        return
+def strip_legacy(text):
+    # The text without the old-proxy lines, and whether any were there
     kept, inside, changed = [], False, False
-    for line in lines:
+    for line in text.split("\n"):
         if line.startswith("# universe-egress begin"):
             inside, changed = True, True
             continue
@@ -1769,12 +1784,49 @@ def clean_file(path):
             changed = True
             continue
         kept.append(line)
+    return "\n".join(kept), changed
+
+def clean_file(path):
+    # Takes the old-proxy lines out of one of the agent's own settings files, in place (run as the computer's own user). Nothing when it is not there or has none
+    try:
+        with open(path) as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    text, changed = strip_legacy(text)
     if changed:
         try:
             with open(path, "w") as handle:
-                handle.write("\n".join(kept))
+                handle.write(text)
         except OSError:
             pass
+
+def clean_system_file(path):
+    # Root, in finish. The file is reached from the top of the file system one step at a time and never through a link (a link at any step, or anything that is not a plain file, is left
+    # alone: a copy can have put a link at one of these names), and what is left of it is written through the descriptor it was read from, never by opening the name again
+    parts = path.lstrip("/").split("/")
+    try:
+        root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        parent = open_steps(root_fd, parts[:-1])
+        try:
+            fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        finally:
+            os.close(parent)
+        with os.fdopen(fd, "r+") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return
+            text, changed = strip_legacy(handle.read())
+            if changed:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(text)
+    except (OSError, UnicodeDecodeError):
+        pass
+    finally:
+        os.close(root_fd)
 
 def drop_legacy_home():
     # The agent's own settings files: run by restore, as the computer's own user (never as root, which would read a file, then open it again by a name the agent can swap for a link).
@@ -1806,7 +1858,7 @@ def drop_legacy_proxy():
         except (OSError, subprocess.SubprocessError):
             pass
     for path in ("/etc/environment", "/etc/profile.d/proxy.sh", "/etc/hosts"):
-        clean_file(real(path))
+        clean_system_file(path)
 
 class Tampered(Exception):
     pass
@@ -1855,7 +1907,8 @@ def open_entry(entry):
     kind, path, size, mode, value = entry
     parent, name = open_parent(path.lstrip("/"))
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        # O_NONBLOCK: a pipe where a file should be is refused by the check below, not waited on until the command times out
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     finally:
         os.close(parent)
     info = os.fstat(fd)
@@ -1906,6 +1959,17 @@ def verify_outside(entries):
     except OSError:
         raise Tampered()
 
+def open_stage(parent):
+    # A fresh file beside the target, under a short name of its own that does not depend on the target's name (a long name plus a suffix can pass what a folder allows), made exclusively:
+    # a name that is already there is never removed or used, another is tried. Returns (the name, the descriptor)
+    for _ in range(32):
+        temp = ".universe-" + os.urandom(6).hex()
+        try:
+            return temp, os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        except FileExistsError:
+            continue
+    raise OSError(errno.EEXIST, "no free name")
+
 def install_outside(entries):
     count = 0
     root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
@@ -1933,12 +1997,11 @@ def install_outside(entries):
                 # Copied from the descriptor that was checked, hashed again as it is copied, written beside the target and moved over it (a link at the target is replaced, never written through).
                 # The set-user-id and set-group-id bits are never put back
                 fd, info = open_entry(entry)
-                temp = name + ".universe-new"
                 try:
-                    os.unlink(temp, dir_fd=parent)
-                except FileNotFoundError:
-                    pass
-                out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                    temp, out = open_stage(parent)
+                except BaseException:
+                    os.close(fd)
+                    raise
                 try:
                     digest = hashlib.sha256()
                     with os.fdopen(fd, "rb") as source, os.fdopen(out, "wb") as sink:
@@ -1952,7 +2015,20 @@ def install_outside(entries):
                             os.fchown(sink.fileno(), 0, 0)
                         os.fchmod(sink.fileno(), mode & 0o1777)
                         os.utime(sink.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+                        staged = os.fstat(sink.fileno())
+                        # The name is looked at again just before it is moved: it must still be the very file that was written and checked (one name, nothing else linked to it)
+                        now = os.lstat(temp, dir_fd=parent)
+                        if not statmod.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (staged.st_dev, staged.st_ino) or now.st_nlink != 1:
+                            raise Tampered()
                     os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    # And after: what is at the target must be that file. A folder the agent can write is the only place a name can be swapped between the two looks, and what was put there is taken away again
+                    published = os.lstat(name, dir_fd=parent)
+                    if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
+                        try:
+                            os.unlink(name, dir_fd=parent)
+                        except OSError:
+                            pass
+                        raise Tampered()
                 except BaseException:
                     try:
                         os.unlink(temp, dir_fd=parent)
@@ -2038,7 +2114,8 @@ def finish_with_list():
             return 1
     drop_legacy_proxy()
     # A copy with no list kept (made before it was) puts nothing back outside the home folder: the folder it carries is not trusted, and this says so
-    print("finished=1 files=%d packages=%d%s" % (files, len(packages), " outside=unverified" if unverified else ""))
+    # Always one of the two words: a caller that does not see either did not run this script (an older one prints neither), and does not take the restore for good
+    print("finished=1 files=%d packages=%d outside=%s" % (files, len(packages), "unverified" if unverified else "applied"))
     return 0
 
 if __name__ == "__main__":

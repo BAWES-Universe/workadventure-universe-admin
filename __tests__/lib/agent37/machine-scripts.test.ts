@@ -20,7 +20,7 @@ const text = (name: string) => imageFiles().find((file) => file.name === name)!.
 let server: http.Server;
 let serverPort = 0;
 let archive = Buffer.alloc(0);
-let token = 'download-token';
+const token = 'download-token';
 let served = 0;
 let altered: { from: number; body: Buffer } | null = null;
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import type { ExecOptions } from '@/lib/computer-provider';
 import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
+import { asciiJson } from '@/lib/computer-outside';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
@@ -10,6 +11,8 @@ jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSa
 
 /** A pretend Agent37: instances that keep a status, and a record of every call. */
 const COLD_PATH = '/usr/local/share/universe/cold/universe-cold';
+const FINISH = `python3 ${COLD_PATH} finish`;
+const LISTPUT = `python3 ${COLD_PATH} list-put`;
 const COLD_PREPACK = `python3 ${COLD_PATH} prepack`;
 const COLD_SHA = createHash('sha256').update(UNIVERSE_COLD).digest('hex');
 
@@ -762,12 +765,13 @@ describe('cold storage operations on a computer', () => {
     });
     const hash = (text: string) => createHash('sha256').update(text, 'latin1').digest('hex');
     const line = (list: unknown, over: Record<string, unknown> = {}) => {
-      const text = JSON.stringify(list);
+      const text = asciiJson(list);
       return `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 3000, outside_bytes: 90, packages: ['ffmpeg'], blocked: null, manifest_bytes: text.length, manifest_sha256: hash(text), ...over })}\n`;
     };
     /** The computer: prints the line, and answers `python3 /usr/local/share/universe/cold/universe-cold list-piece OFFSET LENGTH` from the list it holds, the way the script does. */
     const holding = (w: ReturnType<typeof world>, list: unknown, over: Record<string, unknown> = {}, tweak: (piece: string, at: number) => string = (piece) => piece) => {
-      const text = JSON.stringify(list);
+      // The script writes plain ASCII (every other character is an escape), so that is what it serves
+      const text = asciiJson(list);
       w.setExec((command) => {
         if (command === COLD_PREPACK) return line(list, over);
         const asked = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-piece (\d+) (\d+)$/.exec(command);
@@ -832,6 +836,41 @@ describe('cold storage operations on a computer', () => {
       }
     });
 
+    it('a piece with the right length but a character that is not plain printable ASCII is read again, never taken: the hash reads each character as one byte, so another character of the same length would pass it', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3);
+      let changed = false;
+      // The first answer for the first piece has its first x replaced by a character that is as long and hashes to the same byte (U+0178 is 0x78 in latin1)
+      holding(w, list, {}, (piece, at) => {
+        if (at !== 0 || changed) return piece;
+        changed = true;
+        return piece.replace('x', '\u0178');
+      });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+      expect(changed).toBe(true);
+      // The piece at offset 0 was asked twice: the changed answer was refused, the second was taken
+      expect(w.execs.filter((entry) => / list-piece 0 \d+$/.test(entry.command))).toHaveLength(2);
+    });
+
+    it('a pack-away is not held up by a lookup of the image that fails: it never moves the machine to the image, so it does not look at it', async () => {
+      const w = world();
+      let looked = 0;
+      let down = false;
+      const p = provider(w, { image: async () => {
+        looked++;
+        if (down) throw new Error('image lookup down');
+        return { hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null } as ImageState;
+      } });
+      await p.create('bot-1');
+      down = true;
+      looked = 0;
+      holding(w, { files: [], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      expect(looked).toBe(0);
+    });
+
     it('output Agent37 cut (over 512 KB, the middle removed) is a computer that is blocked with a reason, never an inventory read from what is left', async () => {
       const w = world();
       const p = provider(w);
@@ -888,13 +927,13 @@ describe('cold storage operations on a computer', () => {
       const received: string[] = [];
       w.setExec((command) => {
         if (command.startsWith('universe-cold restore')) return 'restored=1\n';
-        const put = /^universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command);
+        const put = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command);
         if (put) {
           expect(Number(put[1])).toBe(received.join('').length);
           received.push(put[3]);
           return `listput=1 size=${received.join('').length}\n`;
         }
-        return command.startsWith('universe-cold finish') ? 'finished=1 files=3000 packages=1\n' : 'ok';
+        return command.includes(FINISH) ? 'finished=1 files=3000 packages=1 outside=applied\n' : 'ok';
       });
       await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
       const text = received.join('');
@@ -903,13 +942,13 @@ describe('cold storage operations on a computer', () => {
       expect(received.length).toBeGreaterThan(8);
       const commands = w.execs.map((entry) => entry.command);
       for (const command of commands) expect(Buffer.byteLength(command)).toBeLessThan(60 * 1024);
-      const puts = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put'));
+      const puts = w.execs.filter((entry) => entry.command.includes(LISTPUT));
       for (const put of puts) expect(put.options).toMatchObject({ user: 'root' });
       const finish = w.execs.at(-1)!;
-      expect(finish.command).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside_file: { bytes: text.length, sha256: hash(text) } })}\nFINISH_JSON`);
+      expect(finish.command).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside_file: { bytes: text.length, sha256: hash(text) } })}\nFINISH_JSON`);
       expect(finish.options).toMatchObject({ user: 'root' });
       // Every piece went before the finish, after the restore
-      expect(commands.findIndex((command) => command.startsWith('universe-cold list-put'))).toBe(1);
+      expect(commands.findIndex((command) => command.includes(LISTPUT))).toBe(commands.findIndex((command) => command.startsWith('universe-cold restore')) + 1);
     });
 
     it('a piece the computer did not take exactly as sent is a failed restore with a reason, and finish is never run', async () => {
@@ -917,18 +956,17 @@ describe('cold storage operations on a computer', () => {
       const p = provider(w);
       await p.create('bot-1');
       const list = crowd(3000);
-      let puts = 0;
-      const answers: Array<(n: number) => string | { stdout: string; exitCode?: number; truncated?: boolean }> = [
+      const answers: Array<(command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }> = [
         () => 'listput=0 reason=not_written\n',
         () => ({ stdout: 'listput=1 size=1\n' }),
-        (n) => ({ stdout: `listput=1 size=${n}\n`, exitCode: 1 }),
+        // The size it says is the right one: the exit code is the only thing wrong with this answer
+        (command) => ({ stdout: `listput=1 size=${asPut(command)}\n`, exitCode: 1 }),
         () => '',
       ];
       for (const answer of answers) {
-        puts = 0;
-        w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold list-put') ? answer(++puts) : 'ok'));
+        w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(LISTPUT) ? answer(command) : 'ok'));
         await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
-        expect(w.execs.some((entry) => entry.command.startsWith('universe-cold finish'))).toBe(false);
+        expect(w.execs.some((entry) => entry.command.includes(FINISH))).toBe(false);
         w.execs.length = 0;
       }
     });
@@ -940,7 +978,7 @@ describe('cold storage operations on a computer', () => {
       const list = crowd(3000);
       holding(w, list);
       await p.prepack('m1');
-      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold list-put') ? { stdout: `listput=1 size=${asPut(command)}\n` } : 'finished=1\n'));
+      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(LISTPUT) ? { stdout: `listput=1 size=${asPut(command)}\n` } : 'finished=1 files=0 packages=0 outside=applied\n'));
       await p.restoreInto('m1', { ...source, outside: list as never });
       const named = w.execs.filter((entry) => /list-(piece|put)/.test(entry.command));
       expect(named.length).toBeGreaterThan(12);
@@ -950,13 +988,13 @@ describe('cold storage operations on a computer', () => {
       // The same list sent twice does not reuse a name (a name that is remembered would return the first answer for the second send)
       const again = w.execs.length;
       await p.restoreInto('m1', { ...source, outside: list as never });
-      const second = w.execs.slice(again).filter((entry) => entry.command.startsWith('universe-cold list-put')).map((entry) => (entry.options as { name?: string }).name);
+      const second = w.execs.slice(again).filter((entry) => entry.command.includes(LISTPUT)).map((entry) => (entry.options as { name?: string }).name);
       expect(second.some((name) => names.includes(name))).toBe(false);
     });
 
     /** The size a put command would leave on the computer (its offset plus the piece it carries). */
     const asPut = (command: string) => {
-      const found = /^universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command)!;
+      const found = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command)!;
       return Number(found[1]) + found[3].length;
     };
 
@@ -970,8 +1008,8 @@ describe('cold storage operations on a computer', () => {
         let failed = false;
         w.setExec((command) => {
           if (command.startsWith('universe-cold restore')) return 'restored=1\n';
-          if (!command.startsWith('universe-cold list-put')) return 'finished=1\n';
-          if (!failed && command.startsWith('universe-cold list-put 49152 ')) {
+          if (!command.includes(LISTPUT)) return 'finished=1 files=0 packages=0 outside=applied\n';
+          if (!failed && command.startsWith(`${LISTPUT} 49152 `)) {
             failed = true;
             if (failure === 'thrown') throw new Agent37Unreached('lost');
             return failure === 'refused' ? 'listput=0 reason=not_written\n' : { stdout: 'listput=1 size=1\n', truncated: true };
@@ -979,12 +1017,12 @@ describe('cold storage operations on a computer', () => {
           return `listput=1 size=${asPut(command)}\n`;
         });
         await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
-        const offsets = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put')).map((entry) => Number(/list-put (\d+)/.exec(entry.command)![1]));
+        const offsets = w.execs.filter((entry) => entry.command.includes(LISTPUT)).map((entry) => Number(/list-put (\d+)/.exec(entry.command)![1]));
         // 0, 49152 (failed), then again from 0 and all the way through
         expect(offsets.slice(0, 2)).toEqual([0, 49152]);
         expect(offsets.slice(2, 4)).toEqual([0, 49152]);
         expect(offsets.at(-1)).toBeGreaterThan(400_000);
-        const finishes = w.execs.filter((entry) => entry.command.startsWith('universe-cold finish'));
+        const finishes = w.execs.filter((entry) => entry.command.includes(FINISH));
         expect(finishes).toHaveLength(1);
       }
     });
@@ -996,15 +1034,15 @@ describe('cold storage operations on a computer', () => {
       const list = crowd(3000);
       w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : 'listput=0 reason=not_written\n'));
       await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
-      expect(w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put 0 '))).toHaveLength(3);
+      expect(w.execs.filter((entry) => entry.command.startsWith(`${LISTPUT} 0 `))).toHaveLength(3);
       w.execs.length = 0;
       w.setExec((command) => {
         if (command.startsWith('universe-cold restore')) return 'restored=1\n';
         throw new Agent37Unreached('down');
       });
       await expect(p.restoreInto('m1', { ...source, outside: list as never })).rejects.toThrow('down');
-      expect(w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put 0 '))).toHaveLength(3);
-      expect(w.execs.some((entry) => entry.command.startsWith('universe-cold finish'))).toBe(false);
+      expect(w.execs.filter((entry) => entry.command.startsWith(`${LISTPUT} 0 `))).toHaveLength(3);
+      expect(w.execs.some((entry) => entry.command.includes(FINISH))).toBe(false);
     });
 
     it('a piece read that fails once (thrown, short, cut, no exit 0) is asked again and the list is still read whole; three failures in a row are an error', async () => {
@@ -1072,10 +1110,11 @@ describe('cold storage operations on a computer', () => {
       const w = world();
       const p = provider(w);
       await p.create('bot-1');
-      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=1\n' : 'ok'));
+      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=applied\n' : 'ok'));
       await p.restoreInto('m1', { ...source, outside: crowd(100) as never });
-      expect(w.execs.map((entry) => entry.command.split(' ')[1])).toEqual(['restore', 'finish']);
-      expect(w.execs[1].command).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside: crowd(100) })}\nFINISH_JSON`);
+      const run = w.execs.map((entry) => entry.command).filter((command) => command.startsWith('universe-cold restore') || command.includes(FINISH) || command.includes(LISTPUT));
+      expect(run.map((command) => (command.startsWith('universe-cold restore') ? 'restore' : 'finish'))).toEqual(['restore', 'finish']);
+      expect(run[1]).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside: crowd(100) })}\nFINISH_JSON`);
     });
   });
 
@@ -1090,13 +1129,24 @@ describe('cold storage operations on a computer', () => {
       const p = provider(w, { image: async () => state({ revision: 2 }) });
       await p.create('bot-1');
       w.instances.get('m1')!.template_revision = 1;
+      // What create did is not evidence of what prepack does: the log starts empty, and the machine is one whose network rule is another and whose monthly cap is not zero
+      w.calls.length = 0;
+      w.instances.get('m1')!.network = 'block-all' as never;
+      w.budgets.set('m1', { cap: 5_000_000, credit: 0 });
       printsList(w);
       await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: manifest });
       // The image update would replace the disk outside the home folder (or move the build marker): it is never asked for here
       expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
       expect(w.instances.get('m1')!.template_revision).toBe(1);
-      expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
-      expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.findIndex((call) => call.startsWith('exec:m1:')));
+      // Both are put right by prepack itself, before the first command runs on the machine
+      const firstExec = w.calls.findIndex((call) => call.startsWith('exec:m1:'));
+      expect(firstExec).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('network:m1')).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('network:m1')).toBeLessThan(firstExec);
+      expect(w.calls.indexOf('cap:m1:0')).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('cap:m1:0')).toBeLessThan(firstExec);
+      expect(w.instances.get('m1')!.network).toBe('allow-all');
+      expect(w.budgets.get('m1')!.cap).toBe(0);
       const commands = w.execs.map((entry) => entry.command);
       // First the script goes over (a root-only folder, a file made new), then the machine's own sha256sum, then the move, then prepack from the installed path, then the list
       expect(commands[0]).toMatch(/^umask 077 && mkdir -p \/usr\/local\/share\/universe\/cold && chmod 700 \/usr\/local\/share\/universe\/cold && printf %s '[A-Za-z0-9+/=]+' \| base64 -d > \/usr\/local\/share\/universe\/cold\/universe-cold\.new$/);
@@ -1159,7 +1209,10 @@ describe('cold storage operations on a computer', () => {
         printsList(w);
         const execute = w.client.exec.bind(w.client);
         let failed = false;
+        // Every command that is asked, the one that fails too (the machine's own log only holds the ones that ran)
+        const asked: Array<{ command: string; name?: string }> = [];
         (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+          asked.push({ command, name: (options as { name?: string } | undefined)?.name });
           if (!failed && command.startsWith('umask 077')) {
             failed = true;
             if (failure === 'thrown') throw new Agent37Unreached('lost');
@@ -1173,6 +1226,13 @@ describe('cold storage operations on a computer', () => {
         expect(names.every((name) => typeof name === 'string' && name.startsWith('cold-install:'))).toBe(true);
         expect(new Set(names).size).toBe(names.length);
         expect(w.execs.filter((entry) => entry.command.startsWith('umask 077'))).toHaveLength(1);
+        // The failed first piece and the piece the new try starts with are the same first piece (offset zero: the file is made new), under two different names
+        const firsts = asked.filter((entry) => entry.command.startsWith('umask 077 && mkdir -p'));
+        expect(firsts).toHaveLength(2);
+        expect(firsts[0].command).toBe(firsts[1].command);
+        expect(firsts[0].name).not.toBe(firsts[1].name);
+        const allNames = asked.filter((entry) => !entry.command.startsWith('python3')).map((entry) => entry.name);
+        expect(new Set(allNames).size).toBe(allNames.length);
       }
       // Lost on every try: the error itself, and prepack never runs
       const w = world();
@@ -1203,17 +1263,22 @@ describe('cold storage operations on a computer', () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command.startsWith('universe-cold finish') ? 'finished=1\n' : 'ok'));
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=applied\n' : 'ok'));
     const result = await p.restoreInto('m1', { ...source, outside: manifest as never });
     expect(result).toMatchObject({ ok: true, reason: null });
     expect(result.outside).toBeUndefined();
     const commands = w.execs.map((entry) => entry.command);
-    expect(commands[0]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
-    expect(commands[0]).toContain(source.url);
-    expect(commands[0]).toContain(source.sha256);
+    const at = commands.findIndex((command) => command.startsWith('universe-cold restore'));
+    expect(commands[at]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
+    expect(commands[at]).toContain(source.url);
+    expect(commands[at]).toContain(source.sha256);
+    // The current script is put on the machine and checked before anything is restored, and `finish` runs from that fresh copy, as root, never the installed one
+    expect(commands.slice(0, at)).toContain(`sha256sum ${COLD_PATH}.new`);
+    expect(commands.slice(0, at)).toContain(`mv -f ${COLD_PATH}.new ${COLD_PATH}`);
+    expect(commands.some((command) => command.startsWith('universe-cold finish'))).toBe(false);
     // The finish gets the list Orbit kept for the copy, on standard input (never read from the home folder)
-    expect(commands[1]).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside: manifest })}\nFINISH_JSON`);
-    expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    expect(commands[at + 1]).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside: manifest })}\nFINISH_JSON`);
+    expect(w.execs[at + 1].options).toMatchObject({ user: 'root' });
     // Its budget was read before anything was put on it
     expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
     expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf(`exec:m1:${commands[0]}`));
@@ -1225,20 +1290,36 @@ describe('cold storage operations on a computer', () => {
     await p.create('bot-1');
     w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=0 reason=sha_mismatch\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'sha_mismatch' });
-    expect(w.execs.map((entry) => entry.command).filter((command) => command.startsWith('universe-cold finish'))).toEqual([]);
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=0 reason=packages\n' : 'ok'));
+    expect(w.execs.map((entry) => entry.command).filter((command) => command.includes(FINISH))).toEqual([]);
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=packages\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_packages' });
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=0 reason=outside_tampered\n' : 'ok'));
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=outside_tampered\n' : 'ok'));
     await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_tampered' });
+  });
+
+  it('is never good on a finish that does not say it put the list back: no marker, or the wrong one for what was sent', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const answer = (finish: string) => w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(FINISH) ? finish : 'ok'));
+    // An older script says only finished=1 (no marker), or says unverified for a list that was sent, or applied for none
+    answer('finished=1 files=0 packages=0\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=unverified\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=applied\n');
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=applied\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: true });
   });
 
   it('a copy with no list is restored with a null list, and the result says nothing outside the home folder was put back; a list that is not exactly one is sent as null', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=1 files=0 packages=0 outside=unverified\n' : 'ok'));
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=unverified\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: true, reason: null, outside: 'unverified' });
-    expect(w.execs.at(-1)!.command).toBe(`universe-cold finish <<'FINISH_JSON'\n{"outside":null}\nFINISH_JSON`);
+    expect(w.execs.at(-1)!.command).toBe(`${FINISH} <<'FINISH_JSON'\n{"outside":null}\nFINISH_JSON`);
     await p.restoreInto('m1', { ...source, outside: { files: [['f', '/etc/x', 1, 0, 'nothex']], packages: [] } as never });
     expect(w.execs.at(-1)!.command).toContain('{"outside":null}');
   });

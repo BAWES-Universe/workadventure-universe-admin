@@ -321,7 +321,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
    */
   private async settle(ref: string, options: { update?: boolean } = {}): Promise<Instance> {
-    const state = this.image ? await this.image() : null;
+    // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
+    const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
     // Only a rule Agent37 says is already ours is left alone: one it does not say, or another one, is set again (asking again is safe)
     if (instance.network !== BRICK_NETWORK) {
@@ -633,7 +634,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
       try {
         const got = await this.client.exec(ref, `python3 ${COLD_SCRIPT} list-piece ${at} ${want}`, { user: 'root', timeoutMs: 60_000, name: `cold-read:${transfer}:${at}:${attempt}` });
         const marked = got.exitCode === 0 && !got.truncated ? new RegExp(`(?:^|\\n)listpiece=([^\\n]*)${LIST_PIECE_END.replace(/[|]/g, '\\|')}(?:\\n|$)`).exec(got.stdout)?.[1] : undefined;
-        if (marked !== undefined && marked.length === want) return marked;
+        // Exactly as long as asked AND plain printable ASCII (the list is ASCII): the hash is taken over the characters as bytes, so a different character of the same length must not pass
+        if (marked !== undefined && marked.length === want && /^[\x20-\x7e]*$/.test(marked)) return marked;
         last = new Error('The computer\'s list of what is outside its home folder could not be read');
       } catch (error) {
         last = error;
@@ -672,12 +674,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
 
   /**
    * Puts a copy onto a computer and checks it: the machine is put in order first (its rule and its budget), then
-   * `universe-cold restore` fetches the copy straight from Orbit, compares its SHA-256, unpacks it and compares every file with the copy, and `universe-cold finish`
+   * `universe-cold restore` fetches the copy straight from Orbit, compares its SHA-256, unpacks it and compares every file with the copy, and the CURRENT script's `finish` (sent first, as for a pack-away)
    * puts back what was outside the home folder and installs the added software again. Never throws for a copy that does not check out: that is a result.
    */
   async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
     const started = this.now();
     await this.settle(ref);
+    // `finish` runs as root and puts files back: it is ALWAYS the current script, sent here and checked as for a pack-away, never the one the machine was made with (an older one installs what is in the
+    // home folder, which is what the list exists to stop). `restore` runs as the computer's own user and cannot read the root-only folder, so it stays the installed one
+    await this.installCold(ref);
     const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
     const restored = await this.client.exec(ref, `universe-cold restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
     if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
@@ -694,12 +699,16 @@ export class Agent37ComputerProvider implements ComputerProvider {
       if (!sent) return { ok: false, reason: 'finish_outside_transfer', ms: this.now() - started };
       finishInput = JSON.stringify({ outside_file: sent });
     }
-    const finished = await this.client.exec(ref, `universe-cold finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
+    const finished = await this.client.exec(ref, `python3 ${COLD_SCRIPT} finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
     if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
       const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
       return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
     }
-    if (/(^|\n)finished=1\b[^\n]*\boutside=unverified\b/.test(finished.stdout)) {
+    // The script says which it did: put the list back (applied) or, for a copy with no list, nothing outside the home folder (unverified). Neither word, or the wrong one for what was sent,
+    // is a script that did not do what was sent to it, and a restore is never called good on that
+    const done = /(^|\n)finished=1\b[^\n]*\boutside=(applied|unverified)\b/.exec(finished.stdout)?.[2];
+    if (done !== (outside === null ? 'unverified' : 'applied')) return { ok: false, reason: 'finish_outside_not_confirmed', ms: this.now() - started };
+    if (done === 'unverified') {
       console.error('[Computer] A copy with no list of what was outside its home folder was restored: nothing outside the home folder was put back');
       return { ok: true, reason: null, ms: this.now() - started, outside: 'unverified' };
     }
@@ -735,7 +744,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const end = `LIST_${randomBytes(12).toString('hex')}`;
     for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
       const piece = text.slice(at, at + LIST_SEND_PIECE);
-      const put = await this.client.exec(ref, `universe-cold list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000, name: `cold-put:${transfer}:${at}` });
+      const put = await this.client.exec(ref, `python3 ${COLD_SCRIPT} list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000, name: `cold-put:${transfer}:${at}` });
       if (put.exitCode !== 0 || put.truncated || !new RegExp(`(^|\\n)listput=1 size=${at + piece.length}(\\n|$)`).test(put.stdout)) return false;
     }
     return true;

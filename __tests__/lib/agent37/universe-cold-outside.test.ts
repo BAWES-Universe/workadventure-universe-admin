@@ -11,13 +11,11 @@ import { imageFiles } from '@/lib/agent37/image-files';
  * `universe-cold prepack` and `finish`, run for real (Opus on #1025, the root escalation through the folder the agent owns): prepack refuses links where its folders belong and prints a list of
  * what it copied; finish takes that list from Orbit (never from the home folder) and puts back only what matches it. The computer's file system is put under a folder of the test's own
  * (`UNIVERSE_COLD_FS`, honoured only together with `UNIVERSE_COLD_HOME`); `apt-mark` and `apt-get` are stand-ins on the path. Under that seam the scripts also run as an ordinary user (CI is not root):
- * everything that does not depend on root runs everywhere; the checks of owners, and the two races (a second user swaps folders while root runs), run only as root.
+ * everything that does not depend on root runs everywhere; the checks of owners run only as root. The races are made at the exact moment (a patched call swaps the name), not by timing.
  */
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const run = describe;
-const canDropRoot = isRoot && spawnSync('setpriv', ['--version']).status === 0;
-const raceTest = canDropRoot ? it : it.skip;
 const rootTest = isRoot ? it : it.skip;
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'universe-cold-outside-'));
@@ -126,7 +124,7 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     expect(byPath.get('/opt/tool/latest')).toEqual(['l', '/opt/tool/latest', 0, 0, 'run.sh']);
     expect(manifest.files.map((entry) => entry[1]).sort()).toEqual(['/etc/app.conf', '/opt/tool/latest', '/opt/tool/run.sh', '/opt/tool/suid']);
     const done = finishWith(w, manifest);
-    expect(done.stdout).toMatch(/finished=1 files=4 packages=1\n/);
+    expect(done.stdout).toMatch(/finished=1 files=4 packages=1 outside=applied\n/);
     expect(done.stdout).not.toMatch(/unverified/);
     expect(fs.readFileSync(path.join(w.fsB, 'etc/app.conf'), 'utf8')).toBe('conf');
     expect(fs.statSync(path.join(w.fsB, 'etc/app.conf')).mode & 0o7777).toBe(0o640);
@@ -344,8 +342,13 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     fs.symlinkSync(secret, path.join(w.fsA, 'var/www/sub'));
     const out = printed(cold(w, 'prepack', w.fsA).stdout);
     expect(out.blocked).toBeNull();
-    expect(JSON.stringify(listOf(w, out))).not.toContain('not for the agent');
-    expect(fs.existsSync(path.join(w.outside, 'var/www/sub/key'))).toBe(false);
+    const list = listOf(w, out);
+    expect(JSON.stringify(list)).not.toContain('not for the agent');
+    // The link itself is one of the computer's files (a changed link is put back as a link); what it points at is never walked, so nothing behind it is in the copy or the list
+    expect(list.files.find((entry) => entry[1] === '/var/www/sub')).toEqual(['l', '/var/www/sub', 0, 0, secret]);
+    expect(list.files.some((entry) => entry[1].startsWith('/var/www/sub/'))).toBe(false);
+    expect(fs.lstatSync(path.join(w.outside, 'var/www/sub')).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(path.join(w.outside, 'var/www'))).toEqual(['sub']);
   });
 
   it('the old-proxy clean-up works inside the test file system (never on the real /etc): a listed file is rewritten there, the settings files and the old files are removed there', () => {
@@ -368,39 +371,6 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     finishWith(w, null);
     expect(fs.readFileSync(path.join(elsewhere, 'pip.conf'), 'utf8')).toBe('HTTP_PROXY=http://127.0.0.1:3128\n');
   });
-
-  raceTest('the agent swaps the folder for a link while prepack runs: root writes only into the folder it holds open, never through the link (Opus fix 1, a second user does the swap)', () => {
-    const w = world();
-    const root = path.dirname(path.dirname(w.home));
-    // Many files from the image, so the walk takes a moment; then the marker is made newer, so none of them counts as new
-    for (let d = 0; d < 100; d++) {
-      fs.mkdirSync(path.join(w.fsA, 'opt/bulk', String(d)), { recursive: true });
-      for (let f = 0; f < 200; f++) fs.writeFileSync(path.join(w.fsA, 'opt/bulk', String(d), String(f)), '');
-    }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
-    const now = new Date();
-    fs.utimesSync(path.join(w.fsA, 'usr/local/share/universe/built'), now, now);
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
-    // The one file that is new, in a folder the agent owns; and the places the swapped link would lead to
-    fs.writeFileSync(path.join(w.fsA, 'var/www/evil'), '* * * * * root id\n');
-    const victim = path.join(root, `victim-${counter}`);
-    const trap = path.join(w.home, 'trap');
-    fs.mkdirSync(victim, { recursive: true });
-    fs.mkdirSync(path.join(trap, 'var'), { recursive: true });
-    fs.mkdirSync(w.state, { recursive: true });
-    fs.symlinkSync(victim, path.join(trap, 'var/www'));
-    for (const folder of [dir, root, path.dirname(w.home), w.home]) fs.chmodSync(folder, 0o755);
-    spawnSync('chown', ['-R', '1000:1000', w.home]);
-    const actor = spawn('setpriv', ['--reuid=1000', '--regid=1000', '--clear-groups', 'bash', '-c', `cd "${w.state}" && while :; do if [ -d outside ] && [ ! -L outside ]; then mv outside outside.x && ln -s "${trap}" outside; break; fi; done`], { stdio: 'ignore' });
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
-    const done = cold(w, 'prepack', w.fsA);
-    actor.kill();
-    // The swap happened (the test is not empty), and the root-owned folder the link led to was never written into
-    expect(fs.lstatSync(w.outside).isSymbolicLink()).toBe(true);
-    expect(fs.readdirSync(victim)).toEqual([]);
-    expect(printed(done.stdout).blocked).toBeNull();
-    expect(fs.readFileSync(path.join(w.state, 'outside.x/var/www/evil'), 'utf8')).toBe('* * * * * root id\n');
-  }, 120_000);
 
   rootTest('the state folder prepack makes is handed over through its descriptor: a link swapped in right after it was made is not followed (a root file is not given to the agent) (Opus 2nd look, 1)', () => {
     const w = world();
@@ -542,7 +512,7 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(text.length).toBeGreaterThan(160_000);
     sendInPieces(w, text);
     const done = cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: { bytes: text.length, sha256: sha(text) } }));
-    expect(done.stdout).toMatch(/finished=1 files=1203 packages=1\n/);
+    expect(done.stdout).toMatch(/finished=1 files=1203 packages=1 outside=applied\n/);
     expect(fs.readFileSync(path.join(w.fsB, `opt/many/file-01199-${'x'.repeat(120)}.dat`), 'utf8')).toBe('data 1199');
     expect(fs.existsSync(path.join(w.fsB, 'usr/local/share/universe/cold/list.json'))).toBe(false);
   });
@@ -692,5 +662,217 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     const ok = world();
     const fine = cold(ok, 'prepack', ok.fsA, '', { EXTRA_PACKAGES: '1999' });
     expect(printed(fine.stdout).blocked).toBeNull();
+  });
+
+  /** Runs the script's own functions under a patch: `patch` is Python source run after the module loaded (it may wrap `os` calls), then the command's function runs. */
+  function patched(w: World, fsRoot: string, command: 'prepack' | 'finish', patch: string, input = ''): { stdout: string; status: number | null } {
+    const harness = path.join(dir, `patched-${++counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      patch,
+      `sys.exit(mod.${command}())`,
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script], { input, encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: fsRoot } });
+    return { stdout: done.stdout, status: done.status };
+  }
+  const stagedNames = (folder: string) => fs.readdirSync(folder).filter((name) => name.startsWith('.universe-'));
+
+  it('a file that grows past what is left of the size limit while it is copied stops the copy (outside_too_big) and no part of it stays in the copy folder', () => {
+    const w = world();
+    const harness = path.join(dir, `copy-budget-${counter}.py`);
+    const outside = path.join(w.home, 'o');
+    fs.mkdirSync(path.join(w.fsA, 'opt/grow'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'opt/grow/big'), 'x'.repeat(100));
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'out_fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)',
+      'root_fd = os.open(sys.argv[3], os.O_RDONLY | os.O_DIRECTORY)',
+      'try:',
+      '    mod.copy_into(out_fd, root_fd, "/opt/grow/big", 40)',
+      '    print("copied")',
+      'except mod.TooBig:',
+      '    print("toobig")',
+      'print(sorted(os.listdir(os.path.join(sys.argv[2], "opt/grow"))))',
+      'print(mod.copy_into(out_fd, root_fd, "/opt/grow/big", 100)[1])',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, outside, w.fsA], { encoding: 'utf8', env: { ...process.env, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsA } });
+    // Over the limit: stopped, and the half-written file is gone; at exactly the limit it is copied whole
+    expect(done.stdout.split('\n').slice(0, 3)).toEqual(['toobig', '[]', '100']);
+    expect(fs.readFileSync(path.join(outside, 'opt/grow/big'), 'utf8')).toBe('x'.repeat(100));
+  });
+
+  it('a name at the longest a folder allows (243 bytes) is copied and put back, and a file of the new computer that happens to be named like the old staging name is never touched', () => {
+    const w = world();
+    const long = 'n'.repeat(243);
+    fs.writeFileSync(path.join(w.fsA, 'opt/tool', long), 'long');
+    const manifest = packed(w);
+    expect(manifest.files.some((entry) => entry[1] === `/opt/tool/${long}`)).toBe(true);
+    fs.mkdirSync(path.join(w.fsB, 'opt/tool'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsB, 'opt/tool/run.sh.universe-new'), 'not ours');
+    const done = finishWith(w, manifest);
+    expect(done.stdout).toMatch(/finished=1 files=\d+ packages=1 outside=applied\n/);
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool', long), 'utf8')).toBe('long');
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/run.sh.universe-new'), 'utf8')).toBe('not ours');
+    // Nothing of the staging is left behind
+    expect(stagedNames(path.join(w.fsB, 'opt/tool'))).toEqual([]);
+  });
+
+  it('a staging name that is already taken is never used or removed: another is tried', () => {
+    const w = world();
+    const manifest = packed(w);
+    // Every name the script could pick first is occupied by a file of someone else
+    const done = patched(w, w.fsB, 'finish', [
+      'real_urandom = os.urandom',
+      'taken = [b"\\x01" * 6, b"\\x02" * 6]',
+      'def fixed(n):',
+      '    return taken.pop(0) if n == 6 and taken else real_urandom(n)',
+      'os.urandom = fixed',
+      'os.makedirs(os.path.join(mod.FSROOT, "opt/tool"), exist_ok=True)',
+      'open(os.path.join(mod.FSROOT, "opt/tool/.universe-" + ("01" * 6)), "w").write("someone else")',
+    ].join('\n'), JSON.stringify({ outside: manifest }));
+    expect(done.stdout).toMatch(/finished=1 .* outside=applied\n/);
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/.universe-' + '01'.repeat(6)), 'utf8')).toBe('someone else');
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/run.sh'), 'utf8')).toBe('#!/bin/sh\necho hi\n');
+  });
+
+  it('the staged file swapped for another before it is moved into place is refused, and what was swapped in is not left at the target', () => {
+    const w = world();
+    const manifest = packed(w);
+    const done = patched(w, w.fsB, 'finish', [
+      'real_lstat = os.lstat',
+      'swapped = []',
+      'def look(target, *args, **kwargs):',
+      '    if isinstance(target, str) and target.startswith(".universe-") and not swapped:',
+      '        swapped.append(1)',
+      '        fd = os.open(".attacker", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=kwargs["dir_fd"])',
+      '        os.write(fd, b"attacker")',
+      '        os.close(fd)',
+      '        os.rename(".attacker", target, src_dir_fd=kwargs["dir_fd"], dst_dir_fd=kwargs["dir_fd"])',
+      '    return real_lstat(target, *args, **kwargs)',
+      'os.lstat = look',
+    ].join('\n'), JSON.stringify({ outside: manifest }));
+    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
+    expect(done.status).toBe(1);
+    for (const folder of ['etc', 'opt/tool']) {
+      if (!fs.existsSync(path.join(w.fsB, folder))) continue;
+      for (const name of fs.readdirSync(path.join(w.fsB, folder))) {
+        const content = fs.readFileSync(path.join(w.fsB, folder, name), 'utf8');
+        expect(content).not.toBe('attacker');
+      }
+      expect(stagedNames(path.join(w.fsB, folder))).toEqual([]);
+    }
+  });
+
+  it('the staged file given a second name before it is moved (a hard link the agent can keep writing through) is refused, and nothing is put at the target', () => {
+    const w = world();
+    const manifest = packed(w);
+    const done = patched(w, w.fsB, 'finish', [
+      'real_lstat = os.lstat',
+      'linked = []',
+      'def look(target, *args, **kwargs):',
+      '    if isinstance(target, str) and target.startswith(".universe-") and not linked:',
+      '        linked.append(1)',
+      '        os.link(target, ".kept", src_dir_fd=kwargs["dir_fd"], dst_dir_fd=kwargs["dir_fd"])',
+      '    return real_lstat(target, *args, **kwargs)',
+      'os.lstat = look',
+    ].join('\n'), JSON.stringify({ outside: manifest }));
+    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
+    expect(fs.existsSync(path.join(w.fsB, 'etc/app.conf'))).toBe(false);
+    expect(stagedNames(path.join(w.fsB, 'etc'))).toEqual([]);
+  });
+
+  it('the target swapped for another file right after the move is refused and taken away again: the attacker\'s file is never what a finished restore leaves', () => {
+    const w = world();
+    const manifest = packed(w);
+    const done = patched(w, w.fsB, 'finish', [
+      'real_replace = os.replace',
+      'def replace(src, dst, *args, **kwargs):',
+      '    real_replace(src, dst, *args, **kwargs)',
+      '    fd = kwargs["dst_dir_fd"]',
+      '    out = os.open(".attacker", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)',
+      '    os.write(out, b"attacker")',
+      '    os.close(out)',
+      '    os.rename(".attacker", dst, src_dir_fd=fd, dst_dir_fd=fd)',
+      'os.replace = replace',
+    ].join('\n'), JSON.stringify({ outside: manifest }));
+    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
+    expect(fs.existsSync(path.join(w.fsB, 'etc/app.conf'))).toBe(false);
+  });
+
+  it('the old-proxy clean-up follows no link: a link at a settings file, or a link where a folder of it belongs, is left alone and what it points at is never rewritten; a plain file is cleaned', () => {
+    const w = world();
+    const manifest = packed(w);
+    const elsewhere = path.join(path.dirname(w.home), `elsewhere-${counter}`);
+    fs.mkdirSync(elsewhere, { recursive: true });
+    const line = 'KEEP=1\nHTTP_PROXY=http://127.0.0.1:3128\n';
+    fs.writeFileSync(path.join(elsewhere, 'target'), line);
+    fs.writeFileSync(path.join(elsewhere, 'proxy.sh'), line);
+    fs.mkdirSync(path.join(w.fsB, 'etc'), { recursive: true });
+    fs.symlinkSync(path.join(elsewhere, 'target'), path.join(w.fsB, 'etc/environment'));
+    fs.symlinkSync(elsewhere, path.join(w.fsB, 'etc/profile.d'));
+    fs.writeFileSync(path.join(w.fsB, 'etc/hosts'), 'KEEP=1\nHTTP_PROXY=http://127.0.0.1:3128\n');
+    expect(finishWith(w, manifest).stdout).toMatch(/finished=1/);
+    expect(fs.readFileSync(path.join(elsewhere, 'target'), 'utf8')).toBe(line);
+    expect(fs.readFileSync(path.join(elsewhere, 'proxy.sh'), 'utf8')).toBe(line);
+    expect(fs.lstatSync(path.join(w.fsB, 'etc/environment')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(w.fsB, 'etc/hosts'), 'utf8')).toBe('KEEP=1\n');
+  });
+
+  it('a pipe where a file of the list belongs does not hold the restore: it is refused, not waited on', () => {
+    const w = world();
+    const manifest = packed(w);
+    fs.rmSync(path.join(w.outside, 'etc/app.conf'));
+    spawnSync('mkfifo', [path.join(w.outside, 'etc/app.conf')]);
+    const done = finishWith(w, manifest);
+    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
+  });
+
+  it('the agent swaps the copy folder for a link right after the script made it: it is never followed, nothing is written through the link, and the computer is blocked (outside_link)', () => {
+    const w = world();
+    const victim = path.join(path.dirname(path.dirname(w.home)), `victim-race2-${counter}`);
+    fs.mkdirSync(victim, { recursive: true });
+    const done = patched(w, w.fsA, 'prepack', [
+      'real_mkdir = os.mkdir',
+      'def swapped(target, *args, **kwargs):',
+      '    real_mkdir(target, *args, **kwargs)',
+      '    if target == "outside" and kwargs.get("dir_fd") is not None:',
+      '        os.rmdir(target, dir_fd=kwargs["dir_fd"])',
+      `        os.symlink(${JSON.stringify(victim)}, target, dir_fd=kwargs["dir_fd"])`,
+      'os.mkdir = swapped',
+    ].join('\n'));
+    expect(printed(done.stdout)).toMatchObject({ blocked: 'outside_link' });
+    expect(fs.readdirSync(victim)).toEqual([]);
+  });
+
+  it('the agent swaps the copy folder for a link right after the script opened it: root writes only into the folder it holds open, never through the link (the swap is made at that exact moment, every time)', () => {
+    const w = world();
+    const victim = path.join(path.dirname(path.dirname(w.home)), `victim-race3-${counter}`);
+    fs.mkdirSync(victim, { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'var/www/evil'), '* * * * * root id\n');
+    const done = patched(w, w.fsA, 'prepack', [
+      'real_open = os.open',
+      'swapped = []',
+      'def opened(target, *args, **kwargs):',
+      '    fd = real_open(target, *args, **kwargs)',
+      '    if target == "outside" and kwargs.get("dir_fd") is not None and not swapped:',
+      '        swapped.append(1)',
+      '        os.rename("outside", "outside.x", src_dir_fd=kwargs["dir_fd"], dst_dir_fd=kwargs["dir_fd"])',
+      `        os.symlink(${JSON.stringify(victim)}, "outside", dir_fd=kwargs["dir_fd"])`,
+      '    return fd',
+      'os.open = opened',
+    ].join('\n'));
+    expect(fs.lstatSync(w.outside).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(victim)).toEqual([]);
+    expect(printed(done.stdout).blocked).toBeNull();
+    expect(fs.readFileSync(path.join(w.state, 'outside.x/var/www/evil'), 'utf8')).toBe('* * * * * root id\n');
   });
 });
