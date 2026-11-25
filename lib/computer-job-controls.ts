@@ -34,7 +34,7 @@ import { dropProfile, parkProfile, settlePark, signInsKept } from '@/lib/compute
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
-import { claimCommand, claimCommandIn, commandRow, decidedOfCommand, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
+import { claimCommand, claimCommandIn, commandRow, decidedOfCommand, keepFinalOutcome, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). `started`: a Cancel that carried `expected: 'not_started'` found the job started since the person was asked: nothing was cancelled. `not_ended`: a Cancel's ending did not finish (the job is still live after its bounded tries): nothing is kept as done, the command stays pending, and the same command id asked again ends it (CodeRabbit on #1025, N11 of the d522f4b3 pass). */
 export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused' | 'not_ended' | 'started';
@@ -75,11 +75,25 @@ async function answerOf(botId: string, ownerId: string, seen: Exclude<Claimed, {
 /** What a refusal is kept as. */
 const refusalOutcome = (reason: ControlRefusal): StoredOutcome => ({ ok: false, reason });
 
-/** A refusal found before the control's transaction, kept under its command (when it has one) so the same command always answers the same; a copy that got there first answers instead. */
+/**
+ * A refusal found before the control's transaction, kept under its command (when it has one) so the same command always answers the same; a copy that got there first answers instead. When that copy claimed the command but has not
+ * answered yet, this one waits (as long as a Resume copy does) for the final answer and gives it; if none comes, it is refused as it saw the job when it looked, and nothing is stored: it never answers the computer view, which reads as done
+ * (CodeRabbit on #1038).
+ */
 async function refused(botId: string, ownerId: string, under: { command: Command; row: CommandRow } | null, reason: ControlRefusal, now: Date): Promise<Controlled> {
   if (!under) return { ok: false, reason };
   const claimed = await refuseUnder(under.command, under.row, reason);
-  return 'fresh' in claimed ? { ok: false, reason } : answerOf(botId, ownerId, claimed, now);
+  if ('fresh' in claimed) return { ok: false, reason };
+  if ('replay' in claimed && claimed.replay === null) {
+    const began = Date.now();
+    for (;;) {
+      const seen = await seenCommand(under.command, under.row);
+      if (seen && ('reused' in seen || seen.replay !== null)) return answerOf(botId, ownerId, seen, now);
+      if (Date.now() >= began + resumeWait.ms) return { ok: false, reason };
+      await new Promise((resolve) => setTimeout(resolve, resumeWait.stepMs));
+    }
+  }
+  return answerOf(botId, ownerId, claimed, now);
 }
 
 /** How long a copy of a Resume waits for the first request's own answer before it settles the command itself (the first request may have stopped after its commit). Exported for the tests. */
@@ -641,32 +655,36 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
     const job = await jobOnBrick(botId, jobId);
     if (!job || isOver(job.status)) break;
     // The person was told it had not started: a job that has started since (it was in line when they were asked) is never ended on that word, here or inside the ending's own write
-    if (expected === 'not_started' && !notStartedYet(job)) return startedSince(under);
+    if (expected === 'not_started' && !notStartedYet(job)) return startedSince(botId, ownerId, under, now);
     if (job.status === 'queued') {
       const report: { started?: boolean } = {};
       await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued', ...(expected === 'not_started' ? { notStarted: true } : {}), report });
-      if (report.started) return startedSince(under);
+      if (report.started) return startedSince(botId, ownerId, under, now);
     }
     // A job that holds the machine: an ending already committed for it (the runner's kept intent, a decided pool cutoff) governs instead of the person's stop, decided under the finalizer's own lock
     else await controlInternals.endByPerson(jobId, now, { advance: true, held: true });
   }
   const after = await jobOnBrick(botId, jobId);
   // The last look found a job that started since the person was told it had not (the tries ran out on it starting): that is the refusal, not an ending that did not finish
-  if (expected === 'not_started' && after && !isOver(after.status) && !notStartedYet(after)) return startedSince(under);
+  if (expected === 'not_started' && after && !isOver(after.status) && !notStartedYet(after)) return startedSince(botId, ownerId, under, now);
   // The parked browser is let go only once the job is over: a job that is still live (every ending lost its race) stays resumable with its saved sign-ins, and a retried Cancel drops it once the job is over (CodeRabbit on #1025, 14c4e407 pass, N8)
   if (after && after.pauses > 0 && isOver(after.status)) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // The answer is kept only once the job is over: an ending that lost its race on every try (a concurrent write moved the job each time) leaves the command pending, and a retry under the same id ends it again, instead of
   // answering the stored success forever while the job still holds the machine (CodeRabbit on #1025, 53)
-  if (under && (!after || isOver(after.status))) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });
+  // (kept only while nothing final is stored: a copy of this command that answered `started` first stays the answer, and is returned here too)
+  if (under && (!after || isOver(after.status))) {
+    const stored = await keepFinalOutcome(under.command, { ok: true, targets: [jobId] });
+    if (stored && !stored.ok) return { ok: false, reason: stored.reason as ControlRefusal };
+  }
   // A job that is still live is NOT told as cancelled: the person (or the Brick) would stop asking while it still holds the machine. The command stays pending and is asked again under the same id (CodeRabbit on #1025, N11)
   if (after && !isOver(after.status)) return { ok: false, reason: 'not_ended' };
   return viewOf(botId, ownerId, now);
 }
 
-/** A Cancel that was told "not started" found the job started: nothing was ended. The refusal is kept under its command (taken first, so a retry of the same id answers the same). */
-async function startedSince(under: { command: Command; row: CommandRow } | null): Promise<Controlled> {
-  if (under) await keepOutcome(prisma, under.command, refusalOutcome('started'));
-  return { ok: false, reason: 'started' };
+/** A Cancel that was told "not started" found the job started: nothing was ended. The refusal is kept under its command, once, so a retry of the same id answers the same; a copy of the command that already stored its own final answer stays the answer. */
+async function startedSince(botId: string, ownerId: string, under: { command: Command; row: CommandRow } | null, now: Date): Promise<Controlled> {
+  const stored = under ? await keepFinalOutcome(under.command, refusalOutcome('started')) : null;
+  return stored ? answerOf(botId, ownerId, { replay: stored, targets: null }, now) : { ok: false, reason: 'started' };
 }
 
 /** A claim in a transaction of its own, as a seen command (or null when it is this request's). */

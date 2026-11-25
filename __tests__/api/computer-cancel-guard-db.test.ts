@@ -15,6 +15,11 @@ jest.mock('@/lib/computer-browser-profile', () => {
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
 });
 
+jest.mock('@/lib/computer-commands', () => {
+  const actual = jest.requireActual('@/lib/computer-commands');
+  return { ...actual, seenCommand: jest.fn((...args: unknown[]) => actual.seenCommand(...args)) };
+});
+
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
@@ -22,7 +27,8 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { machineDoesSignIns } from '../helpers/working-signins';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { controlInternals, giveComputer, notStartedYet, startJob } from '@/lib/computer';
-import { cancelJob, pauseJob } from '@/lib/computer-job-controls';
+import { cancelJob, moveJobFirst, pauseJob, resumeWait } from '@/lib/computer-job-controls';
+import * as commands from '@/lib/computer-commands';
 import { getSessionUser } from '@/lib/auth-session';
 import { POST as CONTROL } from '@/app/api/bots/[id]/computer-jobs/control/route';
 import { POST as PANEL } from '@/app/api/bricks/[id]/computer/jobs/[jobId]/cancel/route';
@@ -96,6 +102,8 @@ run('cancel guard: a Cancel told "not started" never ends a job that started, in
     process.env.COMPUTER_PROVIDER = 'fake';
   });
   beforeEach(async () => {
+    // (jest.restoreAllMocks in the cases below wipes the passthrough, so it is set again before every case)
+    jest.mocked(commands.seenCommand).mockImplementation((...args) => jest.requireActual('@/lib/computer-commands').seenCommand(...args));
     await wipe();
     await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
@@ -215,6 +223,99 @@ run('cancel guard: a Cancel told "not started" never ends a job that started, in
       const { sara, b } = await lineOf2('g-over');
       await cancelJob(sara.brickId, sara.id, b, minutes(2));
       expect(await cancelJob(sara.brickId, sara.id, b, minutes(3), undefined, 'not_started')).toEqual({ ok: false, reason: 'over' });
+    });
+  });
+
+  describe('two copies of one command (CodeRabbit on #1038)', () => {
+    const PENDING = (jobId: string) => ({ ok: true as const, pending: true as const, targets: [jobId] });
+    const rowOf = (sara: Person, jobId: string, expected?: 'not_started') => commands.commandRow(sara.brickId, sara.id, jobId, 'cancel', expected ? { expected } : {}, 0);
+    const storedOf = async (jobId: string) => (await commandsOf(jobId))[0]?.outcome;
+
+    it('keepFinalOutcome: a pending outcome becomes final once; the first final outcome stays and the loser is told what is stored', async () => {
+      const { sara, a } = await lineOf2('k-final');
+      const command = { id: randomUUID() };
+      await commands.claimCommand(command, rowOf(sara, a), PENDING(a));
+      expect(await commands.keepFinalOutcome(command, { ok: false, reason: 'started' })).toBeNull();
+      expect(await commands.keepFinalOutcome(command, { ok: true, targets: [a] })).toEqual({ ok: false, reason: 'started' });
+      expect(await storedOf(a)).toEqual({ ok: false, reason: 'started' });
+    });
+
+    it('finding 2, the success lands second: a cancel that ends the job after another copy kept `started` answers `started`, and a retry still does', async () => {
+      const { sara, b } = await lineOf2('k-success-second');
+      const command = { id: randomUUID() };
+      inTheGap(async () => {
+        // the other copy kept its final answer while this one was between its claim and its ending
+        expect(await commands.keepFinalOutcome(command, { ok: false, reason: 'started' })).toBeNull();
+      });
+      expect(await cancelJob(sara.brickId, sara.id, b, minutes(3), command, 'not_started')).toEqual({ ok: false, reason: 'started' });
+      jest.restoreAllMocks();
+      expect(await storedOf(b)).toEqual({ ok: false, reason: 'started' });
+      expect(await cancelJob(sara.brickId, sara.id, b, minutes(4), command, 'not_started')).toEqual({ ok: false, reason: 'started' });
+    });
+
+    it('finding 2, the refusal lands second: a copy that finds the job started after another copy kept its success answers that success, and the stored success stays', async () => {
+      const { sara, a, b } = await lineOf2('k-refusal-second');
+      const command = { id: randomUUID() };
+      inTheGap(async () => {
+        await cancelJob(sara.brickId, sara.id, a, minutes(3));
+        expect(await commands.keepFinalOutcome(command, { ok: true, targets: [b] })).toBeNull();
+      });
+      expect(await cancelJob(sara.brickId, sara.id, b, minutes(4), command, 'not_started')).toMatchObject({ ok: true });
+      expect(await storedOf(b)).toEqual({ ok: true, targets: [b] });
+    });
+
+    it('finding 1, started: a duplicate that lost the claim to a copy that has not answered is refused `started` (after waiting for it), not answered with the computer', async () => {
+      const { sara, a } = await lineOf2('d-started');
+      const command = { id: randomUUID() };
+      await commands.claimCommand(command, rowOf(sara, a, 'not_started'), PENDING(a));
+      // this copy looked (and found nothing stored) before the other copy claimed
+      jest.mocked(commands.seenCommand).mockResolvedValueOnce(null);
+      const wait = resumeWait.ms;
+      resumeWait.ms = 300;
+      try {
+        expect(await cancelJob(sara.brickId, sara.id, a, minutes(3), command, 'not_started')).toEqual({ ok: false, reason: 'started' });
+      } finally {
+        resumeWait.ms = wait;
+      }
+      expect(await jobOf(a)).toMatchObject({ status: 'running', endedBy: null });
+      // nothing was stored by this copy: the other copy's mark is still pending
+      expect(await storedOf(a)).toMatchObject({ pending: true });
+    });
+
+    it('finding 1, over: the same for a job that already ended', async () => {
+      const { sara, b } = await lineOf2('d-over');
+      await cancelJob(sara.brickId, sara.id, b, minutes(2));
+      const command = { id: randomUUID() };
+      await commands.claimCommand(command, rowOf(sara, b), PENDING(b));
+      jest.mocked(commands.seenCommand).mockResolvedValueOnce(null);
+      const wait = resumeWait.ms;
+      resumeWait.ms = 300;
+      try {
+        expect(await cancelJob(sara.brickId, sara.id, b, minutes(3), command)).toEqual({ ok: false, reason: 'over' });
+      } finally {
+        resumeWait.ms = wait;
+      }
+    });
+
+    it('finding 1, the copy answers what the other copy finally stored (it waits for it)', async () => {
+      const { sara, a } = await lineOf2('d-waits');
+      const command = { id: randomUUID() };
+      await commands.claimCommand(command, rowOf(sara, a, 'not_started'), PENDING(a));
+      jest.mocked(commands.seenCommand).mockResolvedValueOnce(null);
+      setTimeout(() => void commands.keepFinalOutcome(command, { ok: true, targets: [a] }), 250);
+      expect(await cancelJob(sara.brickId, sara.id, a, minutes(3), command, 'not_started')).toMatchObject({ ok: true });
+    });
+
+    it('a control whose row is claimed with NO outcome yet (pause, do this first) still keeps its outcome: the shared keepOutcome is unchanged', async () => {
+      const one = await lineOf2('d-null-pause');
+      const pauseCommand = { id: randomUUID() };
+      expect(await pauseJob(one.sara.brickId, one.sara.id, one.a, minutes(3), pauseCommand)).toMatchObject({ ok: true });
+      expect(await pauseJob(one.sara.brickId, one.sara.id, one.a, minutes(4), pauseCommand)).toMatchObject({ ok: true });
+      expect((await storedOf(one.a)) ?? null).not.toBeNull();
+      const two = await lineOf2('d-null-first');
+      const firstCommand = { id: randomUUID() };
+      expect(await moveJobFirst(two.sara.brickId, two.sara.id, two.b, { pauseRunning: true }, minutes(5), firstCommand)).toMatchObject({ ok: true });
+      expect((await storedOf(two.b)) ?? null).not.toBeNull();
     });
   });
 
