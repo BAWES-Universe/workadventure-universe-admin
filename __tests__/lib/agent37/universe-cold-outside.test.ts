@@ -900,7 +900,7 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     const manifest = packed(w);
     fs.rmSync(path.join(w.outside, 'etc/app.conf'));
     spawnSync('mkfifo', [path.join(w.outside, 'etc/app.conf')]);
-    const done = finishWith(w, manifest);
+    const done = cold(w, 'finish', w.fsB, JSON.stringify({ outside: manifest }));
     expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
   });
 
