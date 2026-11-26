@@ -70,6 +70,12 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       if (!found) throw new Agent37Error(404, 'not_found', 'gone');
       return found;
     },
+    async getInstanceOnce(id: string, timeoutMs: number) {
+      calls.push(`getOnce:${id}:${timeoutMs}`);
+      const found = instances.get(id);
+      if (!found) throw new Agent37Error(404, 'not_found', 'gone');
+      return found;
+    },
     async startInstance(id: string) {
       calls.push(`start:${id}`);
       instances.get(id)!.status = 'running';
@@ -415,6 +421,62 @@ describe('the Agent37 provider', () => {
     expect(await p.awake('m1')).toBe(false);
     await p.remove('m1');
     expect(await p.awake('m1')).toBe(false);
+  });
+
+  describe('the look says only what its status says (Sentry on a4ed472c: an odd status is never taken for asleep)', () => {
+    const withStatus = async (status: string) => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.status = status as Instance['status'];
+      return p;
+    };
+
+    it.each(['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'])('%s is awake, in both looks', async (status) => {
+      const p = await withStatus(status);
+      expect(await p.awake('m1')).toBe(true);
+      expect(await p.awakeOnce('m1', 3_000)).toBe(true);
+    });
+
+    it.each(['stopped', 'sleeping', 'stopping', 'deleting', 'deleted', 'failed'])('%s is not running, in both looks', async (status) => {
+      const p = await withStatus(status);
+      expect(await p.awake('m1')).toBe(false);
+      expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+    });
+
+    it.each(['hibernating', 'migrating', ''])('the status "%s" is not known: both looks throw instead of saying asleep, so nothing is paused, no proof moves and no stop is proved', async (status) => {
+      const p = await withStatus(status);
+      await expect(p.awake('m1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(p.awakeOnce('m1', 3_000)).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('a status that is not documented is told to Sentry with the word, and a documented one is not', async () => {
+      const said = Sentry.captureMessage as jest.Mock;
+      said.mockClear();
+      try {
+        await expect((await withStatus('hibernating')).awake('m1')).rejects.toBeInstanceOf(Agent37Unreached);
+        expect(said).toHaveBeenCalledTimes(1);
+        expect(said).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ level: 'warning', extra: { status: 'hibernating' } }));
+        said.mockClear();
+        for (const status of ['running', 'stopping', 'sleeping', 'stopped', 'failed']) await (await withStatus(status)).awake('m1');
+        expect(said).not.toHaveBeenCalled();
+      } finally {
+        said.mockClear();
+      }
+    });
+  });
+
+  it('the quick look reads the same, from one request with the caller’s timeout', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.calls.length = 0;
+    expect(await p.awakeOnce('m1', 3_000)).toBe(true);
+    await p.rest('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+    expect(w.calls.filter((call) => call.startsWith('getOnce:'))).toEqual(['getOnce:m1:3000', 'getOnce:m1:3000']);
+    await p.remove('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
   });
 
   it('looking never wakes: a machine that is not running has no screen and no signed link is asked for', async () => {

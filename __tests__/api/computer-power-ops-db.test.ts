@@ -1,0 +1,818 @@
+/**
+ * Post-0.5.0 patch 2, B (GPT's eighth note): a provider stop already in flight must never leave a replacement billed on a machine that the stop then puts to sleep. Agent37 has no operation id, so the fence is Orbit's own, in
+ * two layers, each tested here against a real database and the pretend provider made to hold a stop the way a slow provider does:
+ *  1. serial power operations per machine: every stop or sleep is recorded before it is sent, and a wake takes its ticket only when none of the machine's can still land (a dead sender's stop counts for a bounded life);
+ *  2. billing only on a machine proved awake: a renewal reads the machine, and one found asleep ends the stretch at the last proof, prices only the proved seconds and sends the job back in line.
+ * Every test here fails on e12af5b7 (the certified chain before this patch).
+ * Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
+ *
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-power-ops-db.test.ts --runInBand
+ */
+import { randomUUID } from 'node:crypto';
+
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
+jest.mock('@/lib/computer-browser-profile', () => {
+  const actual = jest.requireActual('@/lib/computer-browser-profile');
+  return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
+});
+
+import { prisma } from '@/lib/db';
+import { seedGiveBackLimits } from '../helpers/give-back-limits';
+import { createBrick } from '@/lib/brick-create';
+import { saveMeterSettings } from '@/lib/meter';
+import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { moveJobFirst } from '@/lib/computer-job-controls';
+import { controlInternals } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
+import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
+import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
+import { costOfSeconds } from '@/lib/computer-values';
+
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+const tag = randomUUID().slice(0, 8);
+const NOW = new Date();
+const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+const people: string[] = [];
+let made = 0;
+const env = process.env.COMPUTER_PROVIDER;
+
+/** The pretend provider, able to hold a stop after it was sent (the provider got it and acts on it only when released), the way a slow Agent37 stop lands after its claim. */
+class HeldStops extends FakeComputerProvider {
+  /** How many of the next stop calls are held. */
+  holdNext = 0;
+  readonly held: Array<() => void> = [];
+  /** How many of the next sleep calls are held. */
+  holdRest = 0;
+  async rest(ref: string): Promise<void> {
+    if (this.holdRest > 0) {
+      this.holdRest--;
+      await new Promise<void>((resolve) => this.held.push(resolve));
+    }
+    return super.rest(ref);
+  }
+  async stop(ref: string): Promise<void> {
+    if (this.holdNext > 0) {
+      this.holdNext--;
+      await new Promise<void>((resolve) => this.held.push(resolve));
+    }
+    return super.stop(ref);
+  }
+}
+let fake: HeldStops;
+
+type Owner = { id: string; brickId: string; ref: string };
+async function owner(name: string): Promise<Owner> {
+  const unique = `${name}-${tag}-${++made}`;
+  const user = await prisma.user.create({ data: { uuid: unique, email: `${unique}@example.test`, name } });
+  people.push(user.id);
+  const brick = await createBrick({ ownerId: user.id, name: `${name}'s Brick` });
+  await giveComputer(brick.id, user.id);
+  return { id: user.id, brickId: brick.id, ref: `fake-${brick.id}` };
+}
+
+const setUp = () => saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+
+const wipe = async () => {
+  await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+  await prisma.computerRefundObligation.deleteMany({});
+  await prisma.meterEvent.deleteMany({});
+  await prisma.meterReservation.deleteMany({});
+  await prisma.$executeRawUnsafe('DELETE FROM credit_holds');
+  await prisma.$executeRawUnsafe('DELETE FROM computer_power_ops');
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+};
+
+const until = async (what: () => Promise<boolean> | boolean, ms = 5_000) => {
+  const end = Date.now() + ms;
+  while (!(await what())) {
+    if (Date.now() > end) throw new Error('waited too long');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const machineOf = async (sara: Owner) => prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+const callNames = () => fake.calls.map((call) => call.name).filter((name) => name === 'stop' || name === 'wake');
+
+run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a machine it then puts to sleep', () => {
+  beforeAll(() => {
+    process.env.COMPUTER_PROVIDER = 'fake';
+  });
+  beforeEach(async () => {
+    await wipe();
+    await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
+    await seedGiveBackLimits();
+    fake = new HeldStops();
+    setComputerProviderForTests(fake);
+    setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 8_000, pollMs: 20 });
+    await setUp();
+  });
+  afterEach(() => {
+    for (const release of fake.held.splice(0)) release();
+    setPowerTimingForTests(null);
+  });
+  afterAll(async () => {
+    await wipe();
+    setComputerProviderForTests(null);
+    process.env.COMPUTER_PROVIDER = env;
+    await prisma.user.deleteMany({ where: { id: { in: people } } });
+    await prisma.$disconnect();
+  });
+
+  it('the bounded life of a dead sender is the client’s longest call plus the margin, on top of the beat it missed', () => {
+    setPowerTimingForTests(null);
+    expect(LONGEST_ACCOUNT_CALL_MS).toBe(4 * 30_000 + 1_000 + 3_000 + 8_000);
+    // a stop or a sleep makes two calls in a row (it looks the machine up, then sends), so a sender whose beats fail can still POST after both
+    expect(powerTiming().deadLifeMs).toBe(powerTiming().staleMs + 2 * LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS);
+  });
+
+  describe('layer 1: serial power operations', () => {
+    it('(a) GPT’s trace: a claimed stop is held, the sweep’s stop proves the machine asleep, a replacement asks to wake: it waits for the held stop to return, then wakes, and ends awake with nothing billed before readiness', async () => {
+      const sara = await owner('held');
+      // A's start: the machine wakes and is not ready, so A's own (claimed) stop is sent, and the provider holds it
+      fake.failNext.ready = true;
+      fake.holdNext = 1;
+      const a = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      await until(() => fake.held.length === 1);
+      expect((await machineOf(sara)).machine).toBe('stopping');
+      // The sweep issues another stop and sees the machine asleep
+      await sweepComputers(NOW);
+      expect((await machineOf(sara)).machine).toBe('stopped');
+      expect(await fake.awake(sara.ref)).toBe(false);
+      // B, the replacement, asks to wake it: it does not while A's stop can still land
+      const bWall = Date.now();
+      const b = startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      await sleep(400);
+      expect(callNames()).toEqual(['wake', 'stop']);
+      expect((await machineOf(sara)).machine).toBe('stopped');
+      // A's stop lands now
+      const landedWall = Date.now();
+      fake.held.splice(0).forEach((release) => release());
+      const [startedA, startedB] = await Promise.all([a, b]);
+      expect(startedA).toEqual({ ok: false, reason: 'broken_start' });
+      expect(startedB).toMatchObject({ ok: true, job: { status: 'running' } });
+      // A's stop landed before B's wake: the machine is awake under B, and Orbit says so
+      expect(callNames()).toEqual(['wake', 'stop', 'stop', 'wake']);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('working');
+      // B's billing began only at its own readiness, after A's stop landed: nothing before it is billable
+      const jobB = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } });
+      expect(jobB.stretchStarted).not.toBeNull();
+      expect(jobB.stretchStarted!.getTime() - NOW.getTime()).toBeGreaterThanOrEqual(landedWall - bWall - 5);
+      expect(jobB.secondsRun).toBe(0);
+      // Every operation is closed
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+    });
+
+    it('a replacement that finds the machine `stopping` proves it asleep itself, then waits for the held stop and wakes (it no longer fails on its own stale read)', async () => {
+      const sara = await owner('stale');
+      fake.failNext.ready = true;
+      fake.holdNext = 1;
+      const a = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      await until(() => fake.held.length === 1);
+      const b = startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      await until(async () => (await machineOf(sara)).machine === 'stopped');
+      await sleep(300);
+      expect(callNames()).toEqual(['wake', 'stop']);
+      fake.held.splice(0).forEach((release) => release());
+      const [, startedB] = await Promise.all([a, b]);
+      expect(startedB).toMatchObject({ ok: true, job: { status: 'running' } });
+      expect(callNames()).toEqual(['wake', 'stop', 'stop', 'wake']);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('working');
+    });
+
+    it('(a, other order) a stop that returned before the replacement asked: the replacement wakes at once', async () => {
+      const sara = await owner('returned');
+      fake.failNext.ready = true;
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+      const began = Date.now();
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW)).toMatchObject({ ok: true, job: { status: 'running' } });
+      expect(Date.now() - began).toBeLessThan(2_000);
+      expect(await fake.awake(sara.ref)).toBe(true);
+    });
+
+    it('the ticket and the record exclude each other: a recorded stop refuses the ticket; a ticket taken first makes a claimed stop send nothing', async () => {
+      const sara = await owner('order');
+      // The machine exists and is stopped
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const seen = await machineOf(sara);
+      // Stop first: the ticket is refused while it is open, and taken once it is done
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      const refused = await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped', { epoch: seen.wakeEpoch });
+      expect(refused).toMatchObject({ open: { id: op, kind: 'stop', live: true } });
+      expect((await machineOf(sara)).wakeEpoch).toBe(seen.wakeEpoch);
+      await endPowerOp(op);
+      expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped', { epoch: seen.wakeEpoch })).toBe(seen.wakeEpoch + 1);
+      // Ticket first: the sweep's stop of a machine it saw `stopping` claims nothing now (the machine is `waking`), so no stop is sent and no operation is recorded
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      await sweepComputers(NOW);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM computer_power_ops WHERE provider_ref = ${sara.ref} AND done_at IS NULL`).toEqual([{ n: BigInt(0) }]);
+    });
+
+    it('a start, a claimed stop and a recorded stop that arrive while a leader\'s stop holds the computer\'s row wait for it (longer than Prisma\'s own 5 s), and are not taken for failures', async () => {
+      const sara = await owner('lockwait');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const seen = await machineOf(sara);
+      // Another connection holds the row for longer than the default transaction time, as a leader's stop does while the provider answers
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      await lockTaken;
+      setTimeout(() => release(), 6_500);
+      const began = Date.now();
+      const ticket = await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped', { epoch: seen.wakeEpoch });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(6_000);
+      expect(ticket).toBe(seen.wakeEpoch + 1);
+      await holder;
+    }, 40_000);
+
+    it('a start whose claim takes the computer\'s row waits for a leader\'s stop that holds it longer than 15 s, then claims (it no longer gives up with a timeout)', async () => {
+      const sara = await owner('claimwait');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
+      setRowLockWaitForTests(20_000);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 60_000 },
+      );
+      try {
+        await lockTaken;
+        setTimeout(() => release(), 17_000);
+        const began = Date.now();
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        expect(Date.now() - began).toBeGreaterThanOrEqual(16_000);
+        expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
+      } finally {
+        release();
+        await holder;
+        setRowLockWaitForTests(null);
+      }
+    }, 80_000);
+
+    it('a start waiting for the computer\'s row behind a leader\'s stop does not hold the line lock: a "do this first" request meanwhile is answered, and the start still goes on once the stop lets go', async () => {
+      const sara = await owner('lineheld');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no jobs');
+      setRowLockWaitForTests(20_000);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 60_000 },
+      );
+      try {
+        await lockTaken;
+        // A third start reaches the machine's claim and waits for the row behind the holder
+        const third = startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW);
+        await sleep(1_500);
+        setTimeout(() => release(), 17_000);
+        const asked = Date.now();
+        // The start's wait for the row must not hold the line: this is answered at once, not after the 15 s a "do this first" transaction lasts
+        const first = await moveJobFirst(sara.brickId, sara.id, b.job.id, {}, NOW);
+        expect(first).toEqual(expect.objectContaining({}));
+        expect(Date.now() - asked).toBeLessThan(2_000);
+        expect(await third).toMatchObject({ ok: true });
+      } finally {
+        release();
+        await holder;
+        setRowLockWaitForTests(null);
+      }
+    }, 80_000);
+
+    it('a start and a "do this first" that pauses the running job, both blocked on the computer\'s row, never deadlock: both settle, and no deadlock or expired transaction is logged', async () => {
+      const sara = await owner('nodeadlock');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: true }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no jobs');
+      expect(b.job.status).toBe('queued');
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      try {
+        await lockTaken;
+        setTimeout(() => release(), 3_000);
+        const [third, first] = await Promise.all([
+          startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW),
+          moveJobFirst(sara.brickId, sara.id, b.job.id, { pauseRunning: true }, NOW),
+        ]);
+        expect(third).toMatchObject({ ok: true });
+        expect(first).toMatchObject({ ok: true });
+        expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /40P01|deadlock|expired transaction|P2028/i.test(line))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+        release();
+        await holder;
+      }
+    }, 60_000);
+
+    it('an operation recorded by a transaction that waited for the computer\'s row is stamped when it was written, not when the transaction began: it is born live', async () => {
+      const sara = await owner('born');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      await lockTaken;
+      setTimeout(() => release(), 2_000);
+      const began = Date.now();
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      await holder;
+      const [row] = await prisma.$queryRaw<Array<{ sent: Date; beat: Date }>>`SELECT "sent_at" AS sent, "beat_at" AS beat FROM "computer_power_ops" WHERE "id" = ${op}`;
+      // Written after the wait (about 2 s in), never at the transaction's start
+      expect(row.sent.getTime()).toBeGreaterThanOrEqual(began + 1_800);
+      expect(row.beat.getTime()).toBeGreaterThanOrEqual(row.sent.getTime());
+      expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'stop', live: true });
+    }, 40_000);
+
+    describe('a rest of ours that threw can still land: nothing is started under it', () => {
+      async function idleAfterJob(sara: Owner) {
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      }
+
+      it('the rest throws: the row stays `resting`; a start inside the margin waits for the operation, wakes the machine only after it is done, and runs on an awake machine', async () => {
+        const sara = await owner('rest-threw');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 3_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        const rest = jest.spyOn(fake, 'rest').mockRejectedValueOnce(new Error('the request timed out'));
+        expect(await controlInternals.restIfUnheld(sara.brickId, NOW)).toBe(false);
+        rest.mockRestore();
+        expect(await machineOf(sara)).toMatchObject({ machine: 'resting' });
+        expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'rest', live: true });
+        // The wake is sent only once nothing of ours can land
+        const openAtWake: Array<boolean> = [];
+        const original = fake.wake.bind(fake);
+        const wake = jest.spyOn(fake, 'wake').mockImplementation(async (ref: string) => {
+          openAtWake.push((await openPowerOpOf(prisma, ref)) !== null);
+          return original(ref);
+        });
+        try {
+          const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+          expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
+        } finally {
+          wake.mockRestore();
+        }
+        expect(openAtWake).toEqual([false]);
+        expect(await fake.awake(sara.ref)).toBe(true);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+      });
+
+      it('guard: a `working` row with a dead sender\'s operation still inside its life: the start goes back in line holding nothing, and nothing is woken', async () => {
+        const sara = await owner('working-open');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 3_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        await recordPowerOp(sara.brickId, sara.ref, 'stop');
+        await sleep(powerTiming().staleMs + 100);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+        const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        expect(started).toMatchObject({ ok: true, job: { status: 'queued', queuedFor: 'busy' } });
+        const jobB = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } });
+        expect(jobB).toMatchObject({ status: 'queued', reservationKey: null, stretchStarted: null, startedAt: null });
+        expect(await prisma.meterReservation.count({ where: { jobId: jobB.id, state: 'held' } })).toBe(0);
+        expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+      });
+
+      it('the stuck-rest sweep keeps a 6-minute-old claim while a sleep of ours can still land (a dead sender\'s inside its life), and lets it go once that life is past', async () => {
+        const sara = await owner('stuck-rest');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 400, deadLifeMs: 2_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        const claimedAt = new Date(NOW.getTime() - 6 * 60_000);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: claimedAt } });
+        await recordPowerOp(sara.brickId, sara.ref, 'rest');
+        await sleep(powerTiming().staleMs + 100);
+        await sweepComputers(NOW);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'resting', restClaimedAt: claimedAt });
+        await sleep(powerTiming().deadLifeMs);
+        await sweepComputers(NOW);
+        const after = await machineOf(sara);
+        // Let go (back to `working`, and possibly rested again by the same sweep under a newer claim): never the old claim
+        expect(after.restClaimedAt?.getTime() ?? null).not.toBe(claimedAt.getTime());
+      });
+    });
+
+    it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
+      const sara = await owner('holdclaim');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      // The machine is awake with a hold; before the hold's stop is claimed, a replacement's wake took its ticket (the machine is `waking`)
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect((await machineOf(sara)).machine).toBe('waking');
+    });
+
+    it('a stop that threw may still land: its operation stays open (beating) for the provider\'s margin after the call returned, then closes by itself, and nothing waits for it', async () => {
+      const sara = await owner('threw');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 8_000, pollMs: 20, marginMs: 700 });
+      const stop = jest.spyOn(fake, 'stop').mockRejectedValue(new Error('the request timed out'));
+      try {
+        const began = Date.now();
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        // The request path came back at once, with the operation still open and live
+        expect(Date.now() - began).toBeLessThan(500);
+        expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'stop', live: true });
+        await until(async () => (await openPowerOpOf(prisma, sara.ref)) === null, 4_000);
+        expect(Date.now() - began).toBeGreaterThanOrEqual(650);
+      } finally {
+        stop.mockRestore();
+      }
+    });
+
+    it('a stop that returned is closed at once, as before', async () => {
+      const sara = await owner('returned');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 8_000, pollMs: 20, marginMs: 5_000 });
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+    });
+
+    it.each(['resting', 'broken'] as const)('a turn hold on a machine that is `%s` is stopped and lifted, never left to hold every start in line for ever', async (state) => {
+      const sara = await owner(`hold-${state}`);
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state, turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+    });
+
+    it('a turn hold on a machine that is restoring (a park\'s wake has no job) is left alone: nothing is stopped under it', async () => {
+      const sara = await owner('hold-restoring');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'restoring' });
+    });
+
+    it('(b) a stop whose sender died counts as in flight for its bounded life: the replacement goes back in line holding nothing, and wakes only after that life', async () => {
+      const sara = await owner('dead');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await fake.stop(sara.ref);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      // A sender recorded its stop and died: no beat, never done
+      const recordedWall = Date.now();
+      await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      await sleep(powerTiming().staleMs + 100);
+      const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      expect(started).toMatchObject({ ok: true, job: { status: 'queued', queuedFor: 'busy' } });
+      const jobB = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } });
+      expect(jobB).toMatchObject({ status: 'queued', queuedFor: 'busy', reservationKey: null, stretchStarted: null, startedAt: null });
+      expect(await prisma.meterReservation.count({ where: { jobId: jobB.id, state: 'held' } })).toBe(0);
+      expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+      expect((await machineOf(sara)).machine).toBe('stopped');
+      // Within the life, the sweep's try leaves it in line
+      if (Date.now() - recordedWall < powerTiming().deadLifeMs - 300) {
+        await sweepComputers(at(60));
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobB.id } })).status).toBe('queued');
+        expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+      }
+      // After it, the next try wakes the machine
+      await sleep(Math.max(0, recordedWall + powerTiming().deadLifeMs + 200 - Date.now()));
+      await sweepComputers(at(120));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobB.id } })).status).toBe('running');
+      expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore + 1);
+      expect(await fake.awake(sara.ref)).toBe(true);
+    });
+
+    it('a live stop that outlasts the wait sends the replacement back in line holding nothing', async () => {
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 300, pollMs: 20 });
+      const sara = await owner('rest');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      // A live stop of ours (its sender beats) is open for longer than the start waits
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      const beat = setInterval(() => void prisma.$executeRaw`UPDATE computer_power_ops SET beat_at = (NOW() AT TIME ZONE 'UTC') WHERE id = ${op}`, 50);
+      try {
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW)).toMatchObject({ ok: true, job: { status: 'queued', queuedFor: 'busy' } });
+      } finally {
+        clearInterval(beat);
+      }
+      await endPowerOp(op);
+      await sweepComputers(at(60));
+      expect(await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } })).toMatchObject({ status: 'running' });
+    });
+  });
+
+  describe('layer 1: a sleep is a power operation too', () => {
+    it('a job ends and its machine’s sleep is held: a new job waits for the sleep to return before it wakes the machine, and ends on an awake machine', async () => {
+      const sara = await owner('sleep');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!started.ok) throw new Error('no job');
+      fake.holdRest = 1;
+      const finishing = finishJob(started.job.id, 'done', at(30));
+      await until(() => fake.held.length === 1);
+      expect((await machineOf(sara)).machine).toBe('resting');
+      const b = startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, at(31));
+      await sleep(400);
+      // The wake waits: the sleep of the job before can still land
+      expect(fake.calls.filter((call) => call.name === 'wake')).toHaveLength(1);
+      fake.held.splice(0).forEach((release) => release());
+      await finishing;
+      expect(await b).toMatchObject({ ok: true, job: { status: 'running' } });
+      const order = fake.calls.map((call) => call.name).filter((name) => name === 'rest' || name === 'wake');
+      expect(order.slice(0, 3)).toEqual(['wake', 'rest', 'wake']);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('working');
+    });
+  });
+
+  describe('layer 2: billing only on a machine proved awake', () => {
+    async function workingJob(sara: Owner) {
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Work' }, NOW);
+      if (!started.ok || started.job.status !== 'running') throw new Error(`no running job: ${JSON.stringify(started)}`);
+      return prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } });
+    }
+
+    it('(c) a late stop lands after readiness: the next renewal finds the machine asleep, ends the stretch at the last proof, bills exactly the proved seconds and sends the job back in line', async () => {
+      const sara = await owner('late');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      const room = job.reservationKey!;
+      // A renewal proves the machine awake 120 s into the stretch
+      const proof = new Date(began + 120_000);
+      expect(await renewJob(job.id, proof)).toMatchObject({ ok: true });
+      // The late stop lands: the provider says asleep, Orbit still says working
+      await fake.stop(sara.ref);
+      expect((await machineOf(sara)).machine).toBe('working');
+      // The next renewal, 300 s further on, finds it
+      const found = new Date(began + 420_000);
+      expect(await renewJob(job.id, found)).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+      expect(after).toMatchObject({ status: 'queued', queuedFor: 'turn', pauses: 1, secondsRun: 0, stretchStarted: null, reservationKey: null, secondsBilled: 120, pausedWhy: null });
+      const pause = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } });
+      expect(pause).toMatchObject({ why: 'machine', seconds: 120, roomKey: room });
+      // The room is settled at the proved seconds' price, the rest given back in the same commit, and the books carry exactly that
+      const price = costOfSeconds(120, fake.microsPerMinute())!;
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+      const booked = await prisma.meterEvent.findFirst({ where: { eventId: `computer:${job.id}:time:1` } });
+      expect(booked).toMatchObject({ quantity: BigInt(120), unit: 'second', costMicros: BigInt(price) });
+      // The machine is not used until a recorded stop proves it asleep; then the job carries on by itself, on a machine woken under the fence
+      expect((await machineOf(sara)).machine).toBe('stopping');
+      await sweepComputers(new Date(began + 480_000));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running' });
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('working');
+    });
+
+    it('a hand-over that carried the stretch past the proof gives that time back: only the proved seconds are priced', async () => {
+      const sara = await owner('handover');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      expect(await renewJob(job.id, new Date(began + 60_000))).toMatchObject({ ok: true });
+      await fake.stop(sara.ref);
+      // A hand-over after the stop landed counts the stretch on into seconds_run (180 s), and moves the stretch start
+      expect(await requestHandover(job.id, 'answer', new Date(began + 180_000))).not.toBeNull();
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'waiting', secondsRun: 180 });
+      expect(await renewJob(job.id, new Date(began + 300_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'queued', secondsBilled: 60 });
+      expect(await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } })).toMatchObject({ why: 'machine', seconds: 60 });
+    });
+
+    it('a look that does not answer extends the room but proves nothing: a machine then found asleep is billed only to the proof before', async () => {
+      const sara = await owner('unknown');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      expect(await renewJob(job.id, new Date(began + 30_000))).toMatchObject({ ok: true });
+      const look = jest.spyOn(fake, 'awake').mockRejectedValueOnce(new Error('the provider did not answer'));
+      expect(await renewJob(job.id, new Date(began + 90_000))).toMatchObject({ ok: true });
+      look.mockRestore();
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).awakeProvedAt).toEqual(new Date(began + 30_000));
+      await fake.stop(sara.ref);
+      expect(await renewJob(job.id, new Date(began + 150_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'queued', secondsBilled: 30 });
+    });
+
+    it('Opus fix 1: the person takes the screen while the machine is being read, and it reads asleep: their take-over stands, the renewal goes on as usual and proves nothing', async () => {
+      const sara = await owner('takeover');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      expect(await renewJob(job.id, new Date(began + 30_000))).toMatchObject({ ok: true });
+      await fake.stop(sara.ref);
+      const look = jest.spyOn(fake, 'awake').mockImplementationOnce(async () => {
+        // The take-over lands between the look and the pause
+        await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'waiting', control: 'person', leaseVersion: { increment: 1 } } });
+        return false;
+      });
+      try {
+        expect(await renewJob(job.id, new Date(began + 90_000))).toMatchObject({ ok: true });
+      } finally {
+        look.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'waiting', control: 'person', pauses: 0, awakeProvedAt: new Date(began + 30_000) });
+      expect(await prisma.computerJobPause.count({ where: { jobId: job.id } })).toBe(0);
+    });
+
+    it('Opus fix 2: a look that never answers is given up within a few seconds, well inside the runner’s 8 s, and proves nothing', async () => {
+      const sara = await owner('silent');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      const look = jest.spyOn(fake, 'awake').mockImplementationOnce(() => new Promise<boolean>(() => undefined));
+      const asked = Date.now();
+      try {
+        expect(await renewJob(job.id, new Date(began + 60_000))).toMatchObject({ ok: true });
+      } finally {
+        look.mockRestore();
+      }
+      expect(Date.now() - asked).toBeLessThan(5_000);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', awakeProvedAt: null });
+    });
+
+    describe('only the proved seconds are priced, at the rate as of the proof', () => {
+      /** A lease whose price rose after the proof: the rate doubles 180 s into the lease (the proof is 120 s in). */
+      async function priceRises(room: string) {
+        const lease = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room }, select: { terms: true } });
+        const first = (lease.terms as Array<{ at: number; micros: number; stretchMs: number }>)[0];
+        await prisma.meterReservation.update({ where: { reservationKey: room }, data: { terms: [first, { at: first.at + 180_000, micros: first.micros * 2, stretchMs: first.stretchMs }] } });
+        return costOfSeconds(120, (first.micros * 60_000) / first.stretchMs)!;
+      }
+
+      it('a machine found asleep at a renewal: the room is settled and the books are written at the rate before the rise, however late it was found', async () => {
+        const sara = await owner('priced-pause');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        expect(await renewJob(job.id, new Date(began + 360_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: `computer:${job.id}:time:1` } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } })).pricedUntil).toEqual(new Date(began + 120_000));
+      });
+
+      it('the same after a hand-over carried seconds into seconds_run: the proof is where the stretch began plus the proved seconds, not where this stretch started', async () => {
+        const sara = await owner('priced-handover');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'answer', new Date(began + 150_000))).not.toBeNull();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ secondsRun: 150 });
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        expect(await renewJob(job.id, new Date(began + 360_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: `computer:${job.id}:time:1` } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } })).pricedUntil).toEqual(new Date(began + 120_000));
+      });
+
+      it('an unanswered ending found asleep: the room, the books and the sweep that writes a missing line all price 120 s at the rate before the rise', async () => {
+        const sara = await owner('priced-ending');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        const endAt = new Date(began + 180_000 + 61 * 60_000);
+        await sweepComputers(endAt);
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        // The line never got written: the sweep writes it from the job, at the same price
+        await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: `computer:${job.id}:time` } } });
+        await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+      });
+
+      it('an unanswered ending found asleep whose room was never settled: the sweep that closes the lapsed room settles it at 120 s at the rate before the rise, as the books are', async () => {
+        const sara = await owner('priced-lapsed');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        const endAt = new Date(began + 180_000 + 61 * 60_000);
+        await sweepComputers(endAt);
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        // The ending's settlement did not get through: the room is still held and lapses; the books line is missing too
+        await prisma.meterReservation.update({ where: { reservationKey: job.reservationKey! }, data: { state: 'held', settledMicros: null, closedAt: null, expiresAt: new Date(endAt.getTime() - 60_000) } });
+        await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: `computer:${job.id}:time` } } });
+        await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+      });
+    });
+
+    describe('an unanswered ending reads the machine too', () => {
+      // A job that asked its person for details and was not answered: the hand-over (180 s in) counts the stretch on into seconds_run; the machine was proved awake 120 s in, then a late stop put it to sleep
+      async function waitingJob(sara: Owner) {
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'waiting', control: 'brick', secondsRun: 180 });
+        return { job, began };
+      }
+      const wait = 61 * 60_000;
+
+      it('(d) the machine went to sleep after its last proof and nobody renewed since: the sweep ends the job as unanswered and prices only the proved seconds', async () => {
+        const sara = await owner('unanswered-asleep');
+        const { job, began } = await waitingJob(sara);
+        await fake.stop(sara.ref);
+        expect((await machineOf(sara)).machine).toBe('working');
+        const room = (await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).reservationKey!;
+        await sweepComputers(new Date(began + 180_000 + wait));
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120 });
+        const price = costOfSeconds(120, fake.microsPerMinute())!;
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), unit: 'second', costMicros: BigInt(price) });
+      });
+
+      it('a machine still awake at the ending is priced to the ending, as before', async () => {
+        const sara = await owner('unanswered-awake');
+        const { job, began } = await waitingJob(sara);
+        await sweepComputers(new Date(began + 180_000 + wait));
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+        expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
+      });
+
+      it('a look that does not answer proves nothing: the ending is priced as before, and the job still ends', async () => {
+        const sara = await owner('unanswered-silent');
+        const { job, began } = await waitingJob(sara);
+        await fake.stop(sara.ref);
+        const look = jest.spyOn(fake, 'awake').mockRejectedValue(new Error('the provider did not answer'));
+        try {
+          await sweepComputers(new Date(began + 180_000 + wait));
+        } finally {
+          look.mockRestore();
+        }
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+        expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
+      });
+    });
+
+    it('a machine proved awake renews as before, and nothing is paused', async () => {
+      const sara = await owner('awake');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      expect(await renewJob(job.id, new Date(began + 60_000))).toMatchObject({ ok: true });
+      expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', pauses: 0, awakeProvedAt: new Date(began + 120_000) });
+      expect(await prisma.computerJobPause.count({ where: { jobId: job.id } })).toBe(0);
+    });
+  });
+});

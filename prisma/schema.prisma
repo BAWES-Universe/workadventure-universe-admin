@@ -3585,6 +3585,10 @@ model ComputerJob {
   // Seconds the machine was held for this job, and when the current stretch began, so cost is worked out from what ran
   secondsRun     Int       @default(0) @map("seconds_run")
   stretchStarted DateTime? @map("stretch_started")
+  /// Post-0.5.0 B: the last moment this job's machine was proved awake under its billed stretch (null = only the readiness that began it). A machine found asleep ends the stretch here.
+  awakeProvedAt  DateTime? @map("awake_proved_at")
+  /// Only the seconds a machine was proved awake were priced (found asleep at an ending): the moment of that proof. The time is priced over a window that ends here, not where it was found; null = priced to `ended_at`.
+  pricedUntil    DateTime? @map("priced_until")
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   endedAt        DateTime? @map("ended_at")
@@ -3758,6 +3762,8 @@ model ComputerJobPause {
   seconds   Int       @default(0)
   startedAt DateTime? @map("started_at")
   at        DateTime
+  /// A `machine` pause priced only the seconds the machine was proved awake: the moment of that proof. The room and the books price the time over a window that ends here, not at `at`; null = priced to `at`.
+  pricedUntil DateTime? @map("priced_until")
   bookedAt  DateTime? @map("booked_at")
   /// When the job ran again after this pause (its next start on the machine, however it was resumed); null while it has not.
   resumedAt DateTime? @map("resumed_at")
@@ -4218,6 +4224,20 @@ model ComputerJobCommand {
   @@index([jobId])
   @@index([botId, createdAt])
   @@map("computer_job_commands")
+}
+
+/// Post-0.5.0 B: a stop or sleep Orbit sent to a Brick's machine, written before the call. Open (no `done_at`, a recent beat) = it can still land; no wake of the same machine is admitted meanwhile.
+model ComputerPowerOp {
+  id          String    @id @default(uuid())
+  botId       String    @map("bot_id")
+  providerRef String    @map("provider_ref") @db.VarChar(255)
+  kind        String    @db.VarChar(10)
+  sentAt      DateTime  @map("sent_at")
+  beatAt      DateTime  @map("beat_at")
+  doneAt      DateTime? @map("done_at")
+
+  @@index([sentAt], map: "computer_power_ops_sent_idx")
+  @@map("computer_power_ops")
 }
 
 model ComputerStartAttempt {
