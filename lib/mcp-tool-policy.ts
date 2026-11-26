@@ -418,10 +418,12 @@ export async function setToolSetting(botId: string, serverId: string, toolId: st
     await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     if (kindOf(server) !== 'appActions') throw new BotSettingsError(409, 'Only an App’s actions take their own choice');
-    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { serverId: true, setting: true } });
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { serverId: true, setting: true, settingByPerson: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
-    if ((tool.setting ?? null) !== setting) {
-      await tx.botMcpTool.update({ where: { id: toolId }, data: { setting } });
+    // Marked as the person's, even when it is the choice Universe started the action on: from now on it is theirs and never moves
+    const byPerson = setting !== null;
+    if ((tool.setting ?? null) !== setting || tool.settingByPerson !== byPerson) {
+      await tx.botMcpTool.update({ where: { id: toolId }, data: { setting, settingByPerson: byPerson } });
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return describe(tx, serverId);

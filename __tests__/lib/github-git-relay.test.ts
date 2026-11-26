@@ -21,7 +21,7 @@ import { gzipSync } from 'zlib';
 import { gitHubTokenRefused } from '@/lib/github/connection';
 import { MAX_PUSH_BYTES, readCapped, readEncoding, readPushCommands, readRelayPath, refusedPush, relayGit } from '@/lib/github/git-relay';
 
-const PASS = { jobId: 'j', generation: 0, botId: 'b', connectionId: 'c', ownerId: 'o', readOnly: false };
+const PASS = { jobId: 'j', generation: 0, botId: 'b', connectionId: 'c', ownerId: 'o', readOnly: false, stops: { read: null, push: null, branch: null, pullRequest: null } };
 
 /** "github.com", played by git http-backend over a bare repository: answers what the relay sends it, and keeps what it was sent. */
 function pretendGitHub(root: string) {
