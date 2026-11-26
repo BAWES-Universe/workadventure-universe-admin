@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import type { Prisma } from '@prisma/client';
 
 const mockUser: { current: { id: string; email?: string | null } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
@@ -56,6 +57,15 @@ let omar = '';
 let boss = '';
 let saraBrick = '';
 const envBefore = { service: process.env.BOT_SERVICE_TOKEN, key: process.env.ENCRYPTION_KEY };
+// Settings shared with the rest of the database: put back as they were, never deleted whole
+// 'meter' is the key lib/meter.ts keeps its ceilings under
+const SHARED_SETTINGS = ['ready-made-apps', 'meter'];
+let settingsBefore: { key: string; value: Prisma.InputJsonValue; updatedById: string | null }[] = [];
+const restoreSettings = async (keys: readonly string[]) => {
+  await prisma.appSetting.deleteMany({ where: { key: { in: [...keys] } } });
+  const kept = settingsBefore.filter((row) => keys.includes(row.key));
+  if (kept.length > 0) await prisma.appSetting.createMany({ data: kept });
+};
 
 function fake(list: () => ProviderAction[] = GMAIL_LIKE) {
   const adapter = {
@@ -73,6 +83,7 @@ function fake(list: () => ProviderAction[] = GMAIL_LIKE) {
 
 run('a ready-made App’s actions on a Brick, in a real database', () => {
   beforeAll(async () => {
+    settingsBefore = (await prisma.appSetting.findMany({ where: { key: { in: SHARED_SETTINGS } } })).map((row) => ({ key: row.key, value: row.value as Prisma.InputJsonValue, updatedById: row.updatedById }));
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
     const person = (name: string, email?: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: email ?? `${name}-${tag}@example.test`, name } });
@@ -92,13 +103,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appAction.deleteMany({ where: { toolkit: KEY } });
     await prisma.appActionCatalog.deleteMany({ where: { toolkit: KEY } });
-    await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
+    await restoreSettings(['ready-made-apps']);
   });
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
     else process.env.BOT_SERVICE_TOKEN = envBefore.service;
     if (envBefore.key === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = envBefore.key;
+    await restoreSettings(SHARED_SETTINGS);
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, boss] } } });
     await prisma.$disconnect();
   });
