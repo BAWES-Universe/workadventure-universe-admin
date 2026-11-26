@@ -14,6 +14,9 @@ export async function OPTIONS(request: NextRequest) {
  * The server's tools with what each is suggested to do, what was chosen and who confirmed it, the setting under each
  * heading, the policy revision, whether the list is cut (`truncated`, `totalSeen`), and the state of the server: "notCheckedYet" for a server that existed before tools were
  * checked (it keeps working in text), "notConfirmedYet" while a tool waits, "confirmed" when every tool is.
+ * `kind` says whether the rows are the server's own tools ("tools") or a ready-made App's actions ("appActions").
+ * `?actions=1`: the reader knows App actions, and a ready-made App's grant is brought over to its actions (once; every reader then
+ * sees them). Without it a grant not brought over yet answers as it did before.
  *
  * Auth: Manage bots (403 without it), or the bot server's ADMIN_API_TOKEN.
  */
@@ -22,7 +25,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id, serverId } = await params;
     const auth = await authorizeToolsRequest(request, id, { adminToken: 'read' }, 'read');
     if (auth.response) return auth.response;
-    return json(request, await readServerTools(id, serverId));
+    return json(request, await readServerTools(id, serverId, { appActions: request.nextUrl.searchParams.get('actions') === '1' }));
   } catch (error) {
     return toolsFailure(request, error, 'reading the tools');
   }
