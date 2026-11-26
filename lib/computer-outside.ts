@@ -7,6 +7,8 @@
 export interface OutsideManifest {
   files: Array<['f' | 'l', string, number, number, string]>;
   packages: string[];
+  /** The mode of each folder above a listed file that is not the usual 0755, by path (a private folder stays private when it is made again on the new computer). Absent on a copy made before they were kept. */
+  dirs?: Array<[string, number]>;
 }
 
 const OUTSIDE_ROOTS = ['/etc', '/opt', '/srv', '/usr/local', '/root', '/var/www', '/var/spool/cron'];
@@ -23,13 +25,16 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[
 /** The most files a list holds, and the most software names (the script's own limits, `MAX_FILES` and `MAX_PACKAGES`). */
 export const OUTSIDE_MAX_FILES = 5000;
 export const OUTSIDE_MAX_PACKAGES = 2000;
+/** The most folder modes a list holds (the script's own limit is four for each file). */
+export const OUTSIDE_MAX_DIRS = OUTSIDE_MAX_FILES * 4;
 
 /** Checks a list to the last field and says WHY when it is not one, so a computer that cannot be packed is a clean `blocked` and never a failure further on. */
 export function checkOutsideManifest(value: unknown): OutsideCheck {
   const invalid = { ok: false, reason: 'invalid' } as const;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid;
-  const { files, packages } = value as { files?: unknown; packages?: unknown };
+  const { files, packages, dirs } = value as { files?: unknown; packages?: unknown; dirs?: unknown };
   if (!Array.isArray(files) || !Array.isArray(packages)) return invalid;
+  if (dirs !== undefined && (!Array.isArray(dirs) || dirs.length > OUTSIDE_MAX_DIRS)) return invalid;
   if (files.length > OUTSIDE_MAX_FILES) return { ok: false, reason: 'outside_too_big' };
   if (packages.length > OUTSIDE_MAX_PACKAGES) return { ok: false, reason: 'packages_too_many' };
   const seen = new Set<string>();
@@ -51,7 +56,21 @@ export function checkOutsideManifest(value: unknown): OutsideCheck {
   }
   if (unreadableName) return { ok: false, reason: 'outside_name_not_utf8' };
   if (!packages.every((name) => typeof name === 'string' && OUTSIDE_PACKAGE.test(name))) return invalid;
-  return { ok: true, manifest: { files: out, packages: packages as string[] } };
+  const folders: Array<[string, number]> = [];
+  if (dirs !== undefined) {
+    const named = new Set<string>();
+    for (const item of dirs as unknown[]) {
+      if (!Array.isArray(item) || item.length !== 2) return invalid;
+      const [path, mode] = item as unknown[];
+      if (typeof path !== 'string' || typeof mode !== 'number' || !Number.isInteger(mode) || mode < 0 || mode > 0o7777) return invalid;
+      if (LONE_SURROGATE.test(path)) return { ok: false, reason: 'outside_name_not_utf8' };
+      if (path.length > 4096 || !path.startsWith('/') || path.includes('\0') || path.split('/').some((part, at) => at > 0 && (part === '' || part === '.' || part === '..'))) return invalid;
+      if (!OUTSIDE_ROOTS.some((root) => path.startsWith(`${root}/`)) || named.has(path)) return invalid;
+      named.add(path);
+      folders.push([path, mode]);
+    }
+  }
+  return { ok: true, manifest: dirs === undefined ? { files: out, packages: packages as string[] } : { files: out, packages: packages as string[], dirs: folders } };
 }
 
 /** The manifest as a value kept on a copy's row, checked to the last field; null for anything that is not exactly one (an old copy has none). */

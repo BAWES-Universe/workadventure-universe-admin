@@ -159,12 +159,13 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value) };
 }
 
-function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
+function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
   const clock = extra.clock ?? { t: 1_000_000 };
   return new Agent37ComputerProvider({
     client: w.client,
     outstandingReserveMicros: async () => extra.reserved ?? 0,
-    sleep: async () => {
+    sleep: async (ms?: number) => {
+      extra.slept?.push(ms ?? 0);
       clock.t += 3_000;
     },
     now: () => clock.t,
@@ -593,9 +594,38 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => 'ready=1 restart=0\n');
     await expect(p.ready('m1')).resolves.toBeUndefined();
     // The note the take-over fence tells the agent's processes by is written last, as root
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', expect.stringContaining('unpack_wait='), 'universe-mark']);
     expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    expect(w.execs[2].options).toMatchObject({ user: 'root' });
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('a brand-new computer is handed over only after the margin that follows the unpack of its image (the computer says how many seconds are left), a computer that is not new is not waited for, and one that cannot say is not held up', async () => {
+    const answer = (wait: string) => (command: string) => (command === 'universe-up' ? 'ready=1 restart=0\n' : command.includes('unpack_wait=') ? wait : 'ok');
+    for (const [said, expected] of [['unpack_wait=7\n', [7000]], ['unpack_wait=0\n', []], ['', []], ['unpack_wait=99999\n', []], ['not a number\n', []]] as const) {
+      const w = world();
+      const slept: number[] = [];
+      const p = provider(w, { slept });
+      await p.create('bot-1');
+      slept.length = 0;
+      w.setExec(answer(said));
+      await expect(p.ready('m1')).resolves.toBeUndefined();
+      expect(slept).toEqual(expected);
+      // The note the fence tells by is written after the wait, never before
+      const commands = w.execs.map((entry) => entry.command);
+      expect(commands.at(-1)).toBe('universe-mark');
+    }
+    // A command that fails does not make the computer not ready
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const execute = w.client.exec.bind(w.client);
+    (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+      if (command.includes('unpack_wait=')) throw new Agent37Unreached('lost');
+      return execute(id, command, options);
+    };
+    w.setExec((command) => (command === 'universe-up' ? 'ready=1 restart=0\n' : 'ok'));
+    await expect(p.ready('m1')).resolves.toBeUndefined();
   });
 
   describe('the network rule when a machine is made ready', () => {
@@ -654,7 +684,7 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
     await p.ready('m1');
     // The note is written once, after the restart (a note from before it would be for the old boot)
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -691,7 +721,7 @@ describe('getting a machine ready for a job', () => {
     let runs = 0;
     w.setExec(() => (++runs === 1 ? 'ready=0 reason=browser\n' : 'ready=1 restart=0\n'));
     await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'universe-mark']);
   });
 
   it('asks again once after the restart too, when the browser is still starting then', async () => {
@@ -701,7 +731,7 @@ describe('getting a machine ready for a job', () => {
     let runs = 0;
     w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
     await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -805,6 +835,19 @@ describe('cold storage operations on a computer', () => {
         expect(read.options).toMatchObject({ user: 'root' });
         expect(Number(/ (\d+)$/.exec(read.command)![1])).toBeLessThanOrEqual(200_000);
       }
+    });
+
+    it('the modes of folders that are not 0755 travel with the list and are kept on the copy (a private folder stays private when a restore makes it again)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = { ...crowd(3), dirs: [['/opt/many/private', 0o700]] };
+      holding(w, list);
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+      // And a restore sends them to finish with the rest of the list
+      w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=3 packages=0 outside=applied\n' : 'ok'));
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true });
+      expect(w.execs.find((entry) => entry.command.includes(FINISH))!.command).toContain('"dirs":[["/opt/many/private",448]]');
     });
 
     it('a piece that is short, cut, missing or changed is an error (the pack-away is tried again), never a shorter or different list', async () => {

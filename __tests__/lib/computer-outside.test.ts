@@ -13,6 +13,21 @@ describe('the list of what is outside a computer\'s home folder', () => {
     }
   });
 
+  it('keeps the modes of the folders that are not 0755 (a private folder stays private on the new computer), checks them like a path, and a list without them is as before', () => {
+    const dirs = [['/opt/zz/private', 0o700], ['/opt/zz/private/deeper', 0o750]];
+    expect(checkOutsideManifest(list({ dirs }))).toEqual({ ok: true, manifest: list({ dirs }) });
+    expect(readOutsideManifest(list({ dirs: [] }))).toEqual(list({ dirs: [] }));
+    // No key at all stays no key (a copy made before they were kept)
+    expect(Object.keys(readOutsideManifest(list())!)).toEqual(['files', 'packages']);
+    for (const bad of ['no', [['/opt/a']], [['/etc2/a', 0o700]], [['/opt/../etc', 0o700]], [['opt/a', 0o700]], [['/opt/a', 0o10000]], [['/opt/a', -1]], [['/opt/a', 1.5]], [['/opt/a', 0o700], ['/opt/a', 0o700]], [['/opt/a/', 0o700]], [[1, 0o700]]]) {
+      expect(checkOutsideManifest(list({ dirs: bad }))).toEqual({ ok: false, reason: 'invalid' });
+    }
+    // A folder name that is not valid UTF-8 is its own reason, as for a file
+    expect(checkOutsideManifest(list({ dirs: [['/opt/bad-\udcff', 0o700]] }))).toEqual({ ok: false, reason: 'outside_name_not_utf8' });
+    // The most is four folders for each file the list may hold
+    expect(checkOutsideManifest(list({ dirs: Array.from({ length: 20001 }, (_, i) => [`/opt/d${i}`, 0o700]) }))).toEqual({ ok: false, reason: 'invalid' });
+  });
+
   it('a name with a lone surrogate (a file name that is not valid UTF-8) is its own reason, in a path or in where a link points, and a real pair is fine', () => {
     for (const odd of ['\udcff', '\ud800', 'a\udc80b', '\ud83d']) {
       expect(checkOutsideManifest(list({ files: [['f', `/opt/x-${odd}`, 1, 0, SHA]] }))).toEqual({ ok: false, reason: 'outside_name_not_utf8' });

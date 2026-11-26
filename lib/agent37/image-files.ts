@@ -1213,8 +1213,14 @@ find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \)
  *   universe-cold list-piece OFFSET LENGTH  (root)  prints a slice of the list prepack wrote (a root-only file), so the list never has to fit in one answer (Agent37 cuts one over 512 KB)
  *   universe-cold list-put OFFSET           (root)  appends a slice (standard input) to a root-only file on this computer, so a list too big for one command can be sent in pieces; finish reads it
  */
+/**
+ * How long after the end of the unpack of the image on a computer a file copied there with its old modification time is still taken for one of the image (see `CTIME_MARGIN` in the script). Nothing the agent
+ * does counts before it has passed: a new computer is handed over only after it, and a restore puts nothing back before it.
+ */
+export const COLD_CTIME_MARGIN_S = 120;
+
 export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
-import errno, fcntl, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, urllib.request
+import errno, fcntl, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, time, urllib.request
 
 try:
     NODE = pwd.getpwnam("node")
@@ -1274,8 +1280,8 @@ def home_stats():
 # On a real computer the image is unpacked onto the disk when the computer is made, and every image file gets that moment as its change time (its modification time stays the image's own). The unpack
 # ends with the marker files: measured on a real Agent37 computer, every file of the image had a change time between 20 s before and 5.2 s after the marker's. So a file is "changed after the
 # image" when its modification time is later than the time the image was built (a file written or edited here), or its change time is later than the end of the unpack plus this margin (a file
-# copied or unpacked here with its old modification time kept: cp -p, tar x, rsync -a). A file so copied within this margin of the end of the unpack is not seen; nothing can act that early
-CTIME_MARGIN = 120
+# copied or unpacked here with its old modification time kept: cp -p, tar x, rsync -a). A file so copied within this margin of the end of the unpack is not seen, so nothing is let act that early: a new computer is handed over only after it (Orbit waits), and finish waits before it puts a file back
+CTIME_MARGIN = ${COLD_CTIME_MARGIN_S}
 
 def unpack_end():
     # When the image was unpacked on this computer: the change time of the two files the image marks itself with. The earlier of the two, so that a later change of one of them moves nothing
@@ -1286,6 +1292,19 @@ def unpack_end():
         except OSError:
             pass
     return min(times)
+
+def wait_past_unpack():
+    # Files are put back with their old modification time and a change time of now. Put back within the margin of the end of the unpack (a restore onto a new computer can be that soon), a file
+    # copied here with its old time kept would look like one of the image the next time a computer is packed away, and be lost. So nothing is put back until the margin has passed
+    if FSROOT and os.environ.get("UNIVERSE_COLD_NO_WAIT"):
+        return
+    try:
+        until = unpack_end() + CTIME_MARGIN + 1
+    except ValueError:
+        return
+    pause = until - time.time()
+    if pause > 0:
+        time.sleep(min(pause, CTIME_MARGIN + 2))
 
 def newer_than(info, built_at, unpacked_at):
     # True when a file was written or changed after the image: see CTIME_MARGIN
@@ -1306,11 +1325,14 @@ def digest_of(path):
             digest.update(chunk)
     return digest.hexdigest()
 
-def open_steps(start_fd, parts, create=False, give=False):
-    # A folder reached from start_fd one step at a time, never through a link (a link at any step fails). create: missing folders are made (and, with give, handed to the agent's user)
+def open_steps(start_fd, parts, create=False, give=False, modes=None, base=""):
+    # A folder reached from start_fd one step at a time, never through a link (a link at any step fails). create: missing folders are made (and, with give, handed to the agent's user);
+    # modes: the mode a folder that is made here had on the old computer (by its whole path, base being the path of start_fd), through the descriptor: all others are made 0755
     fd = os.dup(start_fd)
+    here = base
     try:
         for part in parts:
+            here = here + "/" + part
             if create:
                 made = False
                 try:
@@ -1322,6 +1344,9 @@ def open_steps(start_fd, parts, create=False, give=False):
             # Handed over through the descriptor, never by name: a name the agent swapped for another file would be given away instead
             if create and made and give and os.getuid() == 0:
                 os.fchown(step, UID, GID)
+            # The old computer's mode (never the set-user-id or set-group-id bits): a folder that was private is not made readable by everyone
+            if create and made and modes and here in modes:
+                os.fchmod(step, modes[here] & 0o1777)
             os.close(fd)
             fd = step
         return fd
@@ -1342,6 +1367,23 @@ def remove_tree(parent_fd, name):
     finally:
         os.close(fd)
     os.rmdir(name, dir_fd=parent_fd)
+
+def folder_modes(entries):
+    # The mode of every folder above a listed file whose mode is not the usual 0755 (a private folder stays private when it is made again on the new computer). A folder that is not a real folder
+    # (a link above a file would have been refused already) is left out. Listed by path, in path order
+    seen = {}
+    for entry in entries:
+        parts = entry[1].lstrip("/").split("/")[:-1]
+        for at in range(1, len(parts) + 1):
+            path = "/" + "/".join(parts[:at])
+            if path in seen or any(path == root for root in ROOTS):
+                continue
+            try:
+                info = os.lstat(real(path))
+            except OSError:
+                continue
+            seen[path] = (info.st_mode & 0o7777) if statmod.S_ISDIR(info.st_mode) else None
+    return [[path, mode] for path, mode in sorted(seen.items()) if mode is not None and mode != 0o755]
 
 class TooBig(Exception):
     pass
@@ -1662,7 +1704,7 @@ def prepack():
     list_bytes = list_sha = None
     if blocked is None:
         try:
-            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages}, separators=(",", ":")))
+            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages, "dirs": folder_modes(entries)}, separators=(",", ":")))
         except OverflowError:
             blocked = "outside_list_too_big"
         except (OSError, UnicodeEncodeError):
@@ -1903,7 +1945,21 @@ def read_manifest(manifest):
     packages = manifest["packages"]
     if len(packages) > 2000 or any(not isinstance(name, str) or not PACKAGE_NAME.match(name) for name in packages):
         raise ValueError("packages")
-    return entries, packages
+    # The modes of folders that are not 0755 (a copy made before they were kept has none): by path, under the same roots, each checked like a file's path
+    modes = {}
+    listed = manifest.get("dirs", [])
+    if not isinstance(listed, list) or len(listed) > MAX_FILES * 4:
+        raise ValueError("dirs")
+    for item in listed:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("dirs")
+        path, mode = item
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or os.path.normpath(path) != path or not any(path.startswith(r + "/") for r in ROOTS):
+            raise ValueError("dirs")
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o7777 or path in modes:
+            raise ValueError("dirs")
+        modes[path] = mode
+    return entries, packages, modes
 
 def open_parent(rel):
     # The folder that holds rel inside OUTSIDE, opened one step at a time and never through a link: returns (the folder's descriptor, the last name)
@@ -2007,7 +2063,7 @@ def reopen_stage(parent, item):
         raise Tampered()
     return fd
 
-def install_outside(entries):
+def install_outside(entries, modes):
     # Two steps. First EVERY file and link is made in a private folder of its own beside its target and checked (read again from the copy, hashed again as it is written): a copy that changed after the
     # check, or anything else that goes wrong while reading, stops here with nothing put in place. Only then each is renamed over its target, from the private folder to the target's folder, both held as
     # descriptors. What can still fail in the second step is a folder swapped at that moment in a folder the agent can write (refused), or a target that is a folder; what was already moved stays, and the
@@ -2023,7 +2079,7 @@ def install_outside(entries):
                 # The folder that holds the target is reached from the top of the file system one step at a time, never through a link: a link found on the way (one the agent put in a folder it can write)
                 # means the list does not match what is on this computer, and nothing more is written
                 try:
-                    parent = open_steps(root_fd, parts[:-1], create=True)
+                    parent = open_steps(root_fd, parts[:-1], create=True, modes=modes)
                 except OSError:
                     raise Tampered()
                 try:
@@ -2193,26 +2249,28 @@ def finish_with_list():
         return 1
     entries = []
     packages = []
+    modes = {}
     if manifest is not None:
         try:
-            entries, packages = read_manifest(manifest)
+            entries, packages, modes = read_manifest(manifest)
         except ValueError:
             print("finished=0 reason=outside_manifest")
             return 1
     # From here the copy folder is not needed again, whatever the outcome (a retry comes from the saved copy, never from this folder): it is removed when this ends, so a file that only root
     # could read is not left in the home folder after a restore
     try:
-        return finish_apply(manifest, entries, packages)
+        return finish_apply(manifest, entries, packages, modes)
     finally:
         drop_outside()
 
-def finish_apply(manifest, entries, packages):
+def finish_apply(manifest, entries, packages, modes):
     files = 0
     unverified = manifest is None
     if not unverified:
         try:
             verify_outside(entries)
-            files = install_outside(entries)
+            wait_past_unpack()
+            files = install_outside(entries, modes)
         except Tampered:
             print("finished=0 reason=outside_tampered")
             return 1

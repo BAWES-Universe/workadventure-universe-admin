@@ -20,6 +20,9 @@ const rootTest = isRoot ? it : it.skip;
 const canDropRoot = isRoot && spawnSync('setpriv', ['--version']).status === 0;
 const raceTest = canDropRoot ? it : it.skip;
 
+// The test computers are made a moment before a finish runs: a finish does not wait for the margin after the unpack here (the one test of the wait turns it back on)
+process.env.UNIVERSE_COLD_NO_WAIT = '1';
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'universe-cold-outside-'));
 const script = path.join(dir, 'universe-cold');
 const bin = path.join(dir, 'bin');
@@ -100,7 +103,7 @@ const finishWith = (w: World, manifest: unknown) => {
 const aptCalls = () => fs.readFileSync(aptLog, 'utf8').trim().split('\n').filter(Boolean);
 const writtenOnB = (w: World) => fs.readdirSync(w.fsB, { recursive: true, withFileTypes: true }).filter((entry) => !entry.isDirectory()).map((entry) => path.relative(w.fsB, path.join(entry.parentPath, entry.name))).filter((name) => !name.startsWith('usr/local/share/universe'));
 
-type Manifest = { files: Array<[string, string, number, number, string]>; packages: string[] };
+type Manifest = { files: Array<[string, string, number, number, string]>; packages: string[]; dirs?: Array<[string, number]> };
 
 /** What Orbit does with a prepack answer: the list is not in it, it is read back from the computer in slices (as the provider does) and checked against the length and SHA-256 the line gave. */
 function listOf(w: World, out: Record<string, unknown>, piece = 200_000): Manifest {
@@ -794,6 +797,63 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     const names = listOf(w, list).files.map((entry) => entry[1]);
     expect(names).toContain('/opt/copied/probe');
     expect(names.filter((name) => name.includes('/image/'))).toEqual([]);
+  });
+
+  it('a private folder stays private: prepack lists the mode of every folder above a file that is not 0755, and a folder made again on the new computer gets that mode (found on a real computer: a 0700 folder came back 0755)', () => {
+    const w = world();
+    fs.mkdirSync(path.join(w.fsA, 'opt/zz/private/deeper'), { recursive: true });
+    fs.mkdirSync(path.join(w.fsA, 'opt/zz/open'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'opt/zz/private/deeper/secret.txt'), 'secret');
+    fs.writeFileSync(path.join(w.fsA, 'opt/zz/open/plain.txt'), 'plain');
+    fs.chmodSync(path.join(w.fsA, 'opt/zz/private'), 0o700);
+    fs.chmodSync(path.join(w.fsA, 'opt/zz/private/deeper'), 0o750);
+    const list = packed(w);
+    // Only the folders that are not the usual 0755, by path, in path order
+    expect(list.dirs).toEqual([['/opt/zz/private', 0o700], ['/opt/zz/private/deeper', 0o750]]);
+    // A folder that already exists on the new computer is left as it is
+    fs.mkdirSync(path.join(w.fsB, 'opt/zz/open'), { recursive: true });
+    expect(finishWith(w, list).stdout).toMatch(/finished=1/);
+    expect(fs.statSync(path.join(w.fsB, 'opt/zz/private')).mode & 0o7777).toBe(0o700);
+    expect(fs.statSync(path.join(w.fsB, 'opt/zz/private/deeper')).mode & 0o7777).toBe(0o750);
+    expect(fs.statSync(path.join(w.fsB, 'opt/zz/open')).mode & 0o7777).toBe(0o755);
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/zz/private/deeper/secret.txt'), 'utf8')).toBe('secret');
+    // A copy made before the modes were kept (no dirs) is made as it always was
+    const old = packed(w);
+    delete old.dirs;
+    fs.rmSync(path.join(w.fsB, 'opt'), { recursive: true });
+    expect(finishWith(w, old).stdout).toMatch(/finished=1/);
+    expect(fs.statSync(path.join(w.fsB, 'opt/zz/private')).mode & 0o7777).toBe(0o755);
+  });
+
+  it('a list with folder modes that are not what prepack prints is a bad list: a path outside the folders a copy may put back, a path that is not clean, a mode out of range, the same folder twice', () => {
+    const w = world();
+    const list = packed(w);
+    for (const dirs of [[['/etc2/x', 0o700]], [['/opt/../etc', 0o700]], [['/opt/a', 0o10000]], [['/opt/a', 0o700], ['/opt/a', 0o700]], [['/opt/a']], 'no', [['opt/a', 0o700]]]) {
+      const done = cold(w, 'finish', w.fsB, JSON.stringify({ outside: { ...list, dirs } }));
+      expect(done.stdout).toContain('finished=0 reason=outside_manifest');
+    }
+    expect(writtenOnB(w)).toEqual([]);
+  });
+
+  it('nothing is put back until the margin after the end of the unpack has passed: a file restored with its old modification time must not look like one of the image the next time (Opus read of the ctime fix)', () => {
+    const w = world();
+    const list = packed(w);
+    // The new computer was unpacked a moment ago; the margin is 2 s here (a real one is 120 s), so a finish has to wait about 3 s
+    for (const name of ['built', 'manual-packages.txt']) fs.utimesSync(path.join(w.fsB, 'usr/local/share/universe', name), new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
+    const unpackEnd = Math.min(...['built', 'manual-packages.txt'].map((name) => fs.statSync(path.join(w.fsB, 'usr/local/share/universe', name)).ctimeMs));
+    const harness = path.join(dir, `wait-${++counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'mod.CTIME_MARGIN = 2',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB, UNIVERSE_COLD_NO_WAIT: '' } });
+    expect(done.stdout).toMatch(/finished=1/);
+    for (const name of ['etc/app.conf', 'opt/tool/run.sh']) expect(fs.statSync(path.join(w.fsB, name)).ctimeMs).toBeGreaterThan(unpackEnd + 2000);
   });
 
   it('a staging folder name that is already taken is never used or removed: another is tried', () => {

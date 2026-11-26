@@ -6,7 +6,7 @@ import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instan
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
-import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
+import { COLD_CTIME_MARGIN_S, UNIVERSE_COLD } from '@/lib/agent37/image-files';
 
 /**
  * A Brick's computer on Agent37 (game #2000): the real provider behind the interface Universe already uses.
@@ -45,6 +45,8 @@ export const WATCH_LINK_SECONDS = 60;
 const READY_WITHIN_MS = 4 * 60_000;
 /** Where the current `universe-cold` is put on a machine before a pack-away (a root-only folder the file scan skips, next to the list). */
 const COLD_SCRIPT = '/usr/local/share/universe/cold-bin/universe-cold';
+/** Prints the seconds left of the margin after the unpack of the image (the change time of the image's two marker files, the earlier of the two); nothing at all when it cannot tell. */
+const UNPACK_WAIT_COMMAND = `python3 -c 'import os,time;t=min(os.stat(p).st_ctime for p in ("/usr/local/share/universe/built","/usr/local/share/universe/manual-packages.txt"));print("unpack_wait=%d"%max(0,int(t+${COLD_CTIME_MARGIN_S + 1}-time.time())+1))' 2>/dev/null; true`;
 const POLL_MS = 3_000;
 /** A copy saved this long before the machine went to sleep, or later, is the machine as it was left. */
 const FRESH_COPY_MS = 5 * 60_000;
@@ -367,8 +369,26 @@ export class Agent37ComputerProvider implements ComputerProvider {
     // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
     // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
     // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
+    // A computer is handed over only once the margin after the unpack of its image has passed (a file the agent copies with its old modification time kept is told from the image's own files by its
+    // change time, and that cannot be told inside the margin): a brand-new computer waits the few seconds that are left, any other none
+    await this.untilUnpackMargin(ref);
     const marked = await this.client.exec(ref, 'universe-mark', { user: 'root', timeoutMs: 30_000 });
     if (!/(^|\n)marked=1\b/.test(marked.stdout)) throw new Error(`The computer could not be marked${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1] ? ` (${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1]})` : ''}`);
+  }
+
+  /**
+   * Waits until `COLD_CTIME_MARGIN_S` (and a second) after the end of the image's unpack on this computer: the change time of the two marker files the image marks itself with, the earlier of the two,
+   * read on the computer itself. The computer says how many seconds are left (0 for any computer that is not new); a computer that cannot say is not waited for (the pack-away then cannot tell the
+   * agent's first copies, which is all it costs).
+   */
+  private async untilUnpackMargin(ref: string): Promise<void> {
+    try {
+      const done = await this.client.exec(ref, UNPACK_WAIT_COMMAND, { user: 'root', timeoutMs: 30_000 });
+      const seconds = Number(/(^|\n)unpack_wait=(\d+)\b/.exec(done.stdout)?.[2] ?? 0);
+      if (seconds > 0 && seconds <= COLD_CTIME_MARGIN_S + 5) await this.pause(seconds * 1000);
+    } catch (error) {
+      console.error('[Computer] Could not tell how long ago the image was unpacked:', error instanceof Error ? error.message : error);
+    }
   }
 
   /** Runs `universe-up` and reads what it says. */
