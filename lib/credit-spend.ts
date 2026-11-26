@@ -193,8 +193,10 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
       const available = lots.reduce((sum, lot) => sum + lot.availableMicros, 0);
       // Nothing left at all (lots spent to nothing count as none) and what was due this period was not given: "not given", never "used up".
       // Some credit left that is not enough stays "used up"
-      if (available <= 0 && issued.skipped.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
-      if (available <= 0 && issued.skipped.some((s) => s.categoryId === input.category)) return { ok: false, reason: 'not_given', availableMicros: 0 };
+      // Only a skip of a rule for this category counts: a rule for another category left out says nothing about this one
+      const mine = issued.skipped.filter((s) => s.categoryId === input.category);
+      if (available <= 0 && mine.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
+      if (available <= 0 && mine.length > 0) return { ok: false, reason: 'not_given', availableMicros: 0 };
       return { ok: false, reason: 'credit_used_up', availableMicros: available };
     }
     const row = await tx.creditHold.create({
@@ -469,7 +471,8 @@ export async function availableCredit(personId: string, category: MoneyCategory,
 export async function creditStanding(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number; notGiven: boolean; renewsAt: Date | null }> {
   const issued = await ensureIssued(personId, now);
   const lots = await usableLots(prisma, personId, category, now);
-  const skipped = issued.skipped.some((s) => s.reason === 'not_set' || s.categoryId === category);
+  // Only a skip of a rule for this category counts, whatever the reason (no budget set, the month's budget ran out, a cap, a clash)
+  const skipped = issued.skipped.some((s) => s.categoryId === category);
   const monthly = lots.filter((lot) => /^\d{4}-\d{2}$/.test(lot.lot.periodKey) && lot.expiresAt !== null).map((lot) => lot.expiresAt!.getTime());
   const renewsAt = monthly.length > 0 ? new Date(Math.min(...monthly)) : null;
   const balances = await lotBalances(prisma, lots.map((lot) => lot.id));

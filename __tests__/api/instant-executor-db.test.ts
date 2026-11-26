@@ -1563,6 +1563,33 @@ run('the bounded Instant executor, in a real database', () => {
         }
       });
 
+      it('a rule for another category left out for want of a budget says nothing about this one: research credit spent to nothing is "used up", not "not set up"', async () => {
+        const { person } = await newOwner('bushra');
+        const { createGift, endProgram } = await import('@/lib/credit-rules');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        const { creditStanding, holdCredit, settleHold } = await import('@/lib/credit-spend');
+        await setBudget(1_000_000_000_000);
+        // A computers gift from an account with no budget set: left out as "not set", for computers only
+        const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: person, name: 'Budget taken away', budgetMicros: BigInt(1_000_000), admins: { create: [{ userId: sara }] } } });
+        const gift = await createGift({ categoryId: 'computers', amount: 10_000, schedule: 'once', fundingAccountId: account.id, recipients: { kind: 'people', userIds: [person] } }, { userId: sara, superAdmin: true });
+        await prisma.fundingAccount.update({ where: { id: account.id }, data: { budgetMicros: null } });
+        try {
+          expect((await ensureIssued(person)).skipped).toContainEqual({ programId: gift.programId, categoryId: 'computers', reason: 'not_set' });
+          // The research credit spent to nothing
+          const { availableMicros } = await creditStanding(person, 'instant_apps');
+          expect(availableMicros).toBeGreaterThan(0);
+          const key = `h-${randomUUID()}`;
+          expect((await holdCredit({ holdKey: key, personId: person, category: 'instant_apps', amountMicros: availableMicros, chargeClass: 'instant_run' })).ok).toBe(true);
+          await settleHold({ holdKey: key, customerMicros: availableMicros });
+          expect(await creditStanding(person, 'instant_apps')).toMatchObject({ availableMicros: 0, notGiven: false });
+          expect(await holdCredit({ holdKey: `h-${randomUUID()}`, personId: person, category: 'instant_apps', amountMicros: 100, chargeClass: 'instant_run' })).toMatchObject({ ok: false, reason: 'credit_used_up' });
+        } finally {
+          await endProgram(gift.programId, { userId: sara, superAdmin: true });
+          await prisma.creditAllocation.deleteMany({ where: { hold: { personId: person } } });
+          await prisma.creditHold.deleteMany({ where: { personId: person } });
+        }
+      });
+
       it('a shared pool made when the budget is raised takes everyone it reaches off the "left out" count, not only the person whose look made it', async () => {
         const { person: first } = await newOwner('rania');
         const { person: second } = await newOwner('salem');
