@@ -56,6 +56,11 @@ const ended = await scenario(`
   UPDATE grant_rules SET state = 'ended', superseded_at = now() WHERE id = 'seed-default-instant_apps-v1';
 `);
 
+// A super admin saved $1.00 themselves on the Limits screen (the same number as the seed, but their choice: the row says who saved it)
+const savedSame = await scenario(`
+  UPDATE app_settings SET updated_by_id = 'khalid' WHERE key = 'instant-limits';
+`);
+
 const emptied = await scenario(`
   UPDATE app_settings SET value = value - 'exposureCeilingMicros' WHERE key = 'instant-limits';
 `);
@@ -71,4 +76,4 @@ const kuwait = await (async () => {
   return { startsAt: row?.starts ?? null, createdAt: row?.created ?? null, supersededAt: v1?.superseded ?? null, checkedAt: new Date().toISOString() };
 })();
 
-console.log(JSON.stringify({ seeded, own, ended, emptied, kuwait }));
+console.log(JSON.stringify({ seeded, own, ended, emptied, savedSame, kuwait }));

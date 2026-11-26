@@ -19,9 +19,12 @@ CREATE INDEX IF NOT EXISTS "instant_runs_person_id_task_key_idx" ON "instant_run
 -- Instant Apps limits
 -- ---------------------------------------------------------------------------------------------------------------------
 -- exposureCeilingMicros  200000000  $200.00 the most Instant may owe the provider in a month, everyone together (was the seeded $1.00)
+-- Only the untouched seed: the launch defaults wrote this row with no one's id, and every save on the Limits screen records who saved it,
+-- so a $1.00 a super admin saved themselves is their choice and stays.
 UPDATE "app_settings"
 SET "value" = jsonb_set("value", '{exposureCeilingMicros}', '200000000'::jsonb), "updated_at" = (now() AT TIME ZONE 'UTC')
 WHERE "key" = 'instant-limits'
+  AND "updated_by_id" IS NULL
   AND jsonb_typeof("value") = 'object'
   AND "value"->'exposureCeilingMicros' = '1000000'::jsonb;
 

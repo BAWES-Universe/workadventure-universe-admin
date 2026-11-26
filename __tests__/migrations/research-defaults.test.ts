@@ -11,7 +11,7 @@ import { missingInstantLimits, readInstantLimits } from '@/lib/instant/values';
 type Rule = { id: string; program_id: string; version: number; state: string; funding_account_id: string; covers: string[]; benefit_kind: string; amount: string; schedule: string; share: string; recipient_type: string; settlement: string; created_by_id: string; superseded: boolean; started: boolean };
 type State = { limits: Record<string, unknown> | null; rules: Rule[]; index: string[] };
 type Scenario = { before: State; once: State; twice: State };
-type Result = { seeded: Scenario; own: Scenario; ended: Scenario; emptied: Scenario; kuwait: { startsAt: string | null; createdAt: string | null; supersededAt: string | null; checkedAt: string } };
+type Result = { seeded: Scenario; own: Scenario; ended: Scenario; emptied: Scenario; savedSame: Scenario; kuwait: { startsAt: string | null; createdAt: string | null; supersededAt: string | null; checkedAt: string } };
 
 let result: Result;
 
@@ -60,7 +60,7 @@ describe('research on by default: a deploy that still has the seeded values', ()
   });
 
   it('changes nothing when run a second time', () => {
-    for (const scenario of [result.seeded, result.own, result.ended, result.emptied]) expect(scenario.twice).toEqual(scenario.once);
+    for (const scenario of [result.seeded, result.own, result.ended, result.emptied, result.savedSame]) expect(scenario.twice).toEqual(scenario.once);
   });
 });
 
@@ -90,5 +90,13 @@ describe('research on by default: a database whose own time zone is not UTC', ()
       expect(Date.parse(at as string)).toBeLessThanOrEqual(checked);
       expect(checked - Date.parse(at as string)).toBeLessThan(10 * 60 * 1000);
     }
+  });
+});
+
+describe('research on by default: a ceiling a super admin saved at the seeded number', () => {
+  it('is their choice and stays $1.00 (the row says who saved it); the question bound is still added and the default still moves', () => {
+    expect(result.savedSame.before.limits).toMatchObject({ exposureCeilingMicros: 1_000_000 });
+    expect(result.savedSame.once.limits).toMatchObject({ exposureCeilingMicros: 1_000_000, maxRunsPerQuestion: 8 });
+    expect(result.savedSame.once.rules.map((rule) => [rule.id, rule.state])).toEqual([['seed-default-instant_apps-v1', 'superseded'], ['seed-default-instant_apps-v2', 'current']]);
   });
 });
