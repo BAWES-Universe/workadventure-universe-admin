@@ -99,14 +99,16 @@ export async function connectedApp(botId: string, name: string): Promise<{ name:
   const grants = [...own.filter(works), ...found.filter((grant) => isReadyMade(grant.connection)), ...own.filter((grant) => !works(grant))];
   for (const grant of grants) {
     const connection = grant.connection;
-    if (!connection || !connectedState(connection).connected) continue;
+    if (!connection) continue;
     const names = [grant.name, connection.name, connection.providerToolkit ?? ''].map(plain);
     if (!names.includes(wanted)) continue;
-    // The ready-made one was named but the person has their own copy of it here under another name ("Exa Search" by its link): theirs is the way
+    // The ready-made one was named but the person has their own copy of it here under another name ("Exa Search" by its link): theirs is the
+    // way, also when the ready-made one is signed out (only the own copy has to work)
     if (isReadyMade(connection)) {
       const ownCopy = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && works(other) && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
       if (ownCopy) return { name: ownCopy.name, stepMicros: 0 };
     }
+    if (!connectedState(connection).connected) continue;
     // Only a ready-made app is paid for by us at the provider's rate; any other connected app costs us no call (its step is still a model turn)
     if (connection.source !== 'ready_made' || !connection.providerToolkit) return { name: grant.name, stepMicros: connection.source === 'ready_made' ? null : 0 };
     const listed = (await readReadyMadeApps()).find((app) => app.key === connection.providerToolkit);

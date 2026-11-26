@@ -14,6 +14,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, reviewAppSteps, startJob, startWindDown } from '@/lib/computer';
+import { connectedApp } from '@/lib/computer-route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -116,6 +117,16 @@ run('choosing the way by expected cost, in a real database', () => {
       await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
       await useUpLimit(person);
       expect(await startJob({ botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } }, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+    });
+
+    it('takes the person\'s working own copy under another name even when the named ready-made one is signed out, and nothing when neither works', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'ready_made' }, data: { signInLostAt: NOW } });
+      expect(await connectedApp(person.brickId, 'Exa')).toEqual({ name: 'My search', stepMicros: 0 });
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
     });
 
     it('never takes an own copy the bot server saw fail (a refused key, or no answer) over a working ready-made one', async () => {
