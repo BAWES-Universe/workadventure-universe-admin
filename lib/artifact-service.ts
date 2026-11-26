@@ -1424,8 +1424,12 @@ const notExpiredAt = (now: Date): Prisma.ArtifactWhereInput => ({ OR: [{ expires
  * The artifacts made in one chat that this person may open, for the chat's profile or details in the game: the same
  * rule as opening one. Someone the game vouches is in a nearby chat sees what was made in it, as its cards open for
  * them; anyone else sees only their own and those shared by link. Nothing they could not open is ever listed.
+ *
+ * A direct chat with a bot (`botId`) also lists what that bot made for this person in any other chat, such as a page
+ * asked for in nearby chat and sent again here: the same set the bot itself finds and can send (listArtifactsInChat).
+ * Only their own and only this bot's, so another bot's work never shows up.
  */
-export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context = defaultContext()): Promise<ArtifactPage<ChatArtifactView>> {
+export async function listChatArtifacts(viewer: Viewer, offset = 0, botId?: string, ctx: Context = defaultContext()): Promise<ArtifactPage<ChatArtifactView>> {
   const { now } = ctx;
   const chat = viewer.chat;
   if (!chat) return { artifacts: [], total: 0, next: null };
@@ -1437,7 +1441,12 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
   // their own and those shared by link.
   // Public with nothing published is not there for someone outside the chat (game #2115)
   const opens: Prisma.ArtifactWhereInput = who.inChat ? shownInItsChatTo(who.userId) : { OR: [...own, { openScope: 'link' }, { openScope: 'public', publishedVersion: { not: null } }] };
-  return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] }, offset, (artifact) => ({
+  const here: Prisma.ArtifactWhereInput = { chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] };
+  // Copies are in no chat (chatRef null) and stay out, as they do for the bot. These are the person's own, so they see the latest.
+  const madeByThisBot: Prisma.ArtifactWhereInput[] =
+    chat.kind === 'dm' && botId && who.userId ? [{ ownerId: who.userId, makerBotId: botId, chatRef: { not: null }, AND: [notExpiredAt(now)] }] : [];
+  const where: Prisma.ArtifactWhereInput = madeByThisBot.length ? { OR: [here, ...madeByThisBot] } : here;
+  return pageOf(where, offset, (artifact) => ({
     // Someone outside the chat reads a shared one by what was published: its title and its version, never the latest
     ...viewOf(artifact, who.inChat || isOwner(artifact, who) ? undefined : shownTo(artifact, who)),
     yours: who.userId !== null && artifact.ownerId === who.userId,
