@@ -136,6 +136,15 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
   });
 
+  it('starts Run a workflow on Asks first under a heading set Asks first too, with nothing of its own', async () => {
+    const sara = await withGitHub('sara');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'asksFirst' } });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('asksFirst');
+    const tools = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    expect(tools.tools.find((tool) => tool.name === 'github_run_workflow')?.setting).toBeNull();
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('asksFirst');
+  });
+
   it('follows the person’s heading as they change it: Off holds Run a workflow Off, and a looser heading brings back Asks first; a choice of their own stays', async () => {
     const sara = await withGitHub('sara');
     const first = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
@@ -153,6 +162,16 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'asksFirst' } });
     expect(await settingOfRun()).toBe('rightAway');
     expect(await judged()).toBe('rightAway');
+  });
+
+  it('brings Run a workflow back to Asks first when the person loosens a heading that was Off', async () => {
+    const sara = await withGitHub('sara');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'off' } });
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    // The heading moves to Right away and nothing has read the grant since: the row still has no choice of its own
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'rightAway' } });
+    expect((await prisma.botMcpTool.findFirst({ where: { serverId: sara.serverId, name: 'github_run_workflow' } }))?.setting).toBeNull();
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('asksFirst');
   });
 
   it('judges an action of Universe’s list that the grant has no row for by Universe’s list, not as Right away', async () => {

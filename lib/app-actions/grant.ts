@@ -348,7 +348,10 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   for (const tool of server.tools) {
     if (!tool.heading) continue;
     const heading = tool.heading as Heading;
-    const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(tool.setting as Setting | null, heading, settings) };
+    // A row with no choice of its own: an action Universe starts on its own choice (Run a workflow asks first) is judged by it here too,
+    // so a heading moved since the rows were last brought up to date never makes it looser for a moment
+    const own = (tool.setting as Setting | null) ?? startingChoice(toolkit, tool.name, settings[heading]);
+    const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(own, heading, settings) };
     const key = slugKey(tool.name);
     const before = rows.get(key);
     rows.set(key, before ? { title: before.title, heading: stricterHeading(before.heading, heading), setting: stricterSetting(before.setting, verdict.setting)! } : verdict);
