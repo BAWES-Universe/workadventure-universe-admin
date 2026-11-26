@@ -140,7 +140,7 @@ export function plainThing(value: string): string {
   return value.replace(/\s*\((?:favou?rite)[^)]*\)\s*$/iu, '').trim();
 }
 
-const TASTE_WORDS = "likes?|loves?|loved|enjoys?|enjoyed|prefers?|preferred|adores?|hates?|hated|dislikes?|disliked|despises?|detests?|loathes?|avoids?|favou?rite|can['’]?t stand|cannot stand|can not stand|(?:don['’]?t|do not|doesn['’]?t|does not) (?:like|enjoy|love)|not a fan of|not into|sick of|tired of|fan of|(?<=(?:['’]m|['’]re|['’]s|\\bam|\\bare|\\bis|\\bwas|\\bwere) )into|go-to"
+const TASTE_WORDS = "likes?|loves?|loved|enjoys?|enjoyed|prefers?|preferred|adores?|hates?|hated|dislikes?|disliked|despises?|detests?|loathes?|avoids?|favou?rite|can['’]?t stand|cannot stand|can not stand|(?:don['’]?t|do not|doesn['’]?t|does not) (?:like|enjoy|love)|not a fan of|not into|sick of|tired of|fan of|(?<!(?:\\b(?:(?:walk|bump|step|drive|driving|mov|fall|crash|turn|look|log|sign|pour|put|stick|dive|jump|dip|burst|pop|rush|peer|peek|sneak|barg|stumbl|wander|head|slip|climb|ride|swim|fly|hop|march|stroll|enter|creep|tipt|spill|stir)\\w*|go|goes|going|gone|went|came|come|comes|coming|ran|run|runs|running|drove|rode|swam|flew|fell|stuck|dov|crept\\b)(?:\\s+(?:right|straight|back|out|up|down|over|just|all the way|headfirst))?)\\s+)into|go-to"
 const NOT_PART_OF_A_WORD = '(?<![\\p{L}\\p{N}])';
 const END_OF_A_WORD = '(?![\\p{L}\\p{N}])';
 

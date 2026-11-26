@@ -478,17 +478,14 @@ describe('a reply after a taken line, when several things are forgotten together
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
   });
 
-  it('takes "I\'m into tea" with the rest but keeps "walked into the tea room" (Sentry)', () => {
+  it('takes every "into" taste line, and keeps only lines where "into" follows a word for moving (Sentry)', () => {
+    const goes = ["I'm into tea", "I'm really into tea", 'I am so into tea', "I'm totally into tea", "I've been into tea lately", "I'm getting into tea", 'I got into tea last year', 'I was into tea once', "I've really gotten into tea", 'I started getting into tea'];
+    const stays = ['I walked into the tea room', 'Did you go into the tea room?', 'I ran into my friend at tea', 'I walked straight into a tea shop', 'We drove into town for tea', 'I looked into tea prices', 'I stepped into the tea room', 'I jumped into the tea bath'];
     const data = {
       personalInfo: { preferences: ['tea'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000 } },
-      conversationHistory: chat([
-        ['person', "I'm into tea", 1000],
-        ['person', 'I walked into the tea room', 1100],
-        ['person', 'Did you go into the tea room?', 1200],
-        ['person', 'I was into tea once', 1300],
-      ]),
+      conversationHistory: chat([...goes, ...stays].map((line, i) => ['person', line, 1000 + i] as [string, string, number])),
     };
     const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea')])).data as typeof data;
-    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I walked into the tea room', 'Did you go into the tea room?']);
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(stays);
   });
 });
