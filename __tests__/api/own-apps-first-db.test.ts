@@ -208,6 +208,10 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       await moveTool(saraBrick, serverId, byName.notes, 'deletesOrSends', sara);
       const after = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f3', 'looksUp'), tool('notes', 'g2', 'looksUp')] });
       expect(after.tools.find((entry) => entry.name === 'notes')).toMatchObject({ heading: 'deletesOrSends', confirmedBy: { name: 'sara' }, movedBy: { name: 'sara' } });
+      // That choice is what a later change starts from: a looser rule for the next version never takes it back
+      const next = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f3', 'looksUp'), tool('notes', 'g3', 'looksUp')] });
+      expect(next.tools.find((entry) => entry.name === 'notes')).toMatchObject({ heading: 'deletesOrSends', movedBy: { name: 'sara' } });
+      expect((await prisma.botMcpTool.findUniqueOrThrow({ where: { id: byName.notes } })).personHeading).toBe('deletesOrSends');
     });
 
     it('removes a tool the server dropped from a cut list unless a person decided on it', async () => {
