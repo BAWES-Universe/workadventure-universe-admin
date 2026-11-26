@@ -570,6 +570,16 @@ run('the bounded Instant executor, in a real database', () => {
       expect(Number(row.customerMicros)).toBe(MARKED);
     });
 
+    it('while the books have not confirmed, the answer quotes the charge and the call fee (7,600 for a 7,000 charge), pending', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(7_000 + FEE).toBe(7_600);
+      expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_600, pending: true });
+    });
+
     it('reads the charge from Composios log when the answer does not carry it', async () => {
       await setLimits();
       const p = fakeProvider();
@@ -4087,6 +4097,20 @@ run('the bounded Instant executor, in a real database', () => {
       const after = await runOf(rowId);
       expect(after.detail).toMatchObject({ lateBatch: 1, lateToldAt: expect.any(String), lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 + FEE } });
       expect(after.providerBasis).toBe('measured');
+    });
+
+    it('a late charge counts the call fee before it is held against the top price: the table price stops nothing, one micro more stops Instant', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const atTable = await released(p, f);
+      await prisma.$transaction((tx) => applyLateEvidence(atTable.row, p.line(atTable.row.providerUserId, 'success', TOP - FEE), tx, new Date(atTable.at.getTime() + 60 * MIN)));
+      expect(Number((await runOf(atTable.rowId)).providerMicros)).toBe(TOP);
+      expect((await getInstantPause()).paused).toBe(false);
+      const over = await released(p, f);
+      await prisma.$transaction((tx) => applyLateEvidence(over.row, p.line(over.row.providerUserId, 'success', TOP - FEE + 1), tx, new Date(over.at.getTime() + 60 * MIN)));
+      expect(Number((await runOf(over.rowId)).providerMicros)).toBe(TOP + 1);
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('a vendor charge above the estimate is the real one: our cost follows it, the person still pays nothing', async () => {
