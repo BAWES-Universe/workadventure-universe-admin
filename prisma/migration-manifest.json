@@ -174,8 +174,8 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261126140000_app_action_choice_by_person_scope",
-    "count": 210,
+    "lastMigration": "20261126150000_brick_reports",
+    "count": 211,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -386,7 +386,8 @@
       "20261126000000_app_actions",
       "20261126120000_tool_person_heading",
       "20261126130000_app_action_choice_by_person",
-      "20261126140000_app_action_choice_by_person_scope"
+      "20261126140000_app_action_choice_by_person_scope",
+      "20261126150000_brick_reports"
     ]
   }
 }
