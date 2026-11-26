@@ -24,7 +24,7 @@ const state = {
   /** What reading the asked connections again finds */
   reread: [] as Row[],
   /** The Apps the person added themselves, by their link or with their key */
-  added: [] as { name: string; serverUrl: string; connected: boolean }[],
+  added: [] as { name: string; serverUrl: string; connected: boolean; source?: string }[],
 };
 
 jest.mock('@/lib/db', () => ({
@@ -195,6 +195,14 @@ describe('offerableForBrick', () => {
       state.added = [{ name: 'Tavily search', serverUrl: 'https://api.tavily.com', connected: true }, { name: 'Exa', serverUrl: 'https://api.exa.ai', connected: true }];
       state.rows = [row({ catalogKey: 'exa', connected: true })];
       expect(await offerableForBrick('brick', 'u')).toEqual([{ key: 'exa', name: 'Exa', blurb: 'Search', kind: 'listed', connectionId: 'c1', connected: true, usable: false }]);
+    });
+
+    it('never suggests the ready-made copy of an App they connected from the list under another name, and still lists that one as theirs', async () => {
+      state.entries = [{ key: 'exa-search', name: 'Exa search', blurb: 'Search' }];
+      state.readyMade = [{ key: 'exa', name: 'Exa', enabled: true }];
+      state.rows = [row({ catalogKey: 'exa-search', connected: true })];
+      state.added = [{ name: 'Exa search', serverUrl: 'https://mcp.exa.ai/mcp', connected: true, source: 'listed' }];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['exa-search']);
     });
 
     it('still suggests the App when their own copy does not work (signed out, or the key stopped working)', async () => {

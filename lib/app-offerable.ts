@@ -54,8 +54,10 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
   // The Apps the person added themselves, by their link or with their key, that work: a listed or ready-made App that is the same App (lib/app-same.ts) is
   // never suggested, so the Brick never pushes another copy (one Universe may pay for) of an App the person already has
   // Only one that works counts: a signed-out link or a key the service stopped taking never hides a working way to the same App
-  const added = (await prisma.appConnection.findMany({ where: { ownerId, OR: [{ kind: 'direct' }, { kind: 'mcp', source: 'link' }] } })).filter((own) => connectedState(own).connected);
-  const alreadyAdded = (app: { key: string; name: string }) => added.some((own) => sameApp(own, app));
+  // A listed App they connected counts against a ready-made copy too, the same own copies the bot server's list gives way to (lib/app-same.ts
+  // isOwnApp); a listed entry is only checked against their links and keys, since their listed connections are already shown as theirs
+  const added = (await prisma.appConnection.findMany({ where: { ownerId, OR: [{ kind: 'direct' }, { kind: 'mcp', source: { in: ['link', 'listed'] } }] } })).filter((own) => connectedState(own).connected);
+  const alreadyAdded = (app: { key: string; name: string }, withListed = false) => added.some((own) => (withListed || own.source !== 'listed') && sameApp(own, app));
   // Only the connections this answer can show are asked about: a ready-made one whose app is off, or any while the adapter is
   // off, never makes the owner wait for the provider (or fail on its answer)
   const shownReadyMade = new Set(readyMade.filter((app) => app.enabled).map((app) => app.key));
@@ -121,7 +123,7 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
     if (!app.enabled) continue;
     if (listedKeys.has(app.key) || listedNames.has(nameKey(app.name))) continue;
     // One they already connected is still shown as it is; one they only have by their own link or key is not suggested
-    if (!byToolkit.get(app.key) && alreadyAdded(app)) continue;
+    if (!byToolkit.get(app.key) && alreadyAdded(app, true)) continue;
     out.push({ key: app.key, name: app.name, blurb: '', kind: 'readyMade', ...view(byToolkit.get(app.key)) });
   }
   return out;
