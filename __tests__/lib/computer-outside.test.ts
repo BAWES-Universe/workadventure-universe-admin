@@ -24,8 +24,9 @@ describe('the list of what is outside a computer\'s home folder', () => {
     }
     // A folder name that is not valid UTF-8 is its own reason, as for a file
     expect(checkOutsideManifest(list({ dirs: [['/opt/bad-\udcff', 0o700]] }))).toEqual({ ok: false, reason: 'outside_name_not_utf8' });
-    // The most is four folders for each file the list may hold
-    expect(checkOutsideManifest(list({ dirs: Array.from({ length: 20001 }, (_, i) => [`/opt/d${i}`, 0o700]) }))).toEqual({ ok: false, reason: 'invalid' });
+    // The most is four folders for each file the list may hold: more is a computer that holds too much to carry (a reason of its own, as for too many files), not a list that is not one
+    expect(checkOutsideManifest(list({ dirs: Array.from({ length: 20001 }, (_, i) => [`/opt/d${i}`, 0o700]) }))).toEqual({ ok: false, reason: 'outside_too_big' });
+    expect(checkOutsideManifest(list({ dirs: Array.from({ length: 20000 }, (_, i) => [`/opt/d${i}`, 0o700]) })).ok).toBe(true);
   });
 
   it('a name with a lone surrogate (a file name that is not valid UTF-8) is its own reason, in a path or in where a link points, and a real pair is fine', () => {

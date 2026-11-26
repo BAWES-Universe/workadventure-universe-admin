@@ -1703,8 +1703,13 @@ def prepack():
     # printed is how long it is and its SHA-256, so the caller reads it back in slices (list-piece) and checks every byte
     list_bytes = list_sha = None
     if blocked is None:
+        modes = folder_modes(entries)
+        # A list finish would refuse is never made: more folder modes than finish takes is a computer that holds too much to carry, said here
+        if len(modes) > MAX_FILES * 4:
+            blocked = "outside_too_big"
+    if blocked is None:
         try:
-            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages, "dirs": folder_modes(entries)}, separators=(",", ":")))
+            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages, "dirs": modes}, separators=(",", ":")))
         except OverflowError:
             blocked = "outside_list_too_big"
         except (OSError, UnicodeEncodeError):

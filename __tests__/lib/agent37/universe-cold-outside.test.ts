@@ -825,6 +825,43 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(fs.statSync(path.join(w.fsB, 'opt/zz/private')).mode & 0o7777).toBe(0o755);
   });
 
+  it('more folder modes than a list may hold (four for each file the list may hold) is a computer that holds too much to carry, said by prepack (outside_too_big), never a list the caller then cannot read', () => {
+    const w = world();
+    // The limits made small: 5 files, so 20 folder modes. Two files under 11 private folders each (22 modes) are over it; one such file (11 modes) is not
+    const chain = (name: string) => {
+      const folder = path.join(w.fsA, 'opt', name, ...Array.from({ length: 11 }, (_, i) => `d${i}`));
+      fs.mkdirSync(folder, { recursive: true });
+      fs.writeFileSync(path.join(folder, 'f.txt'), name);
+      for (let depth = 1; depth <= 11; depth++) fs.chmodSync(path.join(w.fsA, 'opt', name, ...Array.from({ length: depth }, (_, i) => `d${i}`)), 0o700);
+      fs.chmodSync(path.join(w.fsA, 'opt', name), 0o700);
+    };
+    chain('one');
+    const fine = patched(w, w.fsA, 'prepack', 'mod.MAX_FILES = 5');
+    expect(printed(fine.stdout).blocked).toBeNull();
+    chain('two');
+    const over = patched(w, w.fsA, 'prepack', 'mod.MAX_FILES = 5');
+    // 3 files of the test + 2 = 5 files, 24 folder modes with the two top folders: over the 20
+    expect(printed(over.stdout)).toMatchObject({ blocked: 'outside_too_big', manifest_bytes: null });
+  });
+
+  it('a folder mode is applied only to a folder that finish makes (one the new computer already has is left as it is), and never carries the set-user-id or set-group-id bits (the sticky bit stays)', () => {
+    const w = world();
+    for (const folder of ['etc/existing', 'opt/p1', 'opt/p2', 'opt/p3']) {
+      fs.mkdirSync(path.join(w.fsA, folder), { recursive: true });
+      fs.writeFileSync(path.join(w.fsA, folder, 'x.conf'), folder);
+    }
+    const list = packed(w);
+    list.dirs = [['/etc/existing', 0o777], ['/opt/p1', 0o2770], ['/opt/p2', 0o4700], ['/opt/p3', 0o1777]];
+    fs.mkdirSync(path.join(w.fsB, 'etc/existing'), { recursive: true });
+    fs.chmodSync(path.join(w.fsB, 'etc/existing'), 0o755);
+    expect(finishWith(w, list).stdout).toMatch(/finished=1/);
+    const mode = (name: string) => fs.statSync(path.join(w.fsB, name)).mode & 0o7777;
+    expect(mode('etc/existing')).toBe(0o755);
+    expect(mode('opt/p1')).toBe(0o770);
+    expect(mode('opt/p2')).toBe(0o700);
+    expect(mode('opt/p3')).toBe(0o1777);
+  });
+
   it('a list with folder modes that are not what prepack prints is a bad list: a path outside the folders a copy may put back, a path that is not clean, a mode out of range, the same folder twice', () => {
     const w = world();
     const list = packed(w);

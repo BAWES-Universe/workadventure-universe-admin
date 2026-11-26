@@ -34,7 +34,9 @@ export function checkOutsideManifest(value: unknown): OutsideCheck {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid;
   const { files, packages, dirs } = value as { files?: unknown; packages?: unknown; dirs?: unknown };
   if (!Array.isArray(files) || !Array.isArray(packages)) return invalid;
-  if (dirs !== undefined && (!Array.isArray(dirs) || dirs.length > OUTSIDE_MAX_DIRS)) return invalid;
+  if (dirs !== undefined && !Array.isArray(dirs)) return invalid;
+  // Said as a fact about the computer (it holds too much to carry), never as a list that is not one: a pack-away that could not be read would fail every time
+  if (Array.isArray(dirs) && dirs.length > OUTSIDE_MAX_DIRS) return { ok: false, reason: 'outside_too_big' };
   if (files.length > OUTSIDE_MAX_FILES) return { ok: false, reason: 'outside_too_big' };
   if (packages.length > OUTSIDE_MAX_PACKAGES) return { ok: false, reason: 'packages_too_many' };
   const seen = new Set<string>();
