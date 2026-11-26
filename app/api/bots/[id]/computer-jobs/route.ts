@@ -8,6 +8,7 @@ import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-star
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 import { carryOnFrom, endedJobs, ENDED_MAX, retryCandidate } from '@/lib/computer-continue';
+import { jobsNow } from '@/lib/computer-jobs-now';
 import { prisma } from '@/lib/db';
 
 export const runtime = 'nodejs';
@@ -60,6 +61,9 @@ const bodySchema = z
  * looked up just now (503 `{ retry: true }`): never `started: null`, which says no job was made. The caller treats both as "not known" and asks again (a start repeated with the same key never makes a second job). A caller that sends no `attempt` gets no `started`.
  * With `ended=N` (1 to 5; more is read as 5) it also answers `ended: [{ id, title, how, endedAt, continuable }]`: the person's ended jobs on this Brick, newest first, `continuable` when "try again" would carry it on
  * (the same test as the start's, lib/computer-continue), so Brick can ask "Which job?" (round 8, E). Someone else's Brick or a guest: `ended: []`. Anything else as `ended` is 400.
+ * With `jobs=1` it also answers `jobs: { live, ended }` (lib/computer-jobs-now): this person's jobs on this Brick that are working, waiting for them or in line now (title, status, queuedFor, waitingFor, control, step,
+ * askedAt, startedAt), and the latest few that ended within a week, newest first (title, status, endedBy, endedAt, file names, and for one that could not go on its cleaned reason). The Brick is told these with every
+ * message, so it never says a job is running when none is, or that a job that finished never ran. Someone else's Brick or a guest: `jobs: { live: [], ended: [] }`; who it was for could not be looked up: 503 `{ retry: true }`.
  * With `retry=1` it also answers `retry: { id, title, how, endedAt, toldAt } | null`: the person's latest ended job on this Brick that "try again" would carry on in its own conversation (piece 8, lib/computer-continue), or null. The game names it back with the start (header `X-Computer-Continues`), and the start decides again.
  * Auth: service token only.
  */
@@ -84,7 +88,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const person = await resolveUsagePerson(userId, request.nextUrl.searchParams.get('isGuest') === 'true');
     // Who this was for could not be looked up just now: "no job reached Orbit" is NOT known, and answering it would let the caller think nothing was made. The same word as the meter's events: nothing is answered
     // but `retry` (503), and the caller treats it as unknown, never as a miss
-    if (asked && person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
+    // The Brick chat audit (26 Nov): what the Brick is told with every message about its jobs, live and lately ended (`jobs=1`). A lookup that failed is not "no jobs": it is the same retryable answer
+    const wantsJobs = request.nextUrl.searchParams.get('jobs') === '1';
+    if ((asked || wantsJobs) && person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     const view = person.personId ? await computerView(id, person.personId) : null;
     // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
     // GPT eighth note, A2: a key is known by the first key of its identity (a redelivery under another time prefix is the same start)
@@ -99,6 +105,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       ...(started === undefined ? {} : { started }),
       ...(wantsRetry ? { retry: view && person.personId ? await retryCandidate(id, person.personId) : null } : {}),
       ...(endedCount !== null ? { ended: view && person.personId ? await endedJobs(id, person.personId, endedCount) : [] } : {}),
+      ...(wantsJobs ? { jobs: view && person.personId ? await jobsNow(id, person.personId) : { live: [], ended: [] } } : {}),
     };
     if (!view) return NextResponse.json({ available: false, on: false, busy: false, ...extra });
     return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0, ...extra });

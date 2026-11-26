@@ -958,6 +958,7 @@ model Bot {
   brickItems      BrickItem[]
   template        BrickTemplate?
   madeFrom        BrickTemplateUse?
+  reportNotes     BrickReportNote[]
 
   @@unique([ownerId, createRequestKey])
   @@index([roomId])
@@ -1769,6 +1770,86 @@ model AppUseOutcome {
   @@index([appKey, recordedAt])
   @@index([recordedAt])
   @@map("app_use_outcomes")
+}
+
+// Brick reports (mock "Brick reports inbox"): a problem many Bricks hit, counted. Notes that read alike (same kind and area, close
+// titles) join one problem; nothing here says who sent them. `state` is the inbox tab it is on.
+model BrickReportProblem {
+  id          String            @id @default(uuid())
+  // problem | cant_do | friction | idea
+  kind        String            @db.VarChar(20)
+  // apps | computer | pages | chat | voice | map | memory | files | credit | other
+  area        String            @db.VarChar(20)
+  // The Brick's own tool, `app:<catalog key>`, `app` or `none`: what was running (see lib/brick-reports.ts). 64: `app:` and a catalog key
+  // of up to 60
+  operation   String            @db.VarChar(64)
+  // failed | signed_out | timed_out | not_allowed | no_result | missing_ability | corrected | idea
+  failure     String            @db.VarChar(20)
+  // Built from the fixed words above, never from a chat
+  title       String            @db.VarChar(80)
+  // new | working | fixed
+  state       String            @default("new") @db.VarChar(20)
+  // A note came in after it was marked fixed: it went back to New, ranked higher
+  cameBack    Boolean           @default(false) @map("came_back")
+  // New because a note came in after the fix, and nobody has moved it by hand since: taking back every note from after the fix puts it
+  // back to Fixed. Set and read only under the problem's lock, so it never depends on clocks or on which note goes last
+  reopenedByNote Boolean        @default(false) @map("reopened_by_note")
+  stateAt     DateTime?         @map("state_at")
+  firstSeenAt DateTime          @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
+  notes       BrickReportNote[]
+
+  @@unique([kind, area, operation, failure])
+  @@index([state])
+  @@map("brick_report_problems")
+}
+
+// One note a Brick sent to the Universe team: product-only (kind, area, what ran, how it failed, tried again), from fixed lists. `words` holds
+// a person's own words only when they pressed Send on the exact cleaned words the chat showed them. `ref` is the bot server's reference
+// (the chat's message and what the note is about): the same note sent again answers this row's receipt. `botId` is kept only so the Brick
+// can later tell its owner a fix shipped; no screen shows it, and it goes when the Brick is deleted (the note stays, counted). `personKey`
+// is a one-way hash (marked g: for a guest, p: otherwise), only to count different people. A note taken back is emptied: no words, context
+// or person are left, only the row for the day's count. `takeBackHash` checks the key the chat holds; `takeBackSealed` is that key sealed,
+// to hand the same receipt back when the note is sent again.
+model BrickReportNote {
+  id           String              @id @default(uuid())
+  // Empty once its problem goes (every note of it taken back): the emptied row stays only for the Brick's count of the day
+  problemId    String?             @map("problem_id")
+  problem      BrickReportProblem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+  botId        String?             @map("bot_id")
+  bot          Bot?                @relation(fields: [botId], references: [id], onDelete: SetNull)
+  ref          String              @db.VarChar(64)
+  personKey    String?             @map("person_key") @db.VarChar(64)
+  kind         String              @db.VarChar(20)
+  area         String              @db.VarChar(20)
+  operation    String              @db.VarChar(64)
+  failure      String              @db.VarChar(20)
+  retried      Boolean             @default(false)
+  // The person's own words, cleaned, only when they pressed Send on them
+  words        String              @default("") @db.VarChar(280)
+  wordsAt      DateTime?           @map("words_at")
+  // stopped | slowed | idea
+  effect       String              @db.VarChar(20)
+  // What the bot server already knew, with no words in it: the model, own key or not, the game version, the tools it had
+  context      Json?
+  // Sent after the latest fix: it took a problem marked fixed back to New, or joined it while it stood reopened by a note. Set under the
+  // problem's lock, cleared when a person marks it fixed again. Once no such note is left (and nobody moved the problem by hand), the
+  // problem goes back to Fixed
+  reopened     Boolean             @default(false)
+  takeBackHash   String            @map("take_back_hash") @db.VarChar(64)
+  takeBackSealed String            @map("take_back_sealed")
+  takenBackAt    DateTime?         @map("taken_back_at")
+  // When the bot server said the chat message carrying its receipt went out; never set within 15 minutes, the note is withdrawn
+  deliveredAt    DateTime?         @map("delivered_at")
+  // The day (UTC) it was sent: a Brick sends at most so many a day
+  day          DateTime            @db.Date
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  @@unique([botId, ref])
+  @@index([problemId, createdAt])
+  @@index([botId, day])
+  @@index([deliveredAt, createdAt])
+  @@map("brick_report_notes")
 }
 
 // "Asked for, not available yet": an App name a Brick looked for and did not find, counted per day and per person. ONLY the name

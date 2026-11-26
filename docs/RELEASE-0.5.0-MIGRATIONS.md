@@ -297,5 +297,6 @@ the statements it sends keep working against the new columns, which are all null
 207. `20261126000000_app_actions`
 208. `20261126120000_tool_person_heading`
 209. `20261126130000_app_action_choice_by_person`
-210. `20261126170000_usage_image_read`
+210. `20261126150000_brick_reports`
+211. `20261126170000_usage_image_read`
 <!-- migrations:end -->
