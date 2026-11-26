@@ -1795,7 +1795,7 @@ def restore():
         total = 0
         # --no-overwrite-dir: the folders that already exist (the home folder itself, or "/" and "/home" when the names start at the root) keep their own
         # owner and times, so a restore run by the computer's own user does not fail on a folder it is not allowed to touch
-        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner", "--no-overwrite-dir"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner", "--no-overwrite-dir", "-p"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         while True:
             chunk = resp.read(1 << 20)
             if not chunk:

@@ -53,9 +53,12 @@ const tree = (root: string): string[] =>
 const sha = (buffer: Buffer) => createHash('sha256').update(buffer).digest('hex');
 
 /** Asynchronous on purpose: the gateway runs in this process, so a blocked process would never answer the script that waits for it. */
-function runCold(home: string, command: string, input: object | null, extra: Record<string, string> = {}): Promise<{ stdout: string; status: number | null }> {
+function runCold(home: string, command: string, input: object | null, extra: Record<string, string> = {}, asUser = false): Promise<{ stdout: string; status: number | null }> {
   return new Promise((resolveRun, reject) => {
-    const child = spawn('python3', [path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } });
+    // `asUser`: as the computer's own user (not root, as `restore` runs there), with the usual umask: tar then applies the umask to what it extracts unless it is told to keep the modes
+    const child = asUser
+      ? spawn('sh', ['-c', 'umask 022 && exec setpriv --reuid=1000 --regid=1000 --clear-groups python3 "$0" "$1"', path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } })
+      : spawn('python3', [path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } });
     let stdout = '';
     child.stdout.on('data', (data) => (stdout += data));
     child.stderr.on('data', (d) => { if (process.env.DEBUG_COLD) console.error(String(d)); });
@@ -178,6 +181,32 @@ describe('restoring a copy on a computer', () => {
       expect(done.stdout).toMatch(/restored=0 reason=differs_1\b/);
       expect(done.status).toBe(1);
     });
+  });
+
+  const unprivileged = process.getuid?.() === 0 && spawnSync('setpriv', ['--version']).status === 0 ? it : it.skip;
+
+  unprivileged('keeps the modes of what it restores when it runs as the computer\'s own user (a file of mode 0664, 0666 or 0775 is not cut down by the umask (the set-user-id bits are already gone from a list: the copy is handed over first), so finish finds what prepack listed; Seer on #1035)', async () => {
+    const source = path.join(dir, 'source-modes', 'home', 'node');
+    fs.mkdirSync(source, { recursive: true });
+    writeTree(source);
+    const modes: Record<string, number> = { 'shared/group-write.txt': 0o664, 'shared/world-write.txt': 0o666, 'shared/group-run.sh': 0o775, '.universe/outside/opt/tool/run.sh': 0o755, '.universe/outside/var/www/shared.txt': 0o666, '.universe/outside/etc/app.conf': 0o640, 'notes/read-only.md': 0o444 };
+    for (const [name, mode] of Object.entries(modes)) {
+      const file = path.join(source, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `content of ${name}`);
+      fs.chmodSync(file, mode);
+    }
+    const target = path.join(dir, 'target-modes');
+    fs.mkdirSync(target, { recursive: true });
+    // The computer's own user owns its home folder, and must be able to reach the script and the folder
+    for (const folder of [dir, scripts]) fs.chmodSync(folder, 0o755);
+    fs.chownSync(target, 1000, 1000);
+    // The copy is of the computer's own user's files, as on a computer (the compare checks the owner too)
+    spawnSync('chown', ['-R', '1000:1000', source]);
+    archive = makeArchive(source, 'relative', target);
+    const done = await runCold(target, 'restore', { url: url(), token, sha256: sha(archive) }, {}, true);
+    expect(done.stdout).toMatch(/restored=1 /);
+    for (const [name, mode] of Object.entries(modes)) expect([name, fs.lstatSync(path.join(target, name)).mode & 0o7777]).toEqual([name, mode]);
   });
 
   it('counts a file as outside the image when its change time is later than the end of the unpack (plus the margin), even if it kept an old modification time', () => {
