@@ -358,6 +358,15 @@ To assign a bot-only animal set:
 
 ---
 
+## The Bricks group (bots only)
+
+A bot's picker (`/api/woka/list?context=bot`) starts with a **Bricks** group: the twelve Brick colours as map sprites
+(`brick-orange`, `brick-red`, ... in `lib/brick-sprites.ts`). It is part of the code, not a set in these tables, so it is
+there in every room with nothing to seed, and it does not count as a catalog set (an empty catalog still falls back to
+`config/woka.json`). The sheets are the game's own files (`resources/characters/bricks/<id>.png` in the game repo). A bot's
+Brick look resolves to its sheet when the bot joins a room. A person's own Woka picker never lists them and a person can
+never wear one: that is checked against the tables above, which do not hold them.
+
 ## Migration Guide
 
 ### Step 1: Run the migration
