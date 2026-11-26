@@ -38,9 +38,18 @@ export interface IssuedLot {
 
 export interface IssueResult {
   issued: IssuedLot[];
-  /** `categoryId` is the category the skipped rule gives credit for, so spending can tell "never given this period" from "used up". */
-  skipped: { programId: string; categoryId?: string; reason: SkipReason }[];
+  /**
+   * `categoryId` is the skipped rule's program category and `covers` every category its credit pays for (a gift can cover research and
+   * computers together), so spending can tell "never given this period" from "used up" for each category it would have paid for.
+   */
+  skipped: { programId: string; categoryId?: string; covers?: readonly string[]; reason: SkipReason }[];
 }
+
+/** One skip, said the same way wherever a rule is left out. */
+const skipOf = (rule: Pick<RuleFacts, 'programId' | 'categoryId' | 'covers'>, reason: SkipReason): IssueResult['skipped'][number] => ({ programId: rule.programId, categoryId: rule.categoryId, covers: [...rule.covers], reason });
+
+/** Whether a skip is about credit that would have paid for this category: everything the rule covers (its own category when that is not known). */
+export const skipCovers = (skip: IssueResult['skipped'][number], category: string): boolean => (skip.covers && skip.covers.length > 0 ? skip.covers.includes(category) : skip.categoryId === category);
 
 interface Plan {
   rule: RuleFacts;
@@ -59,7 +68,7 @@ function plansFor(rules: readonly RuleFacts[], person: Parameters<typeof reaches
   for (const candidates of reachingBase.values()) {
     const picked = pickBase(candidates);
     if (picked.winner) plans.push({ rule: picked.winner, base: true });
-    else if (picked.clash) for (const rule of picked.clash) skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: 'clash' });
+    else if (picked.clash) for (const rule of picked.clash) skipped.push(skipOf(rule, 'clash'));
   }
   return plans;
 }
@@ -121,7 +130,7 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
       for (const { rule } of plans) {
         const done = await issueOne(tx, rule, personId, now, settings);
         if (done.lot) out.push(done.lot);
-        else if (done.skipped) skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: done.skipped });
+        else if (done.skipped) skipped.push(skipOf(rule, done.skipped));
         // Left out by the rollout budget: said on the Limits screen as people not given credit this month (once per person, program and month)
         if (done.skipped === 'over_budget' && rule.fundingAccountId === PLATFORM_ACCOUNT_ID) {
           await tx.$executeRaw`INSERT INTO "credit_issue_skips" ("person_id", "program_id", "month_key", "reason", "first_at") VALUES (${personId}, ${rule.programId}, ${monthKeyOf(now)}, 'over_budget', (${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')) ON CONFLICT DO NOTHING`;
@@ -173,7 +182,7 @@ async function settledWithoutLocks(personId: string, plans: readonly Plan[], now
     if (left?.reason !== 'over_budget') return null;
     if (room === undefined) room = await platformRoom(now);
     if (!room || room.issued + plan.amountMicros <= room.budget) return null;
-    skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: 'over_budget' });
+    skipped.push(skipOf(rule, 'over_budget'));
   }
   return skipped;
 }

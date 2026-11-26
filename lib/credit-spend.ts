@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { getMeterSettings } from '@/lib/meter';
-import { ensureIssued, type IssueResult } from '@/lib/credit-issue';
+import { ensureIssued, skipCovers, type IssueResult } from '@/lib/credit-issue';
 import type { MeterSettings } from '@/lib/meter-values';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
 import { lockAll, lockOfEffect, lockOfHoldKey, lockOfPerson, lockOfPool, lotBalances, usableLots, type LotRow, type Tx } from '@/lib/credit-store';
@@ -193,8 +193,9 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
       const available = lots.reduce((sum, lot) => sum + lot.availableMicros, 0);
       // Nothing left at all (lots spent to nothing count as none) and what was due this period was not given: "not given", never "used up".
       // Some credit left that is not enough stays "used up"
-      // Only a skip of a rule for this category counts: a rule for another category left out says nothing about this one
-      const mine = issued.skipped.filter((s) => s.categoryId === input.category);
+      // Only a skip of a rule whose credit would have paid for this category counts (a gift can cover more than its own category): a rule
+      // for other categories left out says nothing about this one
+      const mine = issued.skipped.filter((s) => skipCovers(s, input.category));
       if (available <= 0 && mine.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
       if (available <= 0 && mine.length > 0) return { ok: false, reason: 'not_given', availableMicros: 0 };
       return { ok: false, reason: 'credit_used_up', availableMicros: available };
@@ -471,8 +472,9 @@ export async function availableCredit(personId: string, category: MoneyCategory,
 export async function creditStanding(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number; notGiven: boolean; renewsAt: Date | null }> {
   const issued = await ensureIssued(personId, now);
   const lots = await usableLots(prisma, personId, category, now);
-  // Only a skip of a rule for this category counts, whatever the reason (no budget set, the month's budget ran out, a cap, a clash)
-  const skipped = issued.skipped.some((s) => s.categoryId === category);
+  // Only a skip of a rule whose credit would have paid for this category counts, whatever the reason (no budget set, the month's budget ran
+  // out, a cap, a clash)
+  const skipped = issued.skipped.some((s) => skipCovers(s, category));
   const monthly = lots.filter((lot) => /^\d{4}-\d{2}$/.test(lot.lot.periodKey) && lot.expiresAt !== null).map((lot) => lot.expiresAt!.getTime());
   const renewsAt = monthly.length > 0 ? new Date(Math.min(...monthly)) : null;
   const balances = await lotBalances(prisma, lots.map((lot) => lot.id));

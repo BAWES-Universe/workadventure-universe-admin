@@ -1518,7 +1518,7 @@ run('the bounded Instant executor, in a real database', () => {
         try {
           const first = await ensureIssued(person);
           expect(first.issued).toEqual([]);
-          expect(first.skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+          expect(first.skipped).toContainEqual(expect.objectContaining({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' }));
           expect(spy).toHaveBeenCalled();
           expect(await prisma.creditIssueSkip.count({ where: { personId: person, programId: program, reason: 'over_budget' } })).toBe(1);
           // Every later look gives the same answer ("not given", never "used up") and opens no transaction, so it never waits on the lock
@@ -1548,10 +1548,10 @@ run('the bounded Instant executor, in a real database', () => {
           const { rolloutThisMonth } = await import('@/lib/credit-funding');
           expect((await rolloutThisMonth()).accountBudgetMicros).toBe(1);
           const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
-          expect((await ensureIssued(person)).skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+          expect((await ensureIssued(person)).skipped).toContainEqual(expect.objectContaining({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' }));
           const spy = jest.spyOn(prisma, '$transaction');
           try {
-            expect((await ensureIssued(person)).skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+            expect((await ensureIssued(person)).skipped).toContainEqual(expect.objectContaining({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' }));
             expect(spy).not.toHaveBeenCalled();
             // The account's own number raised: the next look gives the $2, though the Limits number never changed
             await prisma.fundingAccount.update({ where: { id: 'funding-platform' }, data: { budgetMicros: BigInt(1_000_000_000_000) } });
@@ -1604,7 +1604,7 @@ run('the bounded Instant executor, in a real database', () => {
         const gift = await createGift({ categoryId: 'computers', amount: 10_000, schedule: 'once', fundingAccountId: account.id, recipients: { kind: 'people', userIds: [person] } }, { userId: sara, superAdmin: true });
         await prisma.fundingAccount.update({ where: { id: account.id }, data: { budgetMicros: null } });
         try {
-          expect((await ensureIssued(person)).skipped).toContainEqual({ programId: gift.programId, categoryId: 'computers', reason: 'not_set' });
+          expect((await ensureIssued(person)).skipped).toContainEqual(expect.objectContaining({ programId: gift.programId, categoryId: 'computers', reason: 'not_set' }));
           // The research credit spent to nothing
           const { availableMicros } = await creditStanding(person, 'instant_apps');
           expect(availableMicros).toBeGreaterThan(0);
@@ -1613,6 +1613,31 @@ run('the bounded Instant executor, in a real database', () => {
           await settleHold({ holdKey: key, customerMicros: availableMicros });
           expect(await creditStanding(person, 'instant_apps')).toMatchObject({ availableMicros: 0, notGiven: false });
           expect(await holdCredit({ holdKey: `h-${randomUUID()}`, personId: person, category: 'instant_apps', amountMicros: 100, chargeClass: 'instant_run' })).toMatchObject({ ok: false, reason: 'credit_used_up' });
+        } finally {
+          await endProgram(gift.programId, { userId: sara, superAdmin: true });
+          await prisma.creditAllocation.deleteMany({ where: { hold: { personId: person } } });
+          await prisma.creditHold.deleteMany({ where: { personId: person } });
+        }
+      });
+
+      it('a gift for computers that also covers research, left out for want of a budget, is about research too: spent research credit reads "not set up", not "used up"', async () => {
+        const { person } = await newOwner('reem');
+        const { createGift, endProgram } = await import('@/lib/credit-rules');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        const { creditStanding, holdCredit, settleHold } = await import('@/lib/credit-spend');
+        await setBudget(1_000_000_000_000);
+        const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: person, name: 'Budget taken away', budgetMicros: BigInt(1_000_000), admins: { create: [{ userId: sara }] } } });
+        const gift = await createGift({ categoryId: 'computers', covers: ['computers', 'instant_apps'], amount: 10_000, schedule: 'once', fundingAccountId: account.id, recipients: { kind: 'people', userIds: [person] } }, { userId: sara, superAdmin: true });
+        await prisma.fundingAccount.update({ where: { id: account.id }, data: { budgetMicros: null } });
+        try {
+          expect((await ensureIssued(person)).skipped).toContainEqual(expect.objectContaining({ programId: gift.programId, categoryId: 'computers', reason: 'not_set', covers: expect.arrayContaining(['instant_apps']) }));
+          const { availableMicros } = await creditStanding(person, 'instant_apps');
+          const key = `h-${randomUUID()}`;
+          expect((await holdCredit({ holdKey: key, personId: person, category: 'instant_apps', amountMicros: availableMicros, chargeClass: 'instant_run' })).ok).toBe(true);
+          await settleHold({ holdKey: key, customerMicros: availableMicros });
+          // The gift would have paid for research too, and it was never given: "not set up", not "used up"
+          expect(await creditStanding(person, 'instant_apps')).toMatchObject({ availableMicros: 0, notGiven: true });
+          expect(await holdCredit({ holdKey: `h-${randomUUID()}`, personId: person, category: 'instant_apps', amountMicros: 100, chargeClass: 'instant_run' })).toMatchObject({ ok: false, reason: 'not_set' });
         } finally {
           await endProgram(gift.programId, { userId: sara, superAdmin: true });
           await prisma.creditAllocation.deleteMany({ where: { hold: { personId: person } } });

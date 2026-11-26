@@ -177,7 +177,7 @@ export async function usableLots(
     // A pool is open to the people its rule reaches: the version it was issued under, never a later edit
     const reached = new Map<string, boolean>();
     for (const lot of poolLots) {
-      const row = rules.find((rule) => rule.programId === lot.programId && rule.version === lot.ruleVersion) ?? rules.find((rule) => rule.programId === lot.programId);
+      const row = issuingVersion(rules.filter((rule) => rule.programId === lot.programId), lot.ruleVersion);
       reached.set(lot.id, !!row && !!person && reachesRow(row, person));
     }
     pools = poolLots.filter((lot) => reached.get(lot.id));
@@ -192,6 +192,9 @@ export async function usableLots(
 
 const reachesRow = (row: RuleRow, person: PersonFacts): boolean => reaches(ruleFacts(row), person);
 
+/** The version a pool was issued under, from one program's versions newest first: the newest when that one is gone (or was never said). */
+const issuingVersion = (versions: readonly RuleRow[], ruleVersion: number | null): RuleRow | undefined => versions.find((rule) => rule.version === ruleVersion) ?? versions[0];
+
 /**
  * Whether a shared pool is open to a person, the way `usableLots` decides it: by the rule version the pool was issued under (the latest
  * version when that one is gone), never a later edit.
@@ -200,6 +203,6 @@ export async function poolOpenTo(db: Db, lot: { programId: string; ruleVersion: 
   const person = await personFacts(db, personId);
   if (!person) return false;
   const rules = await db.grantRule.findMany({ where: { programId: lot.programId }, include: ruleInclude, orderBy: { version: 'desc' } });
-  const row = rules.find((rule) => rule.version === lot.ruleVersion) ?? rules[0];
+  const row = issuingVersion(rules, lot.ruleVersion);
   return !!row && reachesRow(row, person);
 }
