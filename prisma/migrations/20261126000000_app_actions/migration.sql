@@ -30,6 +30,7 @@ CREATE TABLE "app_action_catalogs" (
     "action_count" INTEGER NOT NULL DEFAULT 0,
     "version" INTEGER NOT NULL DEFAULT 0,
     "shrunk_since" TIMESTAMP(3),
+    "shrunk_reads" INTEGER NOT NULL DEFAULT 0,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "app_action_catalogs_pkey" PRIMARY KEY ("toolkit")

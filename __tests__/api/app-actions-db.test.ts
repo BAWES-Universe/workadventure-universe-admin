@@ -284,10 +284,18 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       // When the provider keeps answering the shorter list for hours, the App really lost those actions: it is taken
       const since = (await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).shrunkSince;
       expect(since).not.toBeNull();
-      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null, shrunkSince: new Date(Date.now() - SHRINK_BELIEVED_AFTER_MS - 60_000) } });
+      // Six hours on but only the third read: one read after a long quiet gap is not enough on its own
+      expect((await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).shrunkReads).toBe(2);
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null, shrunkReads: 0, shrunkSince: new Date(Date.now() - SHRINK_BELIEVED_AFTER_MS - 60_000) } });
+      expect(await refreshAppActions(KEY)).toBe(false);
+      expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(12);
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null } });
+      expect(await refreshAppActions(KEY)).toBe(false);
+      // Six hours and three reads in a row: taken
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null } });
       expect(await refreshAppActions(KEY)).toBe(true);
       expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(1);
-      expect((await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).shrunkSince).toBeNull();
+      expect(await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).toMatchObject({ shrunkSince: null, shrunkReads: 0 });
       expect((await readServerTools(saraBrick, serverId)).tools.map((tool) => tool.name)).toEqual([`${U}_LOOK_0`]);
     });
 

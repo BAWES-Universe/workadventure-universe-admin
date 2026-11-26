@@ -1949,6 +1949,8 @@ model AppActionCatalog {
   version      Int       @default(0)
   // Since when the provider keeps answering a list much shorter than the one kept: once that lasts, the shorter list is believed
   shrunkSince  DateTime? @map("shrunk_since")
+  // How many reads in a row since then gave the shorter list
+  shrunkReads  Int       @default(0) @map("shrunk_reads")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   @@map("app_action_catalogs")

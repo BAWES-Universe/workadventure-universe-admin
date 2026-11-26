@@ -21,12 +21,14 @@ const CLAIM_MS = 2 * 60_000;
 const RETRY_AFTER_FAILURE_MS = 5 * 60_000;
 /**
  * A list this much shorter than the one kept (or empty) is not believed at once: one bad answer must never drop actions. When the
- * provider keeps answering it for this long, it is believed (the App really lost those actions). A person's own choice for an action
- * stays on the grant either way.
+ * provider keeps answering it, on every read for this long and on at least SHRINK_BELIEVED_READS reads in a row, it is believed (the
+ * App really lost those actions). Any read that is not shorter starts the count again. A person's own choice for an action stays on
+ * the grant either way.
  */
 const SHRINK_LIMIT = 0.5;
 const SHRINK_CHECK_FROM = 10;
 export const SHRINK_BELIEVED_AFTER_MS = 6 * 60 * 60_000;
+export const SHRINK_BELIEVED_READS = 3;
 const DESCRIPTION_MAX = 2000;
 
 const running = new Map<string, Promise<boolean>>();
@@ -64,15 +66,16 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   }
   const kept = await prisma.appAction.count({ where: { toolkit } });
   if (kept > 0 && (listed.length === 0 || (kept >= SHRINK_CHECK_FROM && listed.length < kept * SHRINK_LIMIT))) {
-    const row = await prisma.appActionCatalog.findUnique({ where: { toolkit }, select: { shrunkSince: true } });
-    const since = row?.shrunkSince ?? null;
-    if (!since || Date.now() - since.getTime() < SHRINK_BELIEVED_AFTER_MS) {
+    // This read counts as one more in a row that gave the shorter list (the first one starts the clock)
+    const counted = await prisma.appActionCatalog.update({ where: { toolkit }, data: { shrunkReads: { increment: 1 } }, select: { shrunkSince: true, shrunkReads: true } }).catch(() => null);
+    const since = counted?.shrunkSince ?? null;
+    if (!counted || !since || Date.now() - since.getTime() < SHRINK_BELIEVED_AFTER_MS || counted.shrunkReads < SHRINK_BELIEVED_READS) {
       console.error(`[AppActions] The provider listed ${listed.length} actions for an App that had ${kept}: the list is kept as it was for now`);
-      if (!since) await prisma.appActionCatalog.updateMany({ where: { toolkit, shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
+      if (counted && !since) await prisma.appActionCatalog.updateMany({ where: { toolkit, shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
       await backOff();
       return false;
     }
-    console.error(`[AppActions] The provider has listed ${listed.length} actions for an App that had ${kept} since ${since.toISOString()}: the shorter list is taken`);
+    console.error(`[AppActions] The provider has listed ${listed.length} actions for an App that had ${kept}, on ${counted.shrunkReads} reads in a row since ${since.toISOString()}: the shorter list is taken`);
   }
   try {
     await save(toolkit, listed);
@@ -122,7 +125,7 @@ async function save(toolkit: string, listed: readonly ProviderAction[]): Promise
       changed ||= fresh.length > 0 || gone.length > 0;
       await tx.appActionCatalog.update({
         where: { toolkit },
-        data: { refreshedAt: new Date(), claimedUntil: null, retryAfter: null, shrunkSince: null, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
+        data: { refreshedAt: new Date(), claimedUntil: null, retryAfter: null, shrunkSince: null, shrunkReads: 0, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
       });
     },
     { maxWait: 15_000, timeout: 60_000 },
