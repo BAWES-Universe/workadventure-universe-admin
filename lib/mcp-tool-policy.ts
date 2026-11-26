@@ -347,13 +347,14 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       if (!before) {
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
-      } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && before.movedById && before.heading) {
-        // On a person's own App a tool they moved sits, once it changed, under the stricter of their own heading and the rule for the new
-        // version, confirmed by Universe (lib/app-own-tools.ts). Their own heading is kept apart, so what they decided is never lost
+      } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && (before.movedById || before.confirmedById) && before.heading) {
+        // On a person's own App a tool they moved or confirmed sits, once it changed, under the stricter of their own heading and the rule
+        // for the new version, confirmed by Universe (lib/app-own-tools.ts). Their own heading is kept apart, so what they decided is never
+        // lost (a tool they only confirmed, from before Universe sorted own Apps, is kept as their choice the same way)
         const personHeading = (before.personHeading ?? before.heading) as Heading;
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, personHeading, heading: keepMovedTool(tool.name, personHeading, suggestion.suggestedHeading as Heading | null, settingsOf(server)), confirmedById: null, confirmedAt: new Date() },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, personHeading, movedById: before.movedById ?? before.confirmedById, heading: keepMovedTool(tool.name, personHeading, suggestion.suggestedHeading as Heading | null, settingsOf(server)), confirmedById: null, confirmedAt: new Date() },
         });
         reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
@@ -438,14 +439,14 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
   return prisma.$transaction(async (tx) => {
     await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
-    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true, confirmedById: true, movedById: true } });
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true, confirmedById: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
     // An App's actions stay where Universe sorted them (Send email can never be filed under Looks things up): their own choice replaces a move
     if (kindOf(server) === 'appActions') throw new BotSettingsError(409, APP_ACTIONS_DONT_MOVE);
-    // A tool a person moved that Universe keeps for them since it changed (confirmed by nobody): a move to the heading it sits under now is
-    // still their choice, and makes it theirs again (lib/app-own-tools.ts keepMovedTool)
-    const kept = !!tool.movedById && !tool.confirmedById && !!tool.confirmedAt;
-    if (tool.heading !== heading || kept) {
+    // A tool Universe placed (confirmed by nobody: sorted on a person's own App, or kept for them since it changed): a move to the heading
+    // it sits under now is still the person's choice, and is recorded as theirs (lib/app-own-tools.ts), so Universe never moves it again
+    const placedByUniverse = !!tool.confirmedAt && !tool.confirmedById;
+    if (tool.heading !== heading || placedByUniverse) {
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between
       const moved = await tx.botMcpTool.updateMany({

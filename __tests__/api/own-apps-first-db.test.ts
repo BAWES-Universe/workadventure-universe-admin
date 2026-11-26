@@ -214,6 +214,25 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       expect((await prisma.botMcpTool.findUniqueOrThrow({ where: { id: byName.notes } })).personHeading).toBe('deletesOrSends');
     });
 
+    it('records a move to the heading Universe already sorted a tool under, and later suggestions no longer move it', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('notes', 'g1')] });
+      expect(synced.tools[0]).toMatchObject({ heading: 'deletesOrSends', movedBy: null });
+      await moveTool(saraBrick, serverId, synced.tools[0].id, 'deletesOrSends', sara);
+      const later = await syncCatalog(saraBrick, serverId, { tools: [tool('notes', 'g1', 'looksUp')] });
+      expect(later.tools[0]).toMatchObject({ heading: 'deletesOrSends', confirmedBy: { name: 'sara' }, movedBy: { name: 'sara' } });
+    });
+
+    it('keeps a heading a person only confirmed (from before Universe sorted own Apps) when the tool changes, never looser', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp')] });
+      // As a person's confirm left it: confirmed by them, never moved
+      await prisma.botMcpTool.update({ where: { id: synced.tools[0].id }, data: { heading: 'deletesOrSends', confirmedById: sara, movedById: null } });
+      const changed = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'looksUp')] });
+      expect(changed.tools[0]).toMatchObject({ heading: 'deletesOrSends', state: 'confirmed', movedBy: { name: 'sara' } });
+      expect((await prisma.botMcpTool.findUniqueOrThrow({ where: { id: synced.tools[0].id } })).personHeading).toBe('deletesOrSends');
+    });
+
     it('removes a tool the server dropped from a cut list unless a person decided on it', async () => {
       const serverId = await ownApp();
       const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('a', 'f1', 'looksUp'), tool('b', 'f2', 'looksUp'), tool('c', 'f3', 'looksUp')] });
