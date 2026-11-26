@@ -673,6 +673,51 @@ run('payments for pages, in a real database', () => {
       expect((await startShown(artifactId, 1, '203.0.113.35', { intentId: wish(), recoveryCode: code })).status).toBe(409);
     });
 
+    it('waits for an earlier try of the same wish that is writing its order right now, and gives that order instead of a refusal (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      gateway();
+      const terms = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const { keyMode } = await prisma.appConnection.findUniqueOrThrow({ where: { id: terms.connectionId } });
+      const intentId = wish();
+      const code = word();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let written: () => void = () => undefined;
+      const writing = new Promise<void>((resolve) => (written = resolve));
+      // The first try of this wish passed its checks and is writing its order under the owner's lock, not committed yet (its start was cut off
+      // long enough ago that a later try may carry it on)
+      const longAgo = new Date(Date.now() - 3_600_000);
+      let firstOrder = '';
+      const first = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${terms.ownerId}`}, 0))`;
+          const made = await tx.appPageOrder.create({
+            data: { jobId: terms.id, ownerId: terms.ownerId, connectionId: terms.connectionId, artifactId, definitionHash: terms.definitionHash, amountMinor: terms.amountMinor, currency: terms.currency, mode: keyMode, status: 'creating', visitorHash: 'first-try', intentId, buyerKey: guestBuyerKey(code), description: terms.description, createdAt: longAgo, checkedAt: longAgo },
+          });
+          firstOrder = made.id;
+          written();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await writing;
+      // Meanwhile the owner publishes the older version again: the retry's own look now finds terms the link no longer shows
+      await publish(artifactId, 1);
+      let finished = false;
+      const retry = startShown(artifactId, 2, '203.0.113.36', { intentId, recoveryCode: code }).then((response) => ((finished = true), response));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // It waits for the first try instead of answering a refusal it cannot be sure of
+      expect(finished).toBe(false);
+      release();
+      await first;
+      const answer = await retry;
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ orderId: firstOrder });
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+    });
+
     it('still carries on an order made before the terms moved to a draft, at the order’s own amount', async () => {
       const { serverId } = await connectGateway();
       const artifactId = await pageWith(1, 1);

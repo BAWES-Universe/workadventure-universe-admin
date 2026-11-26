@@ -413,13 +413,18 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   }
   const seesLatest = input.seesLatest === true;
   const displayed = typeof input.shownVersion === 'number' && Number.isSafeInteger(input.shownVersion) && input.shownVersion > 0 ? input.shownVersion : null;
-  const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: CHECKOUT_JOB }), seesLatest, displayed);
+  const pageJob = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: CHECKOUT_JOB });
+  const first = checkoutTerms(pageJob, seesLatest, displayed);
   if (!first) return { status: 'unavailable' };
   if (first === 'not_published' || first === 'page_changed') {
     // The same wish may have made its order a moment ago (an earlier try still on its way when this one looked): that order is its answer,
-    // never a refusal that would leave the buyer unable to check a checkout that exists
-    if (intent) {
-      const made = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
+    // never a refusal that would leave the buyer unable to check a checkout that exists. The look waits on the owner's order lock, the one
+    // every order is written under, so an earlier try that is writing its order right now has committed it (or given up) before this looks
+    if (intent && pageJob) {
+      const made = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${pageJob.ownerId}`}, 0))`;
+        return tx.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
+      });
       if (made) return carryOn(made.id, limits, { resume: true, wait: true }, deps);
     }
     return { status: first };
