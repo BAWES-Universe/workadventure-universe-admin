@@ -1,23 +1,19 @@
 # Prisma Deployment Quick Reference
 
-## TL;DR - What to Run After Deployment
+## TL;DR - Migrations run when the container starts
 
-### Option 1: Automatic (Recommended)
-Use the startup script that runs migrations automatically:
-```dockerfile
-# In Dockerfile, change CMD to:
-CMD ["sh", "scripts/start.sh"]
-```
+The production image's CMD is `sh scripts/start.sh`. It runs `prisma migrate deploy` and starts the app
+only if every migration applied. If a migration fails (or the database cannot be reached, or
+`DATABASE_URL` is missing) the container exits non-zero and Orbit does NOT start, so a new image never
+serves on a database it was not written for. Nothing needs to run after a deploy.
 
-### Option 2: Manual Post-Deploy
-In Coolify, set **Post-Deploy Command**:
+A Coolify post-deploy command `npx prisma migrate deploy` is no longer needed. It is harmless if it is
+still set: by then the start script has applied everything, and `migrate deploy` only applies what is
+pending.
+
+To check by hand:
 ```bash
-npx prisma migrate deploy
-```
-
-### Option 3: Manual via Docker
-```bash
-docker exec <container-name> npx prisma migrate deploy
+docker exec <container-name> node node_modules/prisma/build/index.js migrate status
 ```
 
 ## Understanding Prisma in Production
@@ -97,40 +93,32 @@ Use a separate init container that runs migrations before the main app starts.
 **Pros**: Clean separation, migrations complete before app starts
 **Cons**: More complex setup
 
-## Using the Startup Script
+## The Startup Script
 
-The `scripts/start.sh` script automatically runs migrations before starting the app.
-
-### Enable in Dockerfile
-
-Update your Dockerfile:
-
-```dockerfile
-# Copy startup script
-COPY scripts/start.sh ./scripts/start.sh
-RUN chmod +x ./scripts/start.sh
-
-# Use startup script instead of npm start
-CMD ["sh", "scripts/start.sh"]
-```
+`scripts/start.sh` is the production image's CMD (see the Dockerfile).
 
 ### What It Does
 
-1. Checks if `DATABASE_URL` is set
-2. Runs `npx prisma migrate deploy`
-3. Starts the Next.js application
-4. If migrations fail, logs warning but continues (prevents container crash)
+1. Refuses to start if `DATABASE_URL` is not set
+2. Runs `prisma migrate deploy` with the Prisma CLI shipped in the image (never `npx`, which could fetch another version)
+3. Starts the app (`npm start`) only if that succeeded
+4. If the migrations do not all apply, exits non-zero and the app does not start. There is no "continue anyway"
 
 ## Troubleshooting
 
-### "Migration failed" but container continues
+### "Database migrations did not apply ... Orbit is NOT starting"
 
-This is intentional - the script logs a warning but doesn't crash. Check logs:
-```bash
-docker logs <container-name> | grep -i migration
-```
+The container stops on purpose: this version needs a database change that did not happen. Read the
+reason above that line (`docker logs <container-name>`). Then:
 
-Then run migrations manually if needed.
+1. If the database could not be reached, fix the connection and start the container again.
+2. If a migration failed, Postgres rolled back that migration's own changes, but it is recorded as
+   failed and every later start refuses (Prisma error P3009) until it is resolved. Fix the migration in
+   a new image, mark the failed one as rolled back (from any container of this image, or a one-off one):
+   ```bash
+   node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
+   ```
+   and deploy the fixed image. Migrations that applied before the failing one stay applied.
 
 ### "Prisma Client not found"
 

@@ -81,16 +81,13 @@ COPY --from=builder /app/config ./config
 # Copy built application
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-# Copy startup script (optional - for automatic migrations)
+# The start script: applies the database migrations, then starts the app (see CMD below)
 COPY scripts/start.sh ./scripts/start.sh
 RUN chmod +x ./scripts/start.sh
 
 EXPOSE 3333
 
-# Default: start directly (migrations must be run manually or via post-deploy command)
-# Use npm start to use local next from node_modules (not npx which downloads)
-CMD ["npm", "start"]
-
-# Alternative: Use startup script to run migrations automatically before starting
-# Uncomment the line below and comment out the line above to enable automatic migrations
-# CMD ["sh", "scripts/start.sh"]
+# Apply every pending database migration, then start the app (npm start, which runs the local next).
+# If the migrations do not all apply, the script exits non-zero and the app never starts, so this
+# image never serves on a database it was not written for. See scripts/start.sh.
+CMD ["sh", "scripts/start.sh"]

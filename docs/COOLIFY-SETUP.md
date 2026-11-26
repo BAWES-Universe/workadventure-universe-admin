@@ -87,42 +87,14 @@ In Coolify application settings:
 - **Port**: `3333`
 - **Exposed Port**: `3333`
 
-## Step 6: Configure Prisma Migrations
+## Step 6: Prisma Migrations
 
-You have three options:
+Nothing to configure. The image's CMD (`sh scripts/start.sh`) applies every pending migration with
+`prisma migrate deploy` and starts the app only when that succeeded. If a migration fails, the
+container exits non-zero and Orbit does not start; see docs/PRISMA-DEPLOYMENT.md for recovering.
 
-### Option A: Automatic Migrations (Recommended)
-
-Update the Dockerfile to use the startup script:
-
-1. Fork/clone the repository
-2. Edit `Dockerfile` - change the last line from:
-   ```dockerfile
-   CMD ["npm", "start"]
-   ```
-   to:
-   ```dockerfile
-   CMD ["sh", "scripts/start.sh"]
-   ```
-3. Commit and push (this will rebuild the image)
-
-### Option B: Post-Deploy Command
-
-In Coolify, set **Post-Deploy Command**:
-```bash
-npx prisma migrate deploy
-```
-
-### Option C: Manual Migration
-
-After deployment, run migrations manually:
-```bash
-# Get container name
-docker ps | grep workadventure-universe-admin
-
-# Run migrations
-docker exec <container-name> npx prisma migrate deploy
-```
+Keep Coolify's health check on: a new container that never becomes healthy is then not put in front of
+users. A post-deploy command `npx prisma migrate deploy` is no longer needed (it is harmless if set).
 
 ## Step 7: Deploy
 
