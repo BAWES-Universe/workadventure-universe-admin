@@ -1061,7 +1061,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await toolNames()).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);
       const listed = (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; app: string; strength: string }[] };
       // Each tool says which App it is and what that App is good at: what the Brick picks by. Never the provider that runs it
-      expect(listed.tools.find((tool) => tool.name === 'TAVILY_SEARCH')).toMatchObject({ app: 'Tavily', strength: 'Fresh news and quick facts' });
+      expect(listed.tools.find((tool) => tool.name === 'TAVILY_SEARCH')).toMatchObject({ app: 'Tavily', kind: 'research', strength: 'Fresh news and quick facts' });
       expect(JSON.stringify(listed)).not.toMatch(/composio/i);
       // The schema a Brick is offered is cut to the arguments a run may carry: no contents, no result count past the limit
       p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: { type: 'object', properties: { query: {}, contents: {}, type: {} }, required: ['query'] }, instantSupported: true, priceWords: null })) as never);

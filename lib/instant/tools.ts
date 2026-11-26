@@ -3,7 +3,7 @@ import { getAdapter } from '@/lib/app-adapter';
 import { appKeyOf, brickOwnResearch, personOwnResearch } from '@/lib/instant/asker';
 import { instantFundsAreWired } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause } from '@/lib/instant/state';
-import { holdFor, instantAllowedArguments, instantAppOf, instantCatalog, missingInstantLimits } from '@/lib/instant/values';
+import { holdFor, instantAllowedArguments, instantAppOf, instantCatalog, missingInstantLimits, type InstantAppInfo } from '@/lib/instant/values';
 import { creditStanding } from '@/lib/credit-spend';
 
 /**
@@ -26,6 +26,8 @@ export interface OfferedTool {
   fromMicros: number;
   /** The App's name as people know it ("Exa"), never the provider that runs it for Universe. */
   app: string;
+  /** What kind of App it is: only a `research` one is a research App to the Brick (search right away, pick by strength). */
+  kind: InstantAppInfo['kind'];
   /** What the App is good at, in one line: what the Brick picks an App by. */
   strength: string;
   /**
@@ -171,7 +173,7 @@ async function instantToolsWhere(wanted: (toolkit: string) => boolean): Promise<
         continue;
       }
     }
-    tools.push({ name: row.tool, toolkit: row.toolkit, description: known.description, inputSchema: known.inputSchema, fromMicros: row.fromMicros, app: app.name, strength: app.strength, firstUse: false });
+    tools.push({ name: row.tool, toolkit: row.toolkit, description: known.description, inputSchema: known.inputSchema, fromMicros: row.fromMicros, app: app.name, kind: app.kind, strength: app.strength, firstUse: false });
   }
   // Cheapest first, the table's own order between equals: the order the Brick is told to try them in
   tools.sort((a, b) => a.fromMicros - b.fromMicros);

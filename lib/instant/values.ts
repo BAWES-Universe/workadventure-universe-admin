@@ -173,13 +173,15 @@ const TABLE: Record<string, InstantTool> = {
  */
 export interface InstantAppInfo {
   name: string;
+  /** What kind of App it is, said to the Brick with each tool: only a `research` one gets the "search right away" instructions. */
+  kind: 'research';
   strength: string;
   hosts: string[];
 }
 
 export const INSTANT_APPS: Record<string, InstantAppInfo> = {
-  exa: { name: 'Exa', strength: 'Papers, companies and people', hosts: ['exa.ai'] },
-  tavily: { name: 'Tavily', strength: 'Fresh news and quick facts', hosts: ['tavily.com'] },
+  exa: { name: 'Exa', kind: 'research', strength: 'Papers, companies and people', hosts: ['exa.ai'] },
+  tavily: { name: 'Tavily', kind: 'research', strength: 'Fresh news and quick facts', hosts: ['tavily.com'] },
 };
 
 /** The App a toolkit of the table belongs to, or null when it has none (a row without an App is never offered). */
