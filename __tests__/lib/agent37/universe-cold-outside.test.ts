@@ -129,6 +129,27 @@ function packed(w: World): Manifest {
 }
 
 run('universe-cold: prepack prints what it copied, finish puts back only that (Opus on #1025)', () => {
+  rootTest('puts the files back under folders that pass the set-group-id bit on to what is made in them (a Debian /usr/local and its folders are mode 2775): the private staging folder is made 0700 whatever its parent gives it (Seer on #1035)', () => {
+    const w = world();
+    fs.mkdirSync(path.join(w.fsA, 'srv/a/b'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'srv/a/b/file.txt'), 'deep');
+    const manifest = packed(w);
+    // The folders of the new computer the files go to (and the one folder finish makes below one of them) pass the bit on
+    fs.mkdirSync(path.join(w.fsB, 'opt/tool'), { recursive: true });
+    for (const folder of ['etc', 'opt', 'opt/tool', 'srv']) fs.chmodSync(path.join(w.fsB, folder), 0o2775);
+    // The test's own file system must pass it on, or this test shows nothing
+    const probe = path.join(w.fsB, 'etc/probe-folder');
+    fs.mkdirSync(probe);
+    expect(fs.statSync(probe).mode & 0o2000).toBe(0o2000);
+    fs.rmdirSync(probe);
+    const done = finishWith(w, manifest);
+    expect(done.stdout).toMatch(/finished=1 files=\d+ packages=1 outside=applied\n/);
+    expect(fs.readFileSync(path.join(w.fsB, 'etc/app.conf'), 'utf8')).toBe('conf');
+    expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/run.sh'), 'utf8')).toBe('#!/bin/sh\necho hi\n');
+    expect(fs.readFileSync(path.join(w.fsB, 'srv/a/b/file.txt'), 'utf8')).toBe('deep');
+    for (const folder of ['opt/tool', 'etc', 'srv']) expect(fs.readdirSync(path.join(w.fsB, folder)).filter((name) => name.startsWith('.uc-'))).toEqual([]);
+  });
+
   it('a clean round trip: files with their mode, the link and the software, from the list Orbit holds', () => {
     const w = world();
     fs.writeFileSync(path.join(w.fsA, 'opt/tool/suid'), 'x');
@@ -1209,6 +1230,52 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(done.stdout).toContain('finished=0 reason=outside_tampered');
     expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
   });
+  raceTest('a folder of the agent\'s that was swapped in for the staging folder is never given another mode: it is refused as it is (still 0755, still the agent\'s)', () => {
+    const w = world();
+    const list = packed(w);
+    const parent = path.join(w.fsB, 'opt/tool');
+    fs.mkdirSync(parent, { recursive: true });
+    for (const folder of [dir, path.dirname(w.fsB), w.fsB, path.join(w.fsB, 'opt')]) fs.chmodSync(folder, 0o755);
+    fs.writeFileSync(path.join(parent, 'run.sh'), 'what was there');
+    spawnSync('chown', ['-R', '1000:1000', parent]);
+    const agentCode = path.join(dir, `agent-${++counter}.py`);
+    // The agent's own folder under the staging name, open to everyone (0755): a chmod of it by root would be seen
+    fs.writeFileSync(agentCode, [
+      'import os, sys',
+      'parent, stage = sys.argv[1], sys.argv[2]',
+      'os.rename(os.path.join(parent, stage), os.path.join(parent, ".gone"))',
+      'os.mkdir(os.path.join(parent, stage), 0o755)',
+      'os.chmod(os.path.join(parent, stage), 0o755)',
+    ].join('\n'));
+    const harness = path.join(dir, `stage-swap-mode-${counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, subprocess, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'real_mkdir = os.mkdir',
+      'def swapping(target, *args, **kwargs):',
+      '    real_mkdir(target, *args, **kwargs)',
+      '    if str(target).startswith(".uc-") and "dir_fd" in kwargs and "run.sh" in os.listdir(kwargs["dir_fd"]):',
+      '        subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "python3", sys.argv[2], sys.argv[3], str(target)], check=True)',
+      '        print("swapped:" + str(target))',
+      'os.mkdir = swapping',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, agentCode, parent], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+    const swapped = /swapped:(\.uc-[0-9a-f]+)/.exec(done.stdout)?.[1];
+    expect(swapped).toBeDefined();
+    expect(done.stdout).toContain('finished=0 reason=outside_tampered');
+    expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
+    // The agent's folder is still the agent's and still open: nothing of root's touched it (a clean-up that removed it is no reason to doubt this, so it is read only when it is still there)
+    const left = fs.lstatSync(path.join(parent, swapped!), { throwIfNoEntry: false });
+    if (left) {
+      expect(left.uid).toBe(1000);
+      expect(left.mode & 0o7777).toBe(0o755);
+    }
+  });
+
   raceTest('a staging folder the agent swapped in after the checks, before the move, is refused: nothing is published from it and the target is untouched', () => {
     const w = world();
     const list = packed(w);

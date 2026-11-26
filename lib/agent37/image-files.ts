@@ -2081,8 +2081,19 @@ def make_stage(parent):
         except OSError:
             raise Tampered()
         info = os.fstat(fd)
-        # The folder opened must be the one just made: a folder, ours, closed to everyone else, on the same file system (anything else means the name was swapped meanwhile)
-        if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or (info.st_mode & 0o7777) != 0o700 or info.st_dev != os.fstat(parent).st_dev:
+        # The folder opened must be the one just made: a folder, ours, on the same file system (anything else means the name was swapped meanwhile). A folder of anyone else is never touched below
+        if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_dev != os.fstat(parent).st_dev:
+            os.close(fd)
+            raise Tampered()
+        # A folder made inside one that passes the set-group-id bit on (a Debian /usr/local and its folders are 2775) comes out with that bit too, whatever mode it was asked for: it is set to exactly
+        # 0700 here, through the descriptor, and must read back as that (nothing else is accepted)
+        try:
+            os.fchmod(fd, 0o700)
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            raise Tampered()
+        if (info.st_mode & 0o7777) != 0o700:
             os.close(fd)
             raise Tampered()
         return name, fd, (info.st_dev, info.st_ino)
