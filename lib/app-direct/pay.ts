@@ -329,10 +329,11 @@ export interface StartCheckout {
   seesLatest?: boolean;
   /**
    * The version the buyer's open page shows, as the host that drew it says (Orbit's link page, the game's window). Terms set on a newer version
-   * than that one are never charged on it: the owner may have published since the page was opened. Left out by an older host: only the
-   * version Orbit would show now is checked. It can only ever refuse a checkout, never allow one Orbit would refuse.
+   * than that one are never charged on it: the owner may have published since the page was opened. A new order needs it: a start that does
+   * not say it (null, an older host) is refused as a changed page, and a reload gives a page that says it. The same wish carrying on the order
+   * it already made does not need it. It can only ever refuse a checkout, never allow one Orbit would refuse.
    */
-  shownVersion?: number | null;
+  shownVersion: number | null;
 }
 
 const HOUR = 3_600_000;
@@ -351,7 +352,7 @@ type CheckoutJob = Prisma.AppPageJobGetPayload<{ include: typeof CHECKOUT_JOB }>
  * Whether a checkout may start on this job right now, and with what: the definition it would use. The same test runs twice, once to
  * find the owner and once under the lock on the job and the app, so a change that committed in between is never missed.
  */
-function checkoutTerms(job: CheckoutJob | null, seesLatest: boolean, displayed: number | null = null) {
+function checkoutTerms(job: CheckoutJob | null, seesLatest: boolean, displayed: number | null | 'order_made') {
   const connection = job?.connection;
   if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct') return null;
   // A key marked as stopped is not a reason to refuse here: the call itself finds out, and a good call is what clears the mark
@@ -364,8 +365,9 @@ function checkoutTerms(job: CheckoutJob | null, seesLatest: boolean, displayed: 
   // Terms set on a version newer than the one this buyer is shown (a draft, while the link still shows what was published before) are not
   // the terms that page showed them: nothing is made until the owner publishes again
   if (shownVersionFor(job.artifact, seesLatest) < job.artifactVersion) return 'not_published' as const;
-  // Nor are they the terms of the page the buyer has open when that page is older than they are (the owner published since it was opened)
-  if (displayed !== null && displayed < job.artifactVersion) return 'page_changed' as const;
+  // Nor are they the terms of the page the buyer has open when that page is older than they are (the owner published since it was opened),
+  // or when the page never said which version it shows: only an order already made (its own terms kept) goes on without it
+  if (displayed !== 'order_made' && (displayed === null || displayed < job.artifactVersion)) return 'page_changed' as const;
   return { job, connection, definition, payment: definition.payment };
 }
 
@@ -410,7 +412,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     if (made) return carryOn(made.id, limits, { resume: true, wait: true }, deps);
   }
   const seesLatest = input.seesLatest === true;
-  const displayed = typeof input.shownVersion === 'number' && Number.isSafeInteger(input.shownVersion) ? input.shownVersion : null;
+  const displayed = typeof input.shownVersion === 'number' && Number.isSafeInteger(input.shownVersion) && input.shownVersion > 0 ? input.shownVersion : null;
   const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: CHECKOUT_JOB }), seesLatest, displayed);
   if (!first) return { status: 'unavailable' };
   if (first === 'not_published' || first === 'page_changed') {
@@ -640,7 +642,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     // of another kind is not a payment to start now (the order is closed, and a new tap makes a new one)
     // The order already holds the terms its buyer was shown when it was made (its own amount, currency and words are what is sent), so the
     // version check is not made again here: a change of amount or currency since then still closes it, below
-    const found = checkoutTerms(order.job, true);
+    const found = checkoutTerms(order.job, true, 'order_made');
     const terms = found === 'not_published' || found === 'page_changed' ? null : found;
     const fail = async (reason: string) => {
       await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason, lease: { checkedAt: tookAt }, data: { closedAt: new Date() } }).catch(() => undefined);
