@@ -380,6 +380,39 @@ run('payments for pages, in a real database', () => {
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
+    it('writes a service that did not answer a checkout or a lookup on the App, never Orbit being busy, and a good answer clears it', async () => {
+      const { id, serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      const noAnswerAt = async () => (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).noAnswerAt;
+      // Orbit had no room to try: nothing is written about the service
+      mockSend.current = () => {
+        throw new GuardError('unreachable', 'Too many name lookups are waiting', true);
+      };
+      expect((await start(artifactId)).status).toBe(409);
+      expect(await noAnswerAt()).toBeNull();
+      // The checkout got no answer: written
+      mockSend.current = () => {
+        throw new GuardError('timeout', 'no answer');
+      };
+      expect((await start(artifactId, '203.0.113.9')).status).toBe(409);
+      expect(await noAnswerAt()).not.toBeNull();
+      // A good checkout clears it
+      gateway();
+      const { orderId } = await checkout(artifactId, '203.0.113.10');
+      expect(await noAnswerAt()).toBeNull();
+      // A lookup that got no answer is written the same way, and a good one clears it
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      mockSend.current = () => {
+        throw new GuardError('unreachable', 'The service could not be reached');
+      };
+      await settle(orderId);
+      expect(await noAnswerAt()).not.toBeNull();
+      gateway({ record: (order) => paidRecord(order) });
+      expect((await settle(orderId))?.status).toBe('paid');
+      expect(await noAnswerAt()).toBeNull();
+    });
+
     it('a refused lookup for one order does not stop other pages from taking payments', async () => {
       const { id, serverId } = await connectGateway();
       const first = await makeArtifact();

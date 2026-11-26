@@ -69,10 +69,19 @@ export class GuardError extends Error {
     readonly code: 'blocked' | 'unreachable' | 'timeout' | 'too_big',
     /** Plain words for a log. Never the address and never anything from the request. */
     message: string,
+    /** Orbit itself had no room to try (too many name lookups waiting): says nothing about the service. */
+    readonly atOurEnd = false,
   ) {
     super(message);
   }
 }
+
+/**
+ * The service did not answer: no answer in time, or it could not be reached. Never Orbit's own lack of room to try (atOurEnd), and never an
+ * address that was refused before anything was sent: Orbit being busy never marks a person's key App as not answering.
+ */
+export const serviceDidNotAnswer = (error: unknown): boolean =>
+  error instanceof GuardError && !error.atOurEnd && (error.code === 'timeout' || error.code === 'unreachable');
 
 export interface GuardedAnswer {
   status: number;
@@ -206,7 +215,7 @@ export async function guardedRequest(request: GuardedRequest, deps: GuardDeps = 
   // A name lookup cannot be cancelled: after the deadline it goes on until the resolver gives up (it ends each try by itself, and uses no worker thread that
   // other work needs). So it counts as in flight until it SETTLES, not until the caller gave up, and only so many run at once: a service whose name never
   // answers cannot pile lookups up
-  if (lookupsInFlight >= MAX_LOOKUPS_IN_FLIGHT) throw new GuardError('unreachable', 'Too many name lookups are waiting');
+  if (lookupsInFlight >= MAX_LOOKUPS_IN_FLIGHT) throw new GuardError('unreachable', 'Too many name lookups are waiting', true);
   lookupsInFlight += 1;
   let lookup: Promise<{ address: string; family: number }[]>;
   try {

@@ -7,7 +7,7 @@ import { addNotice } from '@/lib/notices';
 import { reportConnectionSignIn, reportKeyWorked } from '@/lib/tool-signin';
 import { resolveExpectedLoginOrigin } from '@/lib/auth';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
-import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/guard';
+import { guardedRequest, GuardError, serviceDidNotAnswer, type GuardDeps } from '@/lib/app-direct/guard';
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
 import { readKey } from '@/lib/app-direct/connect';
 
@@ -497,7 +497,11 @@ async function runStart(
   } catch (error) {
     // Never sent: nothing was made. Anything else (no connection, no answer in time, an answer too big) may have been made at the service
     if (error instanceof RequestError || (error instanceof GuardError && error.code === 'blocked')) return fail('not_paid', 'start_refused');
-    if (error instanceof GuardError) return unsure('start_unsure');
+    if (error instanceof GuardError) {
+      // The service did not answer: written on the App, as for a Brick's call (lib/app-direct/use.ts), until a good call clears it
+      if (serviceDidNotAnswer(error)) await reportConnectionSignIn(connection.id, { state: 'no-answer' }, startedAt).catch(() => undefined);
+      return unsure('start_unsure');
+    }
     // Anything else is ours to look at, but the order is not left open on the way out
     await fail('not_paid', 'start_failed');
     throw error;
@@ -907,6 +911,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key as string);
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
+    if (serviceDidNotAnswer(error)) await reportConnectionSignIn(connection.id, { state: 'no-answer' }, startedAt).catch(() => undefined);
     if (error instanceof RequestError || error instanceof GuardError) return unreadable();
     throw error;
   }

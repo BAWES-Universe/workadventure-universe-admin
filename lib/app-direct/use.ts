@@ -3,10 +3,10 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { checkAppUse, type AppUseVerdict } from '@/lib/app-connections';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
-import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
+import { reportConnectionSignIn, reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { operationViews, headingOf, type KeyAppOperationView } from '@/lib/app-direct/describe';
-import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/guard';
+import { guardedRequest, GuardError, serviceDidNotAnswer, type GuardDeps } from '@/lib/app-direct/guard';
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
 import { readKey } from '@/lib/app-direct/connect';
 import { scrubDeep } from '@/lib/app-direct/scrub';
@@ -135,6 +135,9 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
     await finish(input, 'unreachable', null);
+    // A service that did not answer is written on the App (cleared by the next good call, reportKeyWorked): a down own copy then no longer counts
+    // as working (lib/app-same.ts ownCopyWorks), so the ready-made copy of the same App is the Brick's way meanwhile, never neither
+    if (serviceDidNotAnswer(error)) await reportConnectionSignIn(connection.id, { state: 'no-answer' }, startedAt).catch(() => undefined);
     if (error instanceof GuardError) return { status: 'unavailable' };
     throw error;
   }
