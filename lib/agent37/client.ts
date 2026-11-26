@@ -142,6 +142,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
 const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
+/**
+ * The longest one asked-again account call can take from its first request to its last answer: every attempt runs to its timeout and every wait between them is taken. A power operation (stop, sleep) whose sender died
+ * (post-0.5.0 B) is counted as still able to land for this long after its last beat, on top of a margin for the provider's own processing (lib/computer-power.ts).
+ */
+export const LONGEST_ACCOUNT_CALL_MS = REQUEST_TIMEOUT_MS * (RETRY_WAITS_MS.length + 1) + RETRY_WAITS_MS.reduce((sum, ms) => sum + ms, 0);
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -232,7 +237,22 @@ export class Agent37Client {
   }
 
   getInstance(id: string): Promise<Instance> {
-    return this.again(() => this.call('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account()));
+    return this.again(() => this.look(id));
+  }
+
+  /** One look at an instance with its own short timeout and never asked again: for a caller that must answer within a few seconds (a job's renewal, post-0.5.0 B). */
+  getInstanceOnce(id: string, timeoutMs: number): Promise<Instance> {
+    return this.look(id, timeoutMs);
+  }
+
+  /**
+   * The one look at an instance. An answer that is not an object naming the machine's status (`{}`, a gateway's page, a list) says nothing about it: it is not reached, never read as "not running", which would prove a
+   * stop that never took and end a billed stretch (CodeRabbit on #1036). Both the asked-again look and the single one come through here.
+   */
+  private async look(id: string, timeoutMs?: number): Promise<Instance> {
+    const instance = await this.call<Instance>('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), undefined, timeoutMs, true);
+    if (typeof instance.status !== 'string') throw new Agent37Unreached('status');
+    return instance;
   }
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
