@@ -93,7 +93,12 @@ export const GITHUB_TOOLS: ToolDefinition[] = [
       repo: REPO,
       workflow: { type: 'string', description: 'The workflow file name in .github/workflows (for example deploy.yml), or its id' },
       branch: { type: 'string', description: 'The branch or tag it runs on; the default branch when left out' },
-      inputs: { type: 'object', description: 'The workflow’s inputs by name, when it has some', additionalProperties: { type: ['string', 'number', 'boolean'] } },
+      // A list of plain name and value pairs, not a map: every model provider takes this shape (some refuse maps and mixed types)
+      inputs: {
+        type: 'array',
+        description: 'The workflow’s inputs, when it has some: each with its name and its value as text (true, false and numbers written as text)',
+        items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'] },
+      },
     },
     ['repo', 'workflow'],
   ),
@@ -175,8 +180,15 @@ function workflowPath(value: unknown): string {
 /** A workflow's inputs: names to text, numbers or true/false (sent as text, which is what GitHub takes). Undefined when not given. */
 function workflowInputs(value: unknown): Record<string, string> | undefined {
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'object' || Array.isArray(value)) throw new ToolError('inputs must be the workflow’s inputs by name.');
-  const entries = Object.entries(value as Record<string, unknown>);
+  if (typeof value !== 'object') throw new ToolError('inputs must be a list of the workflow’s inputs, each with its name and value.');
+  // The list the tool asks for; inputs by name are taken too
+  const entries: [string, unknown][] = Array.isArray(value)
+    ? value.map((entry, index) => {
+        const pair = entry as { name?: unknown; value?: unknown } | null;
+        if (!pair || typeof pair !== 'object' || typeof pair.name !== 'string' || !pair.name) throw new ToolError(`Input ${index + 1} needs a name and a value.`);
+        return [pair.name, pair.value];
+      })
+    : Object.entries(value as Record<string, unknown>);
   if (entries.length > 25) throw new ToolError('A workflow takes at most 25 inputs.');
   const inputs: Record<string, string> = {};
   for (const [key, item] of entries) {
