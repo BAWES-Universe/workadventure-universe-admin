@@ -81,6 +81,9 @@ import {
   settlePark,
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
+import { markUpdate, refreshMarkParts, savedMark, MARK_SELECT } from '@/lib/computer-mark';
+import { fenceCommand } from '@/lib/computer-fence-script';
+import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
@@ -2045,11 +2048,17 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
     }, wakeTiming.beatMs);
     beat.unref?.();
+    let mark: MachineMark | null = null;
     try {
+      // A computer that has worked before and has no mark saved here (made ready before Orbit kept marks) may be on a boot that already ran jobs: a machine that slept keeps its boot and its
+      // programs. A mark taken now would put its clock reading AFTER whatever those jobs left running, and the fence would keep it as the computer's own. So it is started afresh before the first
+      // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
+      const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
+      const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
       await provider.wake(ref);
       try {
-        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
-        await provider.ready(ref);
+        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
+        mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
@@ -2075,11 +2084,12 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     }
     // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
     const wrote = await prisma.$transaction(async (tx) => {
-      const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      const held = await tx.$queryRaw<Array<{ wake_epoch: number; mark_boot_id: string | null }>>`SELECT "wake_epoch", "mark_boot_id" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if (held[0]?.wake_epoch !== mine) return false;
       await tx.brickComputer.update({
         where: { botId },
-        data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+        // The fence's mark is saved with the state that says the machine works, and only here (this start still holds the wake ticket); on the same boot the first one stays
+        data: { ...(mark ? markUpdate({ markBootId: held[0].mark_boot_id }, mark) : {}), machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
       });
       return true;
     });
@@ -2517,6 +2527,8 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
     const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
     // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
     if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
+    // The clean-up brought a new browser up: its parts are saved again for the fence (it keeps only what the saved list names)
+    else await refreshMarkParts(botId, row.providerRef, provider);
   } catch (error) {
     console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
   } finally {
@@ -2541,12 +2553,37 @@ export function setHandOverClaimWaitForTests(ms: number | null): void {
  * still being renewed for as long as one machine command may take, plus its own slack (`CLEAN_CLAIM_STALE_MS`): waiting less would let this job start
  * beside a command that is still stopping, moving and starting that browser (CodeRabbit N7 on #1025).
  */
-async function untilCleaned(botId: string): Promise<void> {
+async function untilCleaned(botId: string, stillLeader?: StillLeader): Promise<boolean> {
   for (let tries = 0; tries < Math.ceil(CLEAN_CLAIM_STALE_MS / 250); tries++) {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { cleanClaimedAt: true } });
-    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return;
+    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  return true;
+}
+
+/** A leader that waits renews its lease (and learns it lost the transition) about every 30 seconds: its waits, together, may be longer than the lease (Sentry on #1033). */
+async function stillLeaderEvery(stillLeader: StillLeader | undefined, tries: number): Promise<boolean> {
+  if (!stillLeader || tries === 0 || tries % leaderRenewTries !== 0) return true;
+  return stillLeader();
+}
+/** How many quarter-second looks of a wait pass between two renewals of the leader's lease (120: every 30 seconds). */
+let leaderRenewTries = 120;
+/** For tests: how often a waiting leader renews its lease. */
+export function setLeaderRenewTriesForTests(tries: number | null): void {
+  leaderRenewTries = tries ?? 120;
+}
+
+/** Waits while a hand-over of this Brick's files holds the machine (its claim is believed for the hand-over's own time budget, as the hand-overs themselves believe it). False: the leader lost the transition meanwhile. */
+async function untilFilesHandedOver(botId: string, stillLeader?: StillLeader): Promise<boolean> {
+  for (let tries = 0; tries < Math.ceil(FILES_CLAIM_MS / 250); tries++) {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { filesClaimedAt: true } });
+    if (!row?.filesClaimedAt || Date.now() - row.filesClaimedAt.getTime() > FILES_CLAIM_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return true;
 }
 
 /**
@@ -3543,14 +3580,14 @@ async function cancelAgentTurn(botId: string, responseId: string): Promise<void>
   await provider.cancelTurn(row.providerRef, responseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
 }
 
-/** What `universe-fence --check` prints when nothing the agent started is left running. The command is in the image (it knows which processes the desktop needs). */
+/** What the fence's check prints when nothing the agent started is left running. The fence is sent by Orbit with every call (lib/computer-fence-script.ts) together with the mark Orbit holds. */
 const FENCE_CLEAR = /(^|\n)remaining=0\s*$/;
 const FENCE_TRIES = 3;
 
 /**
  * The take-over fence's second half (build handoff v2, section 4), done on the machine before the person has the keyboard: the turn
- * the agent is running is cancelled, every process it started is stopped (the image's `universe-fence` keeps the desktop, the screen
- * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
+ * the agent is running is cancelled, every process it started is stopped (the fence keeps what Orbit's mark names: the desktop, the screen
+ * and the agent's gateway), and a second look proves none is left. A computer with no mark for its boot is not fenced and nothing is proved. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
  */
 export async function fenceMachine(botId: string, stillLeader?: StillLeader): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
@@ -3567,11 +3604,24 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
       if (turn.agentResponseId) await provider.cancelTurn(ref, turn.agentResponseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
       await prisma.computerJob.updateMany({ where: { id: turn.id, agentResponseId: turn.agentResponseId }, data: { agentResponseId: null } });
     }
-    for (let attempt = 0; attempt < FENCE_TRIES; attempt++) {
+    // The mark is Orbit's own (never read back from the computer, where the agent could have rewritten it). A computer row with none (a machine made ready before marks
+    // were kept here, or one whose mark was damaged) cannot be proved clear: it goes the way an unproved fence goes, and the next wake takes a mark
+    // A restart Orbit is doing right now (a restore, park, clear or the clean-up after a job, all under the clean claim) saves the new browser's parts only once it is done:
+    // the fence waits for the claim first, so it never fences with the old list and stops the browser that was just brought back
+    if (!(await untilCleaned(botId, stillLeader))) return 'lost';
+    // Likewise a hand-over of files that is reading the machine right now (it holds the files claim): its commands run beside the fence, are not the computer's own, and would be stopped
+    // under it (or counted as left running). Its claim is let go within the hand-over's own time budget, and one a stopped server left is long past after that (Sentry on #1033)
+    if (!(await untilFilesHandedOver(botId, stillLeader))) return 'lost';
+    if (stillLeader && !(await stillLeader())) return 'lost';
+    const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
+    for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';
       try {
-        await provider.exec(ref, 'universe-fence', { timeoutMs: 30_000 });
-        const check = await provider.exec(ref, 'universe-fence --check', { timeoutMs: 30_000 });
+        // The fence's own commands are activity on the machine, so the keep-awake no-op is not due for another five minutes: it is a command of its own, started after the mark, and one that overlapped
+        // a try would be stopped or counted as left running. A sweep that read the row before this write fails its claim on the time it saw (Sentry on #1033)
+        await prisma.brickComputer.updateMany({ where: { botId }, data: { keptAwakeAt: new Date() } });
+        await provider.exec(ref, fenceCommand(mark), { timeoutMs: 30_000 });
+        const check = await provider.exec(ref, fenceCommand(mark, true), { timeoutMs: 30_000 });
         if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
       } catch (error) {
         console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
@@ -3600,7 +3650,9 @@ const KEEP_AWAKE_EVERY_MS = 5 * 60 * 1000;
  */
 async function keepWorkingMachinesAwake(now: Date, batch: number): Promise<number> {
   const due = await prisma.brickComputer.findMany({
-    where: { machine: 'working', NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
+    // Not while the machine is changing hands: a take-over or a hand-back runs the fence, and a no-op of its own that overlapped a try would be stopped or counted as left running (Sentry on #1033).
+    // The person's own screen time (`human_ready`) still needs it. A fence with no transition (a cancel) is covered by the time each try records as the last activity
+    where: { machine: 'working', controlState: { notIn: ['fencing', 'returning'] }, NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
     select: { botId: true, providerRef: true, provider: true, keptAwakeAt: true },
     take: batch,
   });
