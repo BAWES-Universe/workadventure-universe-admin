@@ -291,9 +291,9 @@ run('credit for computers, on the real books', () => {
       await call(token, 'a', 50_000, 30_000);
       await call(token, 'b', 50_000, 20_000);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(950_000);
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       // The credit's own give-back never takes anything from the month: the calls are still the person's here (the release's rule writes them against nobody
       // when a job fails on our side), so the month has what they cost beyond what credit paid, and credit paid all of it
@@ -319,7 +319,7 @@ run('credit for computers, on the real books', () => {
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
       // Said again (a second end, a sweep): nothing more is given
       await failedOnOurSide(jobId, new Date(NOW.getTime() + 11 * 60_000));
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
       // A call that reports after the job failed: its draw is put back too
@@ -348,7 +348,7 @@ run('credit for computers, on the real books', () => {
       // The ten minutes of the machine the person was charged are given back with the calls
       // Said again by the late look and by the credit's own give-back: nothing is given twice
       await afterLateEvidence(jobId, new Date(NOW.getTime() + 12 * 60_000));
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(3);
     });
@@ -378,7 +378,7 @@ run('credit for computers, on the real books', () => {
       expect(line).toMatchObject({ state: 'refunded' });
       expect(line).toMatchObject({ outcome: 'stopped', outcomeText: 'Stopped: our computers were busy, and its time was given back', returnedMicros: 50_000 });
       await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(holds.length);
     });
@@ -956,7 +956,7 @@ run('credit for computers, on the real books', () => {
       // A call that reports after the end, and the end said again: still nothing on the month, nothing drawn, nothing given twice
       await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, later).catch(() => undefined);
       await failedOnOurSide(jobId, new Date(later.getTime() + 60_000));
-      await giveBackComputerCredit(jobId);
+      await giveBackComputerCredit(jobId, NOW);
       expect((await month(sara.id, later)).leftMicros).toBe(BASE + 20_000);
       expect((await computerCredit(prisma as never, sara.id, later)).availableMicros).toBe(20_000);
     });
