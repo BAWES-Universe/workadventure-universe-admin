@@ -414,8 +414,9 @@ describe('the thing said first, and a reply after a line said again (CodeRabbit)
 
   it('takes "Tea is my favorite drink" and "Tea, I love it" when "tea" is forgotten, and keeps "steam" lines', () => {
     const data = {
-      personalInfo: { preferences: ['tea (favorite drink)'], facts: [], heard: {}, drawnFrom: { 'pref:tea (favorite drink)': 1000 } },
-      conversationHistory: chat([['person', 'Tea is my favorite drink', 1000], ['person', 'Steam is my favorite room', 1500], ['person', 'Tea, I love it', 2000]]),
+      // The line the favorite was drawn from is the last one (3000), so the two earlier lines are only found by how they are said
+      personalInfo: { preferences: ['tea (favorite drink)'], facts: [], heard: {}, drawnFrom: { 'pref:tea (favorite drink)': 3000 } },
+      conversationHistory: chat([['person', 'Tea is my favorite drink', 1000], ['person', 'Steam is my favorite room', 1500], ['person', 'Tea, I love it', 2000], ['person', 'I like tea', 3000]]),
     };
     const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea (favorite drink)')])).data as typeof data;
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['Steam is my favorite room']);
