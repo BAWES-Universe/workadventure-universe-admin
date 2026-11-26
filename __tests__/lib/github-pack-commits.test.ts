@@ -91,10 +91,11 @@ describe('reading the commits of a pack', () => {
     }
     const started = Date.now();
     const commits = readPackCommits(pack([...entries.reverse(), whole(1, first)])) as Map<string, string[]>;
-    expect(Date.now() - started).toBeLessThan(4000);
+    // The old copying version took about two minutes; a busy CI machine took 4.2 s for this one, so the bound is well between them
+    expect(Date.now() - started).toBeLessThan(30_000);
     expect(commits.size).toBe(new Set(ids).size);
     expect(commits.has(ids[N])).toBe(true);
-  });
+  }, 120_000);
 
   it('refuses a small pack of deltas that would rebuild more than a fixed total, however small each delta is', () => {
     // One 16 MB blob (it deflates to a few KB) and deltas that each rebuild all of it: five of them are 96 MB, more than the fixed total
