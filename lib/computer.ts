@@ -3650,7 +3650,9 @@ const KEEP_AWAKE_EVERY_MS = 5 * 60 * 1000;
  */
 async function keepWorkingMachinesAwake(now: Date, batch: number): Promise<number> {
   const due = await prisma.brickComputer.findMany({
-    where: { machine: 'working', NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
+    // Not while the machine is changing hands: a take-over or a hand-back runs the fence, and a no-op of its own that overlapped a try would be stopped or counted as left running (Sentry on #1033).
+    // The person's own screen time (`human_ready`) still needs it. A fence with no transition (a cancel) is covered by the time each try records as the last activity
+    where: { machine: 'working', controlState: { notIn: ['fencing', 'returning'] }, NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
     select: { botId: true, providerRef: true, provider: true, keptAwakeAt: true },
     take: batch,
   });

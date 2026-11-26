@@ -2046,6 +2046,21 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).keptAwakeAt).not.toBeNull();
     });
 
+    it('sends none while the machine is changing hands (a take-over or a hand-back runs the fence), and again once it is the person’s or the agent’s (Sentry on #1033)', async () => {
+      const { sara } = await running();
+      const quiet = () => fake.commands.filter((entry) => entry.command === 'true').length;
+      for (const controlState of ['fencing', 'returning']) {
+        // A leader holds the transition (a lease that has not run out): the sweep does not finish it for them
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { controlState, controlLeaseUntil: new Date(Date.now() + 10 * 60_000), keptAwakeAt: null } });
+        await sweepComputers(minutes(1));
+        expect(quiet()).toBe(0);
+      }
+      // The person has the screen: the machine still needs the no-op
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { controlState: 'human_ready', keptAwakeAt: null } });
+      await sweepComputers(minutes(1));
+      expect(quiet()).toBe(1);
+    });
+
     it('sends none to a machine no job holds, which is left to rest', async () => {
       const { sara } = await running();
       await stopJobFor(sara.brickId, sara.id, NOW);
