@@ -151,9 +151,11 @@ const END_OF_A_WORD = '(?![\\p{L}\\p{N}])';
  */
 function tasteLinesOf(value: string): { person: RegExp; bot: RegExp; word: RegExp } {
   const word = wordsIn(value).source;
-  const person = `${NOT_PART_OF_A_WORD}(?:i|my)${END_OF_A_WORD}[^.!?\\n]{0,40}?${NOT_PART_OF_A_WORD}(?:${TASTE_WORDS})${END_OF_A_WORD}[^.!?\\n]{0,30}?${word}`;
-  const you = `${NOT_PART_OF_A_WORD}(?:you|your|you['’]re|you['’]ve)${END_OF_A_WORD}`;
+  const iOrMy = `${NOT_PART_OF_A_WORD}(?:i|my)${END_OF_A_WORD}`;
   const taste = `${NOT_PART_OF_A_WORD}(?:${TASTE_WORDS})${END_OF_A_WORD}`;
+  // What they say of it as theirs: "I like tea", and the thing first, "Tea is my favorite drink", "Tea, I love it"
+  const person = `${iOrMy}[^.!?\\n]{0,40}?${taste}[^.!?\\n]{0,30}?${word}|${word}[^.!?\\n]{0,25}?${iOrMy}[^.!?\\n]{0,25}?${taste}`;
+  const you = `${NOT_PART_OF_A_WORD}(?:you|your|you['’]re|you['’]ve)${END_OF_A_WORD}`;
   const bot = `${you}[^.!?\\n]{0,40}?${taste}[^.!?\\n]{0,25}?${word}|${word}[^.!?\\n]{0,40}?${you}[^.!?\\n]{0,40}?${taste}`;
   return { person: new RegExp(person, 'u'), bot: new RegExp(bot, 'u'), word: wordsIn(value) };
 }
@@ -329,12 +331,11 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       // can only have said it after the Forget while it still held it by mistake
       // (a reply right after the person said it again after the Forget is answering them, and stays with their line)
       const earlierLine = index > 0 ? history[index - 1] : null;
-      const answersSaidAgain = earlierLine !== null && takenBy(earlierLine, true).size > 0;
-      if (!answersSaidAgain) {
-        if (phrases.some((phrase) => !phrase.person && phrase.text.test(phrase.exact ? text : lower))) return false;
-        if (shortNames.some((name) => name.bot.test(name.exact ? text : lower))) return false;
-        if (shortTastes.some((taste) => taste.bot.test(lower))) return false;
-      }
+      // Only the things the person said again are let be: a stale line that says another forgotten thing still goes
+      const saidAgain = earlierLine !== null ? takenBy(earlierLine, true) : new Set<number>();
+      if (phrases.some((phrase) => !phrase.person && !saidAgain.has(phrase.owner) && phrase.text.test(phrase.exact ? text : lower))) return false;
+      if (shortNames.some((name) => !saidAgain.has(name.owner) && name.bot.test(name.exact ? text : lower))) return false;
+      if (shortTastes.some((taste) => !saidAgain.has(taste.owner) && taste.bot.test(lower))) return false;
       // The bot's reply right after a line a thing took, when it says a short value back of that thing or of any other forgotten thing the
       // person had already said ("I like tea" / "Tea it is!", "I'm ill" / "Sorry you are ill", "I like jam" / "I like tea" / "Have it with jam!").
       // A thing said only later is not in it ("I like tea" / "Jam is nice too" / "I like jam").

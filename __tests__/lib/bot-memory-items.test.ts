@@ -409,6 +409,31 @@ describe('names in other capitals, and a stale copy, and several things forgotte
   });
 });
 
+describe('the thing said first, and a reply after a line said again (CodeRabbit)', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it('takes "Tea is my favorite drink" and "Tea, I love it" when "tea" is forgotten, and keeps "steam" lines', () => {
+    const data = {
+      personalInfo: { preferences: ['tea (favorite drink)'], facts: [], heard: {}, drawnFrom: { 'pref:tea (favorite drink)': 1000 } },
+      conversationHistory: chat([['person', 'Tea is my favorite drink', 1000], ['person', 'Steam is my favorite room', 1500], ['person', 'Tea, I love it', 2000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea (favorite drink)')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Steam is my favorite room']);
+  });
+
+  it("still takes a bot line that says another forgotten thing, when it comes right after a line said again for one of them", () => {
+    const tea = memoryItemKey('pref', null, 'tea');
+    const pizza = memoryItemKey('pref', null, 'pizza');
+    const data = {
+      personalInfo: { preferences: ['tea', 'pizza'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:pizza': 1000 } },
+      conversationHistory: chat([['person', 'I like tea and pizza', 1000], ['person', 'I like tea', 5000], ['bot', 'Tea it is! And pizza?', 5500], ['person', 'what is the weather', 6000]]),
+    };
+    const forgot = new Map([[tea, new Date(3000)], [pizza, new Date(3000)]]);
+    const after = withoutItems(data, new Set([tea, pizza]), forgot).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I like tea', 'what is the weather']);
+  });
+});
+
 describe('forgetting leans to taking too much (deliberate)', () => {
   it('a capitalised name that is also a word also takes a line that only starts with it, in that person\'s own chat', () => {
     const data = {
