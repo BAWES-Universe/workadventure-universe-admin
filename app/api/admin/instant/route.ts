@@ -5,6 +5,8 @@ import { getAdapter } from '@/lib/app-adapter';
 import { instantFundsAreWired } from '@/lib/instant/funds';
 import { sessionCheckStatus } from '@/lib/instant/sessions';
 import { getInstantLimits, getInstantPause, saveInstantLimits } from '@/lib/instant/state';
+import { exposureIn } from '@/lib/instant/executor';
+import { prisma } from '@/lib/db';
 import { INSTANT_LIMIT_LABELS, INSTANT_LIMIT_RANGES, INSTANT_LIMITS_RECOMMENDED, INSTANT_NEEDED, INSTANT_PRICE_VERSION, INSTANT_PRICES_READ_ON, checkInstantLimits, instantCatalog, missingInstantLimits, type InstantLimits } from '@/lib/instant/values';
 
 export const runtime = 'nodejs';
@@ -27,10 +29,21 @@ function shape(limits: InstantLimits) {
   );
 }
 
+/** What Instant may owe the provider now, against its ceiling (held for runs not finished, charges not known yet, this month's settled charges); null when it cannot be read. */
+async function exposure(): Promise<{ usedMicros: number } | null> {
+  try {
+    return { usedMicros: await exposureIn(prisma, new Date()) };
+  } catch (error) {
+    console.error('[Instant] Could not read what is owed against the ceiling:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
+}
+
 async function answer() {
   const limits = await getInstantLimits();
   return {
     limits: shape(limits),
+    exposure: await exposure(),
     missing: missingInstantLimits(limits),
     pause: await getInstantPause(),
     readiness: {

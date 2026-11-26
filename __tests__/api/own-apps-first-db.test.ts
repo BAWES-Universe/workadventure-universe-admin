@@ -305,7 +305,8 @@ run('a person’s own copy of an App comes first, in a real database', () => {
         await broken();
         expect({ why, ownCopy: (await list()).find((row) => row.id === ready)?.ownCopyServerId }).toEqual({ why, ownCopy: null });
         expect({ why, use: await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-broken-${call++}` }) }).toMatchObject({ why, use: { allowed: true } });
-        expect({ why, instant: [...(await brickApps(saraBrick))] }).toEqual({ why, instant: ['exa'] });
+        // Research Apps are on for every Brick by default: a broken own Exa hides neither
+        expect({ why, instant: [...(await brickApps(saraBrick))].sort() }).toEqual({ why, instant: ['exa', 'tavily'] });
         await mended();
         expect((await list()).find((row) => row.id === ready)?.ownCopyServerId).toBe(own);
       }

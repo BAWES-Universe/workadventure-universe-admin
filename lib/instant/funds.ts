@@ -12,6 +12,8 @@
 export type HoldRefusal =
   /** The person's Instant Apps credit does not cover it (they can ask for more, or wait for a renewal if they have one). */
   | 'credit_used_up'
+  /** The person was not given Instant Apps credit this period (the month's budget ran out, for one) and has none: never told as used up. */
+  | 'credit_not_given'
   /** A setting the credit cannot be taken without is not set yet. */
   | 'not_set'
   /** The books could not be read or written: nothing was held. */

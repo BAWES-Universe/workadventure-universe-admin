@@ -6,6 +6,10 @@ import {
   argsFingerprint,
   checkInstantLimits,
   customerChargeFor,
+  owedForCharge,
+  instantAppOf,
+  instantCallFeeMicros,
+  INSTANT_APPS,
   holdFor,
   instantCatalog,
   missingInstantLimits,
@@ -128,11 +132,45 @@ describe('money is exact', () => {
     expect(holdFor(7_600, 0)).toBe(7_600);
     expect(holdFor(7_600, 1_000)).toBe(8_360);
     expect(holdFor(7_601, 1_000)).toBe(8_362);
-    expect(customerChargeFor(7_000, 7_600, null)).toBe(7_000);
-    expect(customerChargeFor(7_000, 8_360, 1_000)).toBe(7_700);
+    // The person pays Composio's charge plus its call fee ($0.0006): the fee is counted against their own credit (money call of 26 Nov 2026).
+    // What is owed for a measured run is its charge plus the fee, the same figure a top-price estimate already is
+    expect(instantCallFeeMicros()).toBe(RATE_MICROS.managed_other + DIRECT_EXECUTION_MICROS);
+    expect(instantCallFeeMicros()).toBe(600);
+    expect(owedForCharge(7_000)).toBe(7_600);
+    expect(owedForCharge(0)).toBe(600);
+    expect(customerChargeFor(owedForCharge(7_000), 7_600, null)).toBe(7_600);
+    expect(customerChargeFor(owedForCharge(6_500), 7_600, null)).toBe(7_100);
+    expect(customerChargeFor(owedForCharge(7_000), 8_360, 1_000)).toBe(8_360);
+    // An estimate is the top price (fee included): charged once, never the fee twice
+    expect(customerChargeFor(7_600, 7_600, null)).toBe(7_600);
+    expect(customerChargeFor(7_600, 10_000, null)).toBe(7_600);
     // A charge above the top price: the person pays the hold at most, the rest is ours
-    expect(customerChargeFor(50_000, 7_600, null)).toBe(7_600);
-    expect(customerChargeFor(0, 7_600, null)).toBe(0);
+    expect(customerChargeFor(owedForCharge(50_000), 7_600, null)).toBe(7_600);
+    // A free run (the App charged nothing) still takes the fee from the person's credit, never more than the hold
+    expect(customerChargeFor(owedForCharge(0), 7_600, null)).toBe(600);
+    expect(customerChargeFor(owedForCharge(0), 300, null)).toBe(300);
+  });
+
+  it('every tool of the table belongs to a research App with a name and one line, and the name never says who runs it', () => {
+    for (const row of instantCatalog()) {
+      const app = instantAppOf(row.toolkit);
+      expect(app).not.toBeNull();
+      expect(app?.name).toMatch(/^\S/);
+      expect(app?.strength.length).toBeGreaterThan(5);
+      expect(`${app?.name} ${app?.strength}`).not.toMatch(/composio/i);
+    }
+    expect(Object.keys(INSTANT_APPS).sort()).toEqual([...new Set(instantCatalog().map((row) => row.toolkit))].sort());
+    expect(instantAppOf('constructor')).toBeNull();
+    expect(instantAppOf('gmail')).toBeNull();
+  });
+
+  it('the most runs one question may have is an optional count: empty is no bound, never required for Instant to run', () => {
+    expect(INSTANT_LIMITS_EMPTY.maxRunsPerQuestion).toBeNull();
+    expect(INSTANT_NEEDED).not.toContain('maxRunsPerQuestion');
+    expect(checkInstantLimits({ maxRunsPerQuestion: 8 })).toEqual({ ok: true, value: { maxRunsPerQuestion: 8 } });
+    expect(checkInstantLimits({ maxRunsPerQuestion: null })).toEqual({ ok: true, value: { maxRunsPerQuestion: null } });
+    expect(checkInstantLimits({ maxRunsPerQuestion: 0 }).ok).toBe(false);
+    expect(checkInstantLimits({ maxRunsPerQuestion: 2.5 }).ok).toBe(false);
   });
 
   it('fingerprints what was asked the same however the keys are ordered, and tells different asks apart', () => {

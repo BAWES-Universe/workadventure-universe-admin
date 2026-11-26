@@ -1,8 +1,9 @@
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { ownCopyOf, ownGrantsOf } from '@/lib/app-same';
+import { brickOwnRowsOf, isOwnApp, ownCopyWorks, ownGrantsOf, sameApp } from '@/lib/app-same';
 import { connectedState } from '@/lib/app-connections';
+import { INSTANT_APPS } from '@/lib/instant/values';
 
 /**
  * Who an Instant run is for. Instant runs only on a person's own Brick (no room), for the Brick's OWNER's own request, and is paid
@@ -21,31 +22,49 @@ export async function ownerAsker(botId: string, input: { forOwner?: boolean; req
 /** An App's name compared loosely, so "google_maps" and "googlemaps" are the same App. */
 export const appKeyOf = (toolkit: string): string => toolkit.toLowerCase().replace(/[^a-z0-9]/g, '');
 
+/** The research Apps of the table (their keys, read loosely) that one of these own Apps is the same App as, by the one rule of lib/app-same.ts. */
+export function researchCoveredBy(own: readonly { name: string; serverUrl: string | null }[]): Set<string> {
+  const covered = new Set<string>();
+  for (const [key, info] of Object.entries(INSTANT_APPS)) {
+    if (own.some((one) => sameApp(one, { key, name: info.name }))) covered.add(appKeyOf(key));
+  }
+  return covered;
+}
+
 /**
- * The Apps this Brick's owner has switched on for THIS Brick: an enabled grant of one of the owner's own ready-made Apps. Nothing is on
- * for a Brick by default, so a Brick can rely on the model alone or use just the Apps its owner gave it. An Instant tool is offered and
- * run only for an App in this list. An App this Brick also has the owner's own copy of (switched on) is left out: their own comes first.
+ * The research Apps this Brick's owner has their OWN copy of, switched on for this Brick and working, by the one rule of lib/app-same.ts:
+ * ownGrantsOf (their link, a listed App or their key; never a ready-made one, which Universe pays for too) and brickOwnRowsOf (an App added
+ * straight on the Brick). Their own copy always wins: the Universe-paid version of that App is then neither offered to this Brick nor run, so
+ * the Brick uses the owner's own account, which Universe never meters or limits. One that cannot work right now (not connected, a refused
+ * sign-in or key, a server that did not answer) does not count, so the Brick is never left with no way to search.
+ */
+export async function brickOwnResearch(botId: string): Promise<Set<string>> {
+  const [grants, rows] = await Promise.all([ownGrantsOf(botId, (own) => connectedState(own).connected), brickOwnRowsOf(botId)]);
+  return researchCoveredBy([...grants, ...rows]);
+}
+
+/**
+ * The research Apps on for this Brick: every App of the table, on for every Brick's owner by default with nothing to connect and no switch,
+ * except one the Brick has the owner's own working copy of (then theirs is used instead). Who may run it (only the owner, on their own Brick,
+ * in its own chat) is checked by the caller.
  */
 export async function brickApps(botId: string): Promise<Set<string>> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
-  if (!bot?.ownerId) return new Set();
-  const [grants, own] = await Promise.all([
-    prisma.botMcpServer.findMany({
-      where: { botId, enabled: true, connection: { ownerId: bot.ownerId, providerToolkit: { not: null } } },
-      select: { connection: { select: { providerToolkit: true, name: true } } },
-    }),
-    ownGrantsOf(botId, (own) => connectedState(own).connected),
-  ]);
-  // The owner's own copy of an App comes first (lib/app-same.ts): while this Brick has their own Exa switched on, Instant's Exa is neither
-  // offered nor run, so their own account is what is used and nothing is paid for or counted by Universe
-  return new Set(
-    grants
-      .filter((grant) => !ownCopyOf(own, { key: grant.connection?.providerToolkit, name: grant.connection?.name }))
-      .map((grant) => appKeyOf(grant.connection?.providerToolkit ?? ''))
-      .filter(Boolean),
+  const own = await brickOwnResearch(botId);
+  return new Set(Object.keys(INSTANT_APPS).map(appKeyOf).filter((key) => !own.has(key)));
+}
+
+/**
+ * The research Apps a person has their own working copy of (any own App of theirs, whichever Bricks use it), for the Apps page: an App they
+ * connected themselves is listed there under Connected, so the Universe-paid version of it is not listed beside it. The same rule as above.
+ */
+export async function personOwnResearch(personId: string): Promise<Set<string>> {
+  const connections = await prisma.appConnection.findMany({ where: { ownerId: personId } });
+  return researchCoveredBy(
+    connections.filter((connection) => isOwnApp(connection) && ownCopyWorks(connectedState(connection).connected, connection)).map((connection) => ({ name: connection.name, serverUrl: connection.serverUrl })),
   );
 }
 
+/** Whether an App of the table is on for this Brick (see brickApps). */
 export async function brickHasApp(botId: string, toolkit: string): Promise<boolean> {
   return (await brickApps(botId)).has(appKeyOf(toolkit));
 }
