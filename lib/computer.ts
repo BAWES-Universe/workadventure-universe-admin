@@ -83,7 +83,7 @@ import {
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
-import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
+import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -123,6 +123,8 @@ export interface JobView {
   control: 'brick' | 'person';
   /** What Brick is ready to put in at the hand-over and where, as it named it: the person's one tap fills in this and nothing else. */
   ready: { what: string; where: string } | null;
+  /** When the person asked for the job (its creation): Brick tells two jobs of one title apart by how long ago each was asked (GPT eighth note, E2). */
+  askedAt: Date;
   startedAt: Date | null;
   endedAt: Date | null;
   /** Details the person asked Brick to fill in, still to be done: what and where. Brick does only these, and only now. */
@@ -142,7 +144,10 @@ export interface ComputerView {
   machine: MachineState;
   /** The job that has the machine (running, or waiting for its person); null when it rests. */
   job: JobView | null;
-  /** Jobs in line behind it, or waiting for the person's allowance. */
+  /**
+   * Jobs in line behind it, or waiting for the person's allowance. ORDER (a contract with the game, GPT eighth note E2): the order the line is taken, NOT by age: highest queue rank first, then OLDEST asked first. A caller that
+   * wants "newest first" sorts by each job's `askedAt` itself. Every job here, and `job`, carries `askedAt`.
+   */
   queued: JobView[];
   /** The person's month for computers: the share left (0 to 1), or null when no allowance is set up yet. Never a count or a price. */
   month: { leftFraction: number; unlimited: boolean; endsAt: Date } | null;
@@ -187,6 +192,7 @@ type JobRow = {
   control: string;
   startedAt: Date | null;
   endedAt: Date | null;
+  createdAt: Date;
   pausedAt?: Date | null;
   pausedWhy?: string | null;
   pauses?: number;
@@ -223,6 +229,7 @@ function jobView(row: JobRow): JobView {
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
+    askedAt: row.createdAt,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     detailsToFill,
@@ -667,12 +674,13 @@ async function keptAnswerOf(botId: string, personId: string, startKey: string): 
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
  * Written before the answer is given. The FIRST answer stored for a key stays: it never touches a start that made its own job (`made`), was superseded or was already answered (a caller that gets `false` reads the stored answer and gives that one: two requests that chose different earlier jobs must not hand the caller two answers), and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
-async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
+async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }, issued: Date | null = null): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
   const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
+  // A row this insert makes carries the key's issue time when the caller knows it (GPT eighth note, A1): the record of when its consent was given. An existing row keeps its own
   const written = await db.$executeRaw`
-    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
-    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
+    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at", "issued_at")
+    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'), ${issued})
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
     WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
@@ -831,6 +839,68 @@ export interface Registration {
 }
 
 /**
+ * GPT eighth note, A2 (Opus's design): the identity of a timed key is the part after its time prefix (`t<ms base 36>-`), which a redelivery of the same event keeps while its time prefix can change. Null for a key with no time.
+ * The whole of the rest, `-` included: only the first `-` ends the prefix (the prefix never holds one).
+ */
+export function identityOfKey(startKey: string): string | null {
+  return issuedOfKey(startKey) ? startKey.slice(startKey.indexOf('-') + 1) : null;
+}
+
+/**
+ * The key a start of this person on this Brick is KNOWN by: the FIRST key Orbit saw with the same identity (earliest issue time, then creation, then id), or the key itself when it holds none. A redelivery of one event under another time
+ * prefix is the same start: its answer, its refusal, its job and its consent time are the first key's (a replay never gains consent from the time it was replayed). The identity is matched EXACTLY after the first `-` (`_`, which a key
+ * holds, is never a wildcard here). Read only; every route that takes a key maps it first.
+ */
+export async function canonicalStartKey(botId: string, personId: string, startKey: string): Promise<string> {
+  const rest = identityOfKey(startKey);
+  if (rest === null) return startKey;
+  const found = await prisma.$queryRaw<{ start_key: string }[]>`
+    SELECT "start_key" FROM "computer_start_attempts"
+    WHERE "bot_id" = ${botId} AND "person_id" = ${personId} AND "start_key" ~ '^t[0-9a-z]{1,11}-' AND substr("start_key", position('-' in "start_key") + 1) = ${rest}
+    ORDER BY "issued_at" ASC NULLS LAST, "created_at" ASC, "id" ASC LIMIT 1`;
+  return found[0]?.start_key ?? startKey;
+}
+
+/**
+ * GPT eighth note, A1 (Opus's design): a keyed start with no attempt row whose key was issued BEFORE the key of an attempt this person already holds on this Brick (made or answered with a job, or open and beating), by
+ * the keys' own times (both are the message times of one chat, so no clock of ours is compared). The newer ask reached Orbit first, so this key is the earlier ask arriving late: it is written as answered by that job (or
+ * that attempt while it has no job), in one statement under the person's lock, and answers `earlier`: it makes and reserves nothing. Strictly later only: two starts of one message share a time and never answer each other.
+ * A deliberate second ask is issued AFTER the first answer, so its key is the newer one and is never touched. Null: none, or another request of this same key wrote its row first.
+ */
+async function answeredByNewerAsk(botId: string, personId: string, startKey: string, issued: Date, now: Date): Promise<Started | null> {
+  const newerWhere = (): Prisma.ComputerStartAttemptWhereInput => ({
+    botId,
+    personId,
+    startKey: { not: startKey },
+    issuedAt: { gt: issued, lte: new Date(now.getTime() + ISSUE_SKEW_MS) },
+    // A refused one counts too (Opus): the person's latest decision on this ask was a refusal (their month, a rule, controls not set up), and a delayed older packet must not override it and start paid work they were never told about
+    OR: [{ jobId: { not: null } }, { state: 'refused' }, { state: 'open', beatAt: { gt: new Date(now.getTime() - attemptLifeMs()) } }],
+  });
+  const orderBy = [{ issuedAt: 'asc' as const }, { id: 'asc' as const }];
+  // Nothing newer is the ordinary case: read without the lock first
+  if (!(await prisma.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true } }))) return null;
+  const decided = await prisma.$transaction(
+    async (tx): Promise<Started | 'refused' | null> => {
+      await lockPerson(tx, personId);
+      const own = { botId, personId, startKey };
+      if (await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: own }, select: { id: true } })) return null;
+      const newer = await tx.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true, jobId: true, startKey: true, state: true } });
+      if (!newer) return null;
+      if (!(await answerAttemptIn(tx, own, newer.jobId ? { jobId: newer.jobId } : { aliasAttemptId: newer.id }, issued))) return null;
+      // A refused one: this key is answered with the same kept refusal, read below from the alias just written
+      if (!newer.jobId && newer.state === 'refused') return 'refused' as const;
+      const by = newer.jobId ? await tx.computerJob.findUnique({ where: { id: newer.jobId }, select: { id: true, status: true, startKey: true } }) : null;
+      return { ok: false, reason: 'earlier', job: by ? { id: by.id, status: by.status, state: startStateOf(by.status), attempt: by.startKey } : { id: null, status: null, state: 'starting', attempt: newer.startKey } };
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (decided !== 'refused') return decided;
+  const kept = await attemptAnswer(botId, personId, startKey, now);
+  // The refusal on record, the same body the newer ask was given; one that cannot be read now is not answered here: the start goes on and its own checks answer it from the alias just written
+  return kept && 'kept' in kept ? { ok: false, reason: 'kept', body: kept.kept } : null;
+}
+
+/**
  * Round 8, A1: registers a keyed start that acks BEFORE anything else is asked (the earlier-start look, "try again", the person's spending rule): its attempt row is written with the request's own moment `began`, so a
  * later request (a reworded retry under a new key) that decides while this one is held finds it, open and beating, and waits for it; and the look for this key says it is going on. Kept beating until `release`.
  *
@@ -844,6 +914,9 @@ export async function registerStart(botId: string, personId: string, startKey: s
   let reopened = false;
   if (!row) {
     if (!fresh) return { answer: { ok: false, reason: 'stale_consent' } };
+    // A1 (GPT eighth note): an ask Orbit never heard of that was issued BEFORE one it already holds is the earlier ask arriving late (the retry overtook it on the way). It is answered with that ask and makes nothing
+    const overtaken = await answeredByNewerAsk(botId, personId, startKey, issued, now);
+    if (overtaken) return { answer: overtaken };
   } else {
     const own = ownTerminalOf(row);
     if (own) return { answer: 'kept' in own ? { ok: false, reason: 'kept', body: own.kept } : { ok: false, reason: 'retired' } };
@@ -1498,7 +1571,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
   }
   // Never over a pause that landed since this try looked (it would undo the pause)
   // ...and records the try (`lastTriedAt`, the line's rotation); that the start DECIDED is `start_decided_at`, written by `tryStart` when this returns
-  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
+  // ...and only while the job is still in the start (place in line) this try read it in: every Resume, carry-on and "do this first" moves the rank, so a try that was held while the person paused and resumed again never writes over the NEW start (CodeRabbit on #1025, 14c4e407 pass, N14)
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
   if (await computersArePaused()) {
@@ -1581,7 +1655,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
       const why = room.reason;
       // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
       await prisma.$transaction(async (tx) => {
-        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
+        // The refusal belongs to the start this try read the job in (its rank): a newer start of the job is never paused by it (N14)
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
         if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
       });
       return 'queued';
@@ -2582,7 +2657,6 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       return;
     }
     const held = job.status === 'running' || job.status === 'waiting';
-    const inLine = job.status === 'queued';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
@@ -2687,8 +2761,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const counted = verdict?.state === 'given' && verdict.counted;
         // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
         const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
-        // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason (CodeRabbit on #1025, d522f4b3 pass, N23)
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending clears its place, its reason and its browser state: a job in line (N23) and one that held the machine (it ran, then ended) alike (Opus on 14c4e407)
+        await settlePendingResumesIn(tx, jobId);
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
@@ -2725,7 +2799,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         await lockCutoff(tx, jobId);
         const early = await decideUnderCutoff(tx);
         if (early) return early;
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
       if ('deferred' in written && written.deferred) {
@@ -2741,14 +2815,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         continue;
       }
       ended = written;
-    } else if (inLine) {
-      // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason, in the same commit (N23)
+    } else {
+      // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending, in the same commit (N23; a job that ran and then ended too)
       ended = await prisma.$transaction(async (tx) => {
         await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
-    } else {
-      ended = await prisma.computerJob.updateMany({ where, data: endData });
     }
   }
   // Someone else ended it between the read and the write: that one counts and settles

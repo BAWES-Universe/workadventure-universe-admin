@@ -339,7 +339,8 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(after.startDecidedAt).toEqual(before.startDecidedAt);
       expect(after.queuedFor).toEqual(before.queuedFor);
       expect(await prisma.meterReservation.count({ where: { personId: sara.id } })).toBe(rooms);
-      // CONTROL: a start under key B (not a lookup) still tries the job it was answered with, as a repeated start of it would
+      // CONTROL: a start under key B (not a lookup) still tries the job it was answered with, as a repeated start of it would. The marker is cleared first, so the POST must SET it (a POST that only read the job would leave it null)
+      await prisma.computerJob.update({ where: { id: a.id }, data: { startDecidedAt: null } });
       expect((await post(sara, kB)).body).toMatchObject({ ok: true, job: { id: a.id } });
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.id } })).startDecidedAt).not.toBeNull();
     });

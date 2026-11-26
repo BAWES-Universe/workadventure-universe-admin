@@ -683,6 +683,9 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     const markOf = (botId: string) => prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { parkPendingJobId: true, parkPendingWipe: true } });
     const keptOf = async (jobId: string) => (await prisma.computerJobPause.findMany({ where: { jobId }, orderBy: { n: 'asc' }, select: { n: true, signInsKept: true } })).map((one) => [one.n, one.signInsKept]);
 
+    /** The checkpoints' own deadline: shorter than jest's default test timeout (10 s), so a wrong fixture fails with the checkpoint's own message, never with the timeout's (CodeRabbit on #1025, 14c4e407 pass, N7). */
+    const CHECKPOINT_MS = 8_000;
+
     /** A poll bounded by the checkpoint's own deadline, whatever the database does: a query that waits for a connection or stalls rejects with the checkpoint's own message when the time is up, never later (CodeRabbit on #1025, d522f4b3 pass, N7). */
     function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
       return new Promise<T>((resolve, reject) => {
@@ -707,34 +710,43 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
      */
     async function waitUntilBlockedBy(holderPid: number, count: number, ...running: Array<Promise<unknown>>) {
       let over = false;
+      // The poll's waits end the moment it is stopped (a watched request that exits early), so a cleanup never waits for a query or a sleep to run out (CodeRabbit on #1025, 14c4e407 pass, N4)
+      let stop: () => void = () => undefined;
+      const stopped = new Promise<null>((resolve) => (stop = () => resolve(null)));
       const poll = (async () => {
-        const end = Date.now() + 10_000;
+        const end = Date.now() + CHECKPOINT_MS;
         for (;;) {
           // Waiting for the holder, directly or behind another waiter for the same row (a second waiter queues behind the first one, and Postgres names the first one as its blocker)
-          const rows = await within(prisma.$queryRaw<{ n: number }[]>`
+          if (over) return;
+          const query = within(prisma.$queryRaw<{ n: number }[]>`
             WITH RECURSIVE waiting(pid) AS (
               SELECT a.pid FROM pg_stat_activity a WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${holderPid}::int = ANY (pg_blocking_pids(a.pid))
               UNION
               SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid = ANY (pg_blocking_pids(a.pid)) WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
             )
             SELECT count(*)::int AS n FROM waiting`, end - Date.now(), `Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
+          // A query still running when the poll is stopped is let go: its late answer or error is handled here, never left unhandled
+          query.catch(() => undefined);
+          const rows = await Promise.race([query, stopped]);
+          if (rows === null) return;
           if (rows[0].n >= count) return;
           if (over) return;
           if (Date.now() > end) throw new Error(`Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
-          await new Promise((resolve) => setTimeout(resolve, 25));
+          await Promise.race([new Promise((resolve) => setTimeout(resolve, 25)), stopped]);
         }
       })();
       try {
         await Promise.race([poll, ...running.map((one) => one.then(() => { throw new Error('A request ended before it was blocked by the fixture transaction'); }))]);
       } finally {
         over = true;
+        stop();
         await poll.catch(() => undefined);
       }
     }
 
     /** Polls `check` until it holds, for at most ten seconds, and fails at once when one of the requests being waited for ends first. */
     async function boundedUntil(check: () => boolean, what: string, ...running: Array<Promise<unknown>>) {
-      const end = Date.now() + 10_000;
+      const end = Date.now() + CHECKPOINT_MS;
       let over = false;
       const poll = (async () => {
         while (!check() && !over) {
@@ -1261,15 +1273,19 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     const failNumberReads = (from: number) => {
       const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
       let reads = 0;
+      let rejected = 0;
       const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { select?: Record<string, boolean> }) => {
         const keys = Object.keys(args?.select ?? {});
         if (keys.length === 1 && keys[0] === 'pauses') {
           reads += 1;
-          if (reads >= from) return Promise.reject(new Error('the database is not answering')) as never;
+          if (reads >= from) {
+            rejected += 1;
+            return Promise.reject(new Error('the database is not answering')) as never;
+          }
         }
         return real(args as never);
       }) as never);
-      return { reads: () => reads, stop: () => spy.mockRestore() };
+      return { reads: () => reads, rejected: () => rejected, stop: () => spy.mockRestore() };
     };
 
     it('a restore whose number cannot be read does not run: no command (so no note numbered 0), the answer is `failed`, and the job is left for the recovery', async () => {
@@ -1318,6 +1334,9 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       const failing = failNumberReads(2);
       try {
         expect(await recoverResumedBrowsers(minutes(1))).toMatchObject({ looked: 1, ready: 1 });
+        // The sweep did reach the injected failure: the commit's number read was the one rejected (the restore's own read, the first, was answered)
+        expect(failing.reads()).toBe(2);
+        expect(failing.rejected()).toBe(1);
       } finally {
         failing.stop();
         resetRecoveryCursorForTests();

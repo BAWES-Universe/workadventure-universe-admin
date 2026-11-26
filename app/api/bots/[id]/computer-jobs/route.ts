@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startKeyHasJob, startedJobFor, storedStartAnswer, type Registration } from '@/lib/computer';
+import { ackStart, canonicalStartKey, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startKeyHasJob, startedJobFor, storedStartAnswer, type Registration } from '@/lib/computer';
 import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
@@ -87,9 +87,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (asked && person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     const view = person.personId ? await computerView(id, person.personId) : null;
     // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
-    const found = asked?.success ? (person.personId && view ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
+    // GPT eighth note, A2: a key is known by the first key of its identity (a redelivery under another time prefix is the same start)
+    const askedKey = asked?.success && person.personId ? await canonicalStartKey(id, person.personId, asked.data) : asked?.success ? asked.data : null;
+    const found = asked?.success && askedKey ? (person.personId && view ? await startedJobFor(id, person.personId, askedKey) : null) : undefined;
     // A look is READ ONLY: it confirms nothing (its reply can be lost on the way back, and a start the game never received an answer of must stay unconfirmed). Only the game's own `start-ack` confirms a start
-    const started = found && !('inProgress' in found) && asked?.success ? { ...found, attempt: asked.data, state: startStateOf(found.status) } : found;
+    const started = found && !('inProgress' in found) && asked?.success ? { ...found, attempt: askedKey ?? asked.data, state: startStateOf(found.status) } : found;
     // A start with this key is still going on (it holds its mark until its job is saved): no job has reached Orbit YET and one still can, so this is not a miss either. The same word as a failed lookup: ask again
     if (started && 'inProgress' in started) return NextResponse.json({ error: 'A start of this job is still going on, ask again', retry: true, inProgress: true }, { status: 503 });
     const wantsRetry = request.nextUrl.searchParams.get('retry') === '1';
@@ -166,7 +168,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (who.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
       // A guest has no Brick computer and no start: there is nothing to follow
       if (!who.personId) return NextResponse.json({ ok: true, retired: true });
-      return NextResponse.json({ ok: true, ...(await retireStartKey(id, who.personId, asked.data.attempt)) });
+      return NextResponse.json({ ok: true, ...(await retireStartKey(id, who.personId, await canonicalStartKey(id, who.personId, asked.data.attempt))) });
     }
     // The game confirms it has the answer of a start it made: told apart by its `action`
     if (raw !== null && typeof raw === 'object' && (raw as { action?: unknown }).action !== undefined) {
@@ -176,7 +178,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       // Who this was for could not be looked up just now: nothing is confirmed, and the caller asks again
       if (who.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
       if (!who.personId) return NextResponse.json({ ok: true, acked: false });
-      return NextResponse.json({ ok: true, acked: await ackStart(id, who.personId, acked.data.attempt) });
+      return NextResponse.json({ ok: true, acked: await ackStart(id, who.personId, await canonicalStartKey(id, who.personId, acked.data.attempt)) });
     }
     const parsed = bodySchema.safeParse(raw);
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
@@ -198,10 +200,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
+    // GPT eighth note, A2: the start is known by the first key Orbit saw with its identity (a redelivery of one event under another time prefix is the same start, judged from the first consent time)
+    const startKey = attempt?.success ? await canonicalStartKey(id, person.personId, attempt.data) : null;
+    const startIssued = acking && startKey ? (issuedOfKey(startKey) ?? issued) : null;
     // Round 8, A1: registered FIRST, before every look and the spending rule below, so no later request can overtake it. A2: a key decided for good is answered here (its kept refusal, `retired`, `stale_consent`)
-    if (acking && attempt?.success && issued) {
-      key = { id, personId: person.personId, startKey: attempt.data };
-      const registered = await registerStart(id, person.personId, attempt.data, began, issued);
+    if (acking && startKey && startIssued) {
+      key = { id, personId: person.personId, startKey };
+      const registered = await registerStart(id, person.personId, startKey, began, startIssued);
       if ('answer' in registered) return NextResponse.json(startAnswerBody(registered.answer));
       registration = registered.registration;
     }
@@ -222,23 +227,23 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json(body);
     };
     // Finding 1 (GPT round 6): a key that was answered before with another start's job gets that same answer again, first: after the job was acknowledged, ended, or the game forgot the key, never a job of its own
-    if (attempt?.success) {
-      const answered = await startAnsweredBefore(id, person.personId, attempt.data);
+    if (startKey) {
+      const answered = await startAnsweredBefore(id, person.personId, startKey);
       if (answered) return NextResponse.json(startAnswerBody(answered));
     }
-    if (acking && attempt?.success) {
-      const earlier = await earlierUnconfirmedStart(id, person.personId, attempt.data);
+    if (acking && startKey) {
+      const earlier = await earlierUnconfirmedStart(id, person.personId, startKey);
       if (earlier) return NextResponse.json({ ok: false, reason: 'earlier', job: earlier });
     }
     // "Try again" is resolved FIRST: a named job that cannot be carried on is `cannot_continue` (with the way to start a fresh job), whatever the person's spending rule leaves; one already carried on keeps its earlier answer
     // (the spend look below lets it through); only a continuation that would be MADE is held to the rule (CodeRabbit on #1025, 35). A start that names a run is answered by the run's own job first, so it is left to the start
     // A replay of a key that already made its job is not a new "try again": the job it made answers it (in `startJob`), even when the job it continued has been deleted since (CodeRabbit on #1025)
-    if (continues?.success && !parsed.data.runId && !(attempt?.success && (await startKeyHasJob(id, person.personId, attempt.data)))) {
+    if (continues?.success && !parsed.data.runId && !(startKey && (await startKeyHasJob(id, person.personId, startKey)))) {
       const carry = await carryOnFrom(id, person.personId, continues.data);
       if ('fresh' in carry) return refused({ ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) });
     }
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
-    const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null, continues?.success ? continues.data : null);
+    const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, startKey, continues?.success ? continues.data : null);
     if (!ruled.ok) return refused({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
     handedOn = true;
     const started = await startJob({
@@ -248,7 +253,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       brief: parsed.data.brief,
       writes: parsed.data.writes,
       runId: parsed.data.runId,
-      startKey: attempt?.success ? attempt.data : undefined,
+      startKey: startKey ?? undefined,
       acks: acking,
       plan: parsed.data.plan,
       origin: parsed.data.origin ?? null,
