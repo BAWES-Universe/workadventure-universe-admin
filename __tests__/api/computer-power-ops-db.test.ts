@@ -753,6 +753,24 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(after.stretchStarted).not.toBeNull();
     }, 30_000);
 
+    it('Opus on #1040, N6: a machine that was not stopped and cannot be brought up for a banked job leaves the banked job banked, ends no job on the Brick and does not write over the row', async () => {
+      const sara = await owner('banked-wake-fails-not-stopped');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      if (!a.ok) throw new Error('no job');
+      // A is banked; a second job beside it is working with its own stretch; the machine rests and its wake fails
+      const b = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'B', status: 'running', writes: false, startedAt: NOW, stretchStarted: new Date(Date.now() - 10_000) } });
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { stretchStarted: null, secondsRun: 100, awakeProvedAt: new Date(Date.now() - 100_000) } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      fake.wake = async () => {
+        throw new Error('the wake failed');
+      };
+      expect(await wakeIfStopped(sara.brickId)).toBe('pending');
+      const [aAfter, bAfter] = await Promise.all([a.job.id, b.id].map((id) => prisma.computerJob.findUniqueOrThrow({ where: { id } })));
+      expect(aAfter).toMatchObject({ status: 'running', stretchStarted: null, secondsRun: 100 });
+      expect(bAfter).toMatchObject({ status: 'running', endedAt: null });
+      expect((await machineOf(sara)).machine).not.toBe('broken');
+    }, 30_000);
+
     it('Opus on #1040, F3: a hand back whose transition was left by a dead leader and whose wake stays pending answers in progress at once; it does not resume again and again past the deadline', async () => {
       const sara = await owner('handback-resume-pending');
       setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 300, waitMs: 300, pollMs: 20 });

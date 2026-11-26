@@ -4289,6 +4289,12 @@ export async function wakeIfStopped(botId: string, /** How long to wait for a st
       console.error('[Computer] A machine was not woken after a hand back, because a stop of ours may still land; the return stays pending');
       return 'pending';
     }
+    // A machine that was not stopped (another start is waking it, it rests, or it is broken) and could not be brought up now is no reason to end the jobs on it or to write over a wake that another start owns (Opus on #1040, N6): the banked
+    // jobs stay banked and the row is left as it is. The caller asks again (the next turn start, the sweep or the next request)
+    if (!stopped) {
+      console.error('[Computer] A machine that was not stopped could not be brought up for the jobs banked on it; they stay banked and it is tried again:', error instanceof Error ? error.message : 'unknown');
+      return 'pending';
+    }
     console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
     for (const job of jobs) await endJob(job.id, 'stopped', 'error', new Date());
