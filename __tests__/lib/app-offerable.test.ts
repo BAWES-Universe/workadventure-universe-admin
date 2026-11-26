@@ -23,12 +23,18 @@ const state = {
   github: false,
   /** What reading the asked connections again finds */
   reread: [] as Row[],
+  /** The Apps the person added themselves, by their link or with their key */
+  added: [] as { name: string; serverUrl: string }[],
 };
 
 jest.mock('@/lib/db', () => ({
   prisma: {
     appCatalogEntry: { findMany: jest.fn(async () => state.entries) },
-    appConnection: { findMany: jest.fn(async (args?: { where?: { id?: unknown } }) => (args?.where?.id ? state.reread : state.rows)) },
+    appConnection: {
+      findMany: jest.fn(async (args?: { where?: { id?: unknown; OR?: Record<string, unknown>[] } }) =>
+        args?.where?.id ? state.reread : args?.where?.OR?.some((part) => 'kind' in part) ? state.added : state.rows,
+      ),
+    },
   },
 }));
 jest.mock('@/lib/app-connections', () => ({
@@ -53,6 +59,7 @@ beforeEach(() => {
   state.readyMade = [];
   state.github = false;
   state.reread = [];
+  state.added = [];
   jest.clearAllMocks();
 });
 
@@ -171,5 +178,26 @@ describe('offerableForBrick', () => {
     // Still no grant: confirmed, and not used yet
     state.reread = [row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made', providerConfirmedAt: new Date(), connected: true, grants: [] })];
     expect(await offerableForBrick('brick', 'u')).toMatchObject([{ connected: true, usable: false }]);
+  });
+
+  describe('an App the person already added themselves', () => {
+    it('never suggests the ready-made copy of an App they added by its link, matched by the link\'s address', async () => {
+      state.readyMade = [{ key: 'exa', name: 'Exa', enabled: true }, { key: 'tavily', name: 'Tavily', enabled: true }, { key: 'gmail', name: 'Gmail', enabled: true }];
+      state.added = [{ name: 'My search', serverUrl: 'https://mcp.exa.ai/mcp' }, { name: 'Tavily', serverUrl: 'https://example.org/sse' }];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['gmail']);
+    });
+
+    it('never suggests a listed App they only have by their own link or key, and still shows one they connected from the list', async () => {
+      state.entries = [{ key: 'tavily', name: 'Tavily', blurb: 'Web search' }, { key: 'exa', name: 'Exa', blurb: 'Search' }];
+      state.added = [{ name: 'Tavily search', serverUrl: 'https://api.tavily.com' }, { name: 'Exa', serverUrl: 'https://api.exa.ai' }];
+      state.rows = [row({ catalogKey: 'exa', connected: true })];
+      expect(await offerableForBrick('brick', 'u')).toEqual([{ key: 'exa', name: 'Exa', blurb: 'Search', kind: 'listed', connectionId: 'c1', connected: true, usable: false }]);
+    });
+
+    it('still suggests other Apps: a word every address has, or a short one, names nothing', async () => {
+      state.readyMade = [{ key: 'mcp', name: 'MCP', enabled: true }, { key: 'ai', name: 'AI', enabled: true }, { key: 'notion', name: 'Notion', enabled: true }];
+      state.added = [{ name: 'Search', serverUrl: 'https://mcp.search.ai/mcp' }];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['mcp', 'ai', 'notion']);
+    });
   });
 });

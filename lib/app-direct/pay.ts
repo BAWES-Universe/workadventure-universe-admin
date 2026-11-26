@@ -378,9 +378,6 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     // The platform's own limit counts every owner's orders, so checkouts of different owners take turns at counting and writing the order,
     // or two of them at the same moment could both find room for the last one. Always after the owner's lock, in this one order
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
-    // The count of key calls below is the one every key call takes its turn on (lib/app-direct/use.ts): without this lock a call and a checkout could both
-    // count one under the platform's limit and both take it. After the platform lock and before the counts; use.ts takes no page-orders lock, so no cycle
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
     // Two taps of one wish, at the same moment, wait here for each other: the second finds what the first made
     if (intent) {
       const made = await tx.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
@@ -396,15 +393,16 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     const terms = checkoutTerms(await tx.appPageJob.findUnique({ where: { id: first.job.id }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
     if (!terms) return 'gone' as const;
     const since = new Date(Date.now() - HOUR);
-    const [mine, page, visitor, platform, calls] = await Promise.all([
+    // Checkouts are counted on their own: a Brick's use of its owner's own key is never limited and never shares this total (Khalid, 26 Nov 2026),
+    // so however busy Bricks are, they can never use up what checkouts may do, and checkouts never use up what Bricks may do. Asks about payments
+    // have their own budget (below)
+    const [mine, page, visitor, platform] = await Promise.all([
       tx.appPageOrder.count({ where: { ownerId: terms.job.ownerId, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { jobId: terms.job.id, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { jobId: terms.job.id, visitorHash: hash, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
-      // Asks about payments are counted apart (below), so they can never use up what checkouts and Bricks may do
-      tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: LOOKUP_ROWS } } }),
     ]);
-    if (visitor >= limits.checkoutsPerVisitor || page >= limits.checkoutsPerPage || mine >= limits.checkoutsPerOwner || platform + calls >= limits.keyCallsPlatform) return 'limit' as const;
+    if (visitor >= limits.checkoutsPerVisitor || page >= limits.checkoutsPerPage || mine >= limits.checkoutsPerOwner || platform >= limits.keyCallsPlatform) return 'limit' as const;
     const made = await tx.appPageOrder.create({
       data: {
         jobId: terms.job.id,

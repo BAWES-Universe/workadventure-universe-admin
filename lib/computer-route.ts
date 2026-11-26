@@ -3,6 +3,7 @@ import { RATE_MICROS, tierOf } from '@/lib/composio-rates';
 import { connectedState } from '@/lib/app-connections';
 import { appUseHasRoom } from '@/lib/app-use-cap';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
+import { isOwnApp, isReadyMade, sameApp } from '@/lib/app-same';
 import { BRICK_SHAPE, awakeMicrosPerMinute as publishedAwakeMicrosPerMinute, keptDiskMonthMicros } from '@/lib/agent37/rates';
 
 /**
@@ -89,12 +90,20 @@ const plain = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ')
 export async function connectedApp(botId: string, name: string): Promise<{ name: string; stepMicros: number | null } | null> {
   const wanted = plain(name);
   if (!wanted) return null;
-  const grants = await prisma.botMcpServer.findMany({ where: { botId, enabled: true, NOT: { connectionId: null } }, include: { connection: true } });
+  const found = await prisma.botMcpServer.findMany({ where: { botId, enabled: true, NOT: { connectionId: null } }, include: { connection: true }, orderBy: { createdAt: 'asc' } });
+  // Two Apps of the same name (the person's own Exa and the ready-made one): the person's own is weighed first (lib/app-same.ts), at what it costs
+  // Universe (nothing), never the ready-made one's price
+  const grants = [...found.filter((grant) => !isReadyMade(grant.connection)), ...found.filter((grant) => isReadyMade(grant.connection))];
   for (const grant of grants) {
     const connection = grant.connection;
     if (!connection || !connectedState(connection).connected) continue;
     const names = [grant.name, connection.name, connection.providerToolkit ?? ''].map(plain);
     if (!names.includes(wanted)) continue;
+    // The ready-made one was named but the person has their own copy of it here under another name ("Exa Search" by its link): theirs is the way
+    if (isReadyMade(connection)) {
+      const own = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && connectedState(other.connection).connected && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
+      if (own) return { name: own.name, stepMicros: 0 };
+    }
     // Only a ready-made app is paid for by us at the provider's rate; any other connected app costs us no call (its step is still a model turn)
     if (connection.source !== 'ready_made' || !connection.providerToolkit) return { name: grant.name, stepMicros: connection.source === 'ready_made' ? null : 0 };
     const listed = (await readReadyMadeApps()).find((app) => app.key === connection.providerToolkit);

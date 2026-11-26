@@ -441,41 +441,29 @@ run('using a key app, in a real database', () => {
     expect(sent).toBe(2);
   });
 
-  it('holds requests an hour for a person and for everyone, both from Limits, and counts only what it took', async () => {
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
+  it('never limits the person\'s own key: no hourly allowance for the person, none for everyone, and page orders take no room from it', async () => {
+    // The smallest ceiling Limits can hold, a busy hour already behind the person (more than the old 300 an hour), other people's calls and a
+    // page order of this hour: none of it stops a Brick using its owner's own key (Khalid, 26 Nov 2026: own keys are never limited by us)
+    await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
     await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
+    const connection = await prisma.appConnection.findFirstOrThrow({ where: { ownerId: sara, kind: 'direct' }, select: { id: true } });
+    await prisma.appKeyCall.createMany({
+      data: Array.from({ length: 400 }, (_, index) => ({ connectionId: connection.id, ownerId: sara, botId: saraBrick, callId: `busy-${tag}-${index}`, operation: 'x', state: 'done', outcome: 'ok' })),
+    });
+    await prisma.appKeyCall.createMany({
+      data: Array.from({ length: 5 }, (_, index) => ({ connectionId: connection.id, ownerId: omar, botId: omarBrick, callId: `omar-${tag}-${index}`, operation: 'x', state: 'done', outcome: 'ok' })),
+    });
+    const order = await prisma.appPageOrder.create({ data: { ownerId: sara, artifactId: `art-${randomUUID()}`, definitionHash: 'h'.repeat(64), amountMinor: 100, currency: 'USD', visitorHash: 'v' } });
     let sent = 0;
     mockSend.current = () => ((sent += 1), { status: 200 });
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    const over = await call(saraBrick, app.serverId, app.definitionHash);
-    expect(over.status).toBe(429);
-    expect((await over.json()).code).toBe('limit');
-    expect(sent).toBe(2);
-    // An hour later the person has room again
-    await prisma.appKeyCall.updateMany({ where: { ownerId: sara }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    // And everyone's ceiling holds too
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 100, keyCallsPlatform: 1 } }, sara);
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(429);
-  });
-
-  it('counts the page orders of the last hour under everyone\'s ceiling, as a checkout counts key calls: key calls cannot fill what orders already hold', async () => {
-    await connectGateway();
-    const [app] = await keyAppsOf(saraBrick);
-    mockSend.current = () => ({ status: 200 });
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 100, keyCallsPlatform: 2 } }, sara);
-    // One order started in the last hour holds one of the two places
-    const order = await prisma.appPageOrder.create({ data: { ownerId: sara, artifactId: `art-${randomUUID()}`, definitionHash: 'h'.repeat(64), amountMinor: 100, currency: 'USD', visitorHash: 'v' } });
     try {
-      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-      const over = await call(saraBrick, app.serverId, app.definitionHash);
-      expect(over.status).toBe(429);
-      expect((await over.json()).code).toBe('limit');
-      // An order from before the last hour holds nothing
-      await prisma.appPageOrder.update({ where: { id: order.id }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
-      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+      for (let index = 0; index < 3; index += 1) {
+        const used = await call(saraBrick, app.serverId, app.definitionHash);
+        expect(used.status).toBe(200);
+        expect((await used.json()).ok).toBe(true);
+      }
+      expect(sent).toBe(3);
     } finally {
       await prisma.appPageOrder.delete({ where: { id: order.id } }).catch(() => undefined);
     }
@@ -645,8 +633,8 @@ run('using a key app, in a real database', () => {
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
-    it('keeps what was used this hour when the app is disconnected and connected again', async () => {
-      await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
+    it('keeps working with no allowance after the app is disconnected and connected again', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
       const first = await connectGateway();
       const [app] = await keyAppsOf(saraBrick);
       mockSend.current = () => ({ status: 200 });
@@ -656,7 +644,7 @@ run('using a key app, in a real database', () => {
       expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(2);
       await connectGateway();
       const [again] = await keyAppsOf(saraBrick);
-      expect((await call(saraBrick, again.serverId, again.definitionHash)).status).toBe(429);
+      expect((await call(saraBrick, again.serverId, again.definitionHash)).status).toBe(200);
     });
 
     it('leaves no Brick behind when its starting access cannot be written', async () => {

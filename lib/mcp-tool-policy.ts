@@ -1,5 +1,6 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { ensureAppActionTools, holdsAppActions } from '@/lib/app-actions/grant';
+import { settleOwnAppTools, universeSortsTools } from '@/lib/app-own-tools';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -276,6 +277,8 @@ export async function readServerTools(botId: string, serverId: string, options: 
   await ensureKeyAppTools(serverId);
   // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
   if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
+  // A person's own App is sorted and confirmed by Universe (lib/app-own-tools.ts): a grant made before that is brought up to date when read
+  await settleOwnAppTools(serverId);
   return describe(prisma, serverId);
 }
 
@@ -303,9 +306,12 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (kindOf(server) === 'appActions') return { ...(await describe(tx, serverId)), added: [], changed: [], removed: [] };
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, confirmedById: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
+    // On the person's own App a tool Universe confirmed (no person) keeps following the bot server's suggestion, so it is sorted again when a
+    // suggestion comes later (lib/app-own-tools.ts); one a person confirmed or moved keeps what they decided
+    const universeSorts = await universeSortsTools(serverId, tx);
     const added: string[] = [];
     const changed: string[] = [];
     // Any tool whose fingerprint is different, confirmed or not: a list a person opened before it changed is out of date
@@ -335,7 +341,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
           reworded = true;
         }
-        await tx.botMcpTool.update({ where: { id: before.id }, data: before.confirmedAt ? shown : { ...shown, ...suggestion } });
+        const follows = !before.confirmedAt || (universeSorts && !before.confirmedById && !before.movedById);
+        await tx.botMcpTool.update({ where: { id: before.id }, data: follows ? { ...shown, ...suggestion } : shown });
       }
     }
 
@@ -355,6 +362,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (server.toolsCut !== cut || server.toolsSeen !== seen) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });
     }
+    // On a person's own App, every new or changed tool is sorted and confirmed by Universe in the same write (lib/app-own-tools.ts): no review gate
+    await settleOwnAppTools(serverId, tx);
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
   });
 }
