@@ -176,3 +176,16 @@ export async function exposureOf(accountId: string, now: Date = new Date(), sett
     chargedThisMonthMicros: asNumber(charged[0]?.micros),
   };
 }
+
+/** The UTC month of a moment, "2026-12". */
+export const monthKeyOf = (now: Date): string => now.toISOString().slice(0, 7);
+
+/**
+ * The rollout budget this UTC month, for the Limits screen: what the platform issued from defaults and gifts, and how many people were due a
+ * default and were not given it because it would have passed the budget. Never silent when it runs out.
+ */
+export async function rolloutThisMonth(now: Date = new Date()): Promise<{ issuedMicros: number; notGivenPeople: number }> {
+  const issuedMicros = await issuedInMonth(prisma, PLATFORM_ACCOUNT_ID, now);
+  const rows = await prisma.creditIssueSkip.findMany({ where: { monthKey: monthKeyOf(now), reason: 'over_budget' }, distinct: ['personId'], select: { personId: true } });
+  return { issuedMicros, notGivenPeople: rows.length };
+}

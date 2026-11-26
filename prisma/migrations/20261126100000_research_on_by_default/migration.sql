@@ -59,3 +59,17 @@ BEGIN
     VALUES ('seed-default-instant_apps-v2', 'seed-default-instant_apps', 2, 'current', funding, ARRAY['instant_apps']::TEXT[], 'replace', 2000000, 'monthly', 'each', 'all', (now() AT TIME ZONE 'UTC'), 'free', 'system', (now() AT TIME ZONE 'UTC'));
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------------------------------------------------
+-- People the month's rollout budget left out: issuing writes one row per person, program and UTC month when a default would pass the
+-- budget, so the Limits screen says how many people were not given credit this month instead of it running out silently.
+-- ---------------------------------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS "credit_issue_skips" (
+  "person_id" TEXT NOT NULL,
+  "program_id" TEXT NOT NULL,
+  "month_key" VARCHAR(7) NOT NULL,
+  "reason" VARCHAR(20) NOT NULL,
+  "first_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "credit_issue_skips_pkey" PRIMARY KEY ("person_id", "program_id", "month_key")
+);
+CREATE INDEX IF NOT EXISTS "credit_issue_skips_month_key_idx" ON "credit_issue_skips"("month_key");

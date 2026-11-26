@@ -55,6 +55,8 @@ export interface Limit {
   range?: Range;
   /** Another row it can't go above: a choice past it is turned down with this line, never cut to fit. */
   atMost?: { value: number; line: string };
+  /** Where it stands now, said on the row (the rollout budget: what was issued this month, and who it left out). */
+  status?: string;
 }
 
 export interface ModelCap {
@@ -98,6 +100,12 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
       <span className="grid min-w-0 flex-1 gap-0.5">
         <strong className="text-sm font-semibold">{limit.label}</strong>
         <span className="text-xs leading-snug text-muted-foreground">{limit.hint}</span>
+        {limit.status && (
+          <span className="mt-1 flex items-start gap-1.5 text-xs leading-snug text-foreground/85" data-testid={`limit-${limit.id}-status`}>
+            <Info size={14} aria-hidden="true" className="mt-px shrink-0 text-muted-foreground" />
+            {limit.status}
+          </span>
+        )}
         {limit.cap?.line && (
           <span className="mt-1 flex items-start gap-1.5 text-xs leading-snug text-foreground/85" data-testid={`limit-${limit.id}-cap`}>
             <Info size={14} aria-hidden="true" className="mt-px shrink-0 text-muted-foreground" />
@@ -1169,8 +1177,21 @@ export function computerAllowanceLimit(micros: number | null): Limit {
  */
 export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
 export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
+/** This UTC month against the rollout budget: what was issued, and how many people were due a default and not given it. */
+export type RolloutStanding = { issuedMicros: number; notGivenPeople: number };
 
-export function moneyLimits(settings: MoneyLimitSettings): Limit[] {
+const asDollars = (micros: number) => `$${(micros / 1_000_000).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** The rollout budget row's line: issued against the budget this month, and the people it left out (never silent when it runs out). */
+export function rolloutStatus(micros: number | null, rollout: RolloutStanding | null | undefined): string | undefined {
+  if (!rollout) return undefined;
+  const issued = micros === null ? `Issued ${asDollars(rollout.issuedMicros)} this month.` : `Issued ${asDollars(rollout.issuedMicros)} of ${asDollars(micros)} this month.`;
+  if (rollout.notGivenPeople === 0) return issued;
+  const people = rollout.notGivenPeople === 1 ? '1 person was' : `${rollout.notGivenPeople.toLocaleString('en')} people were`;
+  return `${issued} ${people} not given credit this month because it would go past this.`;
+}
+
+export function moneyLimits(settings: MoneyLimitSettings, rollout?: RolloutStanding | null): Limit[] {
   const micros = settings.rolloutBudgetMicros ?? null;
   return [
     {
@@ -1184,6 +1205,7 @@ export function moneyLimits(settings: MoneyLimitSettings): Limit[] {
       options: [],
       note: micros === null ? 'Not set yet. Nothing is assumed: set it before the first default reaches anyone.' : undefined,
       range: { min: 0.01, max: 1_000_000 },
+      status: rolloutStatus(micros, rollout),
     },
   ];
 }
@@ -1640,6 +1662,7 @@ export function UniverseAiLimits() {
   const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
   // The money limits live in the same settings (spec v3 O3): what is given back, and how much Universe funds
   const [money, setMoney] = useState<MoneyLimitSettings>({});
+  const [rollout, setRollout] = useState<RolloutStanding | null>(null);
   const [allowanceFailed, setAllowanceFailed] = useState(false);
   // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
   const [instant, setInstant] = useState<InstantLimitViews | null>(null);
@@ -1677,9 +1700,10 @@ export function UniverseAiLimits() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/meter-settings');
       if (!response.ok) throw new Error('load');
-      const { settings } = (await response.json()) as { settings: { memberAllowanceMicros: number | null } & MoneyLimitSettings };
+      const { settings, rollout: standing } = (await response.json()) as { settings: { memberAllowanceMicros: number | null } & MoneyLimitSettings; rollout?: RolloutStanding | null };
       setAllowance({ micros: settings.memberAllowanceMicros });
       setMoney(settings);
+      setRollout(standing ?? null);
     } catch {
       setAllowanceFailed(true);
     }
@@ -1735,7 +1759,9 @@ export function UniverseAiLimits() {
       addToast({ description: result.error, variant: 'error' });
       return false;
     }
-    setMoney((result.data as { settings: MoneyLimitSettings }).settings);
+    const saved = result.data as { settings: MoneyLimitSettings; rollout?: RolloutStanding | null };
+    setMoney(saved.settings);
+    if (saved.rollout) setRollout(saved.rollout);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1833,7 +1859,7 @@ export function UniverseAiLimits() {
           />
           {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
           {codeJobs && <LimitGroup title="Apps: code jobs" note="Short pieces of code an App's Brick may run in a separate, temporary workspace with no access to anyone's accounts. They are on by default, with these starting values; change any of them here. A job stops at its time and size limits, whatever it was doing." limits={codeJobLimits(codeJobs)} onChange={saveCodeJobs} />}
-          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
+          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money, rollout)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

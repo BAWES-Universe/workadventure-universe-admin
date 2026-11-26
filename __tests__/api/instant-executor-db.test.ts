@@ -1265,6 +1265,7 @@ run('the bounded Instant executor, in a real database', () => {
         await prisma.creditAllocation.deleteMany({ where: { hold: { personId: { in: people } } } });
         await prisma.creditHold.deleteMany({ where: { personId: { in: people } } });
         await prisma.creditLot.deleteMany({ where: { personId: { in: people } } });
+        await prisma.creditIssueSkip.deleteMany({ where: { personId: { in: people } } });
         await prisma.bot.deleteMany({ where: { id: { in: bricks } } });
         await prisma.user.deleteMany({ where: { id: { in: people } } });
       });
@@ -1285,6 +1286,10 @@ run('the bounded Instant executor, in a real database', () => {
         expect(out).toMatchObject({ status: 'refused', reason: 'credit_not_given' });
         expect(p.instant.run).not.toHaveBeenCalled();
         expect(await readyToUseFor(person)).toBe(404);
+        // The Limits screen counts them among the people the budget left out this month: once, however often they ask
+        const { rolloutThisMonth } = await import('@/lib/credit-funding');
+        expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget' } })).toBe(2);
+        expect((await rolloutThisMonth()).notGivenPeople).toBeGreaterThanOrEqual(1);
         // Raised: the same person is given their $2 on the next look and is offered research again
         await setBudget(1_000_000_000_000);
         expect((await listFor(bot)).tools.map((tool) => tool.name)).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);

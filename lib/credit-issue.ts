@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
 import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
-import { budgetOf, issuedInMonth, platformAccount, getFundingAccount } from '@/lib/credit-funding';
+import { budgetOf, issuedInMonth, platformAccount, getFundingAccount, monthKeyOf, PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
 /**
@@ -116,6 +116,10 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
         const done = await issueOne(tx, rule, personId, now, settings);
         if (done.lot) out.push(done.lot);
         else if (done.skipped) skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: done.skipped });
+        // Left out by the rollout budget: said on the Limits screen as people not given credit this month (once per person, program and month)
+        if (done.skipped === 'over_budget' && rule.fundingAccountId === PLATFORM_ACCOUNT_ID) {
+          await tx.$executeRaw`INSERT INTO "credit_issue_skips" ("person_id", "program_id", "month_key", "reason", "first_at") VALUES (${personId}, ${rule.programId}, ${monthKeyOf(now)}, 'over_budget', (${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')) ON CONFLICT DO NOTHING`;
+        }
       }
       await answerAsksFromPools(tx, person, now);
       return { issued: out, skipped };

@@ -3,6 +3,17 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { METER_RANGES, checkMeterSettings, missingSettings } from '@/lib/meter-values';
+import { rolloutThisMonth } from '@/lib/credit-funding';
+
+/** This month against the rollout budget, for its row; null when it cannot be read (the row then says nothing about it). */
+async function rollout() {
+  try {
+    return await rolloutThisMonth();
+  } catch (error) {
+    console.error('[Meter] Could not read this month against the rollout budget:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
+}
 
 export const runtime = 'nodejs';
 
@@ -16,7 +27,7 @@ export async function GET(request: NextRequest) {
   if (!user || !isSuperAdmin(user.email)) return NextResponse.json({ error: 'Unauthorized: Super admin access required' }, { status: 403 });
   try {
     const settings = await getMeterSettings();
-    return NextResponse.json({ settings, missing: missingSettings(settings), ranges: METER_RANGES });
+    return NextResponse.json({ settings, missing: missingSettings(settings), ranges: METER_RANGES, rollout: await rollout() });
   } catch (error) {
     console.error('[Meter] Could not read the settings:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
@@ -37,7 +48,7 @@ export async function PATCH(request: NextRequest) {
   if (!checked.ok) return NextResponse.json({ error: checked.error }, { status: 400 });
   try {
     const settings = await saveMeterSettings(checked.value, user.id);
-    return NextResponse.json({ settings, missing: missingSettings(settings), ranges: METER_RANGES });
+    return NextResponse.json({ settings, missing: missingSettings(settings), ranges: METER_RANGES, rollout: await rollout() });
   } catch (error) {
     console.error('[Meter] Could not save the settings:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
