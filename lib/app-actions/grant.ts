@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import type { Heading, Setting } from '@/lib/mcp-tool-policy';
 import { ensureAppActions, noteUnknownAction } from '@/lib/app-actions/catalog';
 import { effectiveSetting, nameRule, stricterHeading } from '@/lib/app-actions/sort';
+import { GITHUB_ACTIONS_KEY, ownActionList, startsOn } from '@/lib/github/actions';
 
 /**
  * A Brick's grant of a ready-made App holds the App's actions as its tool rows (`BotMcpTool`), not the provider's four meta tools:
@@ -30,9 +31,16 @@ export const actionFingerprint = (toolkit: string, slug: string): string => crea
 /** How a slug is matched: case, spaces and dashes never make one action two. */
 export const slugKey = (slug: string): string => slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
 
-/** Whether a grant's connection is a ready-made App's: a Brick's (or a bot's) grant that can hold an App's actions. */
-export const isAppActionsConnection = (connection: { source: string; providerToolkit: string | null } | null | undefined): connection is { source: 'ready_made'; providerToolkit: string } =>
-  !!connection && connection.source === 'ready_made' && !!connection.providerToolkit;
+/**
+ * Whether a grant's connection can hold an App's actions: a ready-made App's (its list from the provider), or Universe's own GitHub (its
+ * list from Universe, lib/github/actions.ts).
+ */
+export const isAppActionsConnection = (connection: { source: string; providerToolkit: string | null } | null | undefined): boolean =>
+  !!connection && ((connection.source === 'ready_made' && !!connection.providerToolkit) || connection.source === 'github');
+
+/** The key a connection's list of actions is kept under (`app_actions.toolkit`): the provider's App name, or Universe's own GitHub's key. */
+export const actionsKeyOf = (connection: { source: string; providerToolkit: string | null }): string =>
+  connection.source === 'github' ? GITHUB_ACTIONS_KEY : (connection.providerToolkit ?? '').toLowerCase();
 
 /** Whether a grant's rows are an App's actions now: a ready-made App's grant that was brought over. */
 export const holdsAppActions = (server: { appActionsVersion: number | null; connection: { source: string; providerToolkit: string | null } | null }): boolean =>
@@ -41,7 +49,7 @@ export const holdsAppActions = (server: { appActionsVersion: number | null; conn
 /** A row changed between the read and the write of the same call: the whole call is read again. */
 class StaleRows extends Error {}
 
-const TOOL_SELECT = { id: true, name: true, title: true, description: true, fingerprint: true, heading: true, suggestedHeading: true, suggestionSource: true, confirmedAt: true, movedById: true, confirmedById: true, setting: true } as const;
+const TOOL_SELECT = { id: true, name: true, title: true, description: true, fingerprint: true, heading: true, suggestedHeading: true, suggestionSource: true, confirmedAt: true, movedById: true, confirmedById: true, setting: true, settingByPerson: true } as const;
 type ToolRow = Prisma.BotMcpToolGetPayload<{ select: typeof TOOL_SELECT }>;
 
 const SETTING_ORDER: readonly Setting[] = ['rightAway', 'asksFirst', 'off'];
@@ -51,6 +59,38 @@ export function stricterSetting(a: Setting | null, b: Setting | null): Setting |
   if (b === null) return a;
   return SETTING_ORDER.indexOf(b) > SETTING_ORDER.indexOf(a) ? b : a;
 }
+
+/**
+ * The choice an action of Universe's own list holds when the person made none for it (lib/github/actions.ts: Run a workflow asks first):
+ * its starting choice where that is stricter than its heading's setting, else none (it follows its heading). So it never makes the action
+ * looser than its heading (a heading set Off keeps it Off), and never looser than its starting choice either, unless the person picks a
+ * looser choice for that one action themselves.
+ */
+export function startingChoice(toolkit: string, slug: string, headingSetting: Setting): Setting | null {
+  const start = startsOn(toolkit, slug);
+  return start && start !== headingSetting && stricterSetting(start, headingSetting) === start ? start : null;
+}
+
+/**
+ * Whether an action with a starting choice (Universe's own list) holds anything but what it should: the person made no choice for it
+ * (its row is empty or holds the starting choice) and its heading moved since. Read outside a write, on every read of a grant brought over,
+ * so a heading a person changes is followed at once.
+ */
+async function startingChoicesOff(serverId: string, toolkit: string): Promise<boolean> {
+  const own = ownActionList(toolkit)?.filter((action) => action.startsOn);
+  if (!own?.length) return false;
+  const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { ...SETTINGS_SELECT, tools: { where: { name: { in: own.map((action) => action.slug) }, settingByPerson: false }, select: { name: true, heading: true, setting: true } } } });
+  if (!server) return false;
+  const settings = settingsOfGrant(server);
+  return server.tools.some((tool) => !!tool.heading && (tool.setting ?? null) !== startingChoice(toolkit, tool.name, settings[tool.heading as Heading]));
+}
+
+const settingsOfGrant = (server: { lookUpSetting: string; makeSetting: string; changeSetting: string; deleteSendSetting: string }): Record<Heading, Setting> => ({
+  looksUp: server.lookUpSetting as Setting,
+  makesNew: server.makeSetting as Setting,
+  changesThings: server.changeSetting as Setting,
+  deletesOrSends: server.deleteSendSetting as Setting,
+});
 
 /**
  * Holds one grant (its row in `bot_mcp_servers`) until the transaction ends. Bringing a grant over to App actions, the bot server's
@@ -83,12 +123,14 @@ interface ListedAction {
  */
 export async function ensureAppActionTools(serverId: string, attempt = 0, force = false): Promise<boolean> {
   const head = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
-  if (!head || !isAppActionsConnection(head.connection)) return false;
-  const toolkit = head.connection.providerToolkit.toLowerCase();
+  if (!head?.connection || !isAppActionsConnection(head.connection)) return false;
+  const toolkit = actionsKeyOf(head.connection);
   const catalog = await ensureAppActions(toolkit, attempt === 0 && head.appActionsVersion === null ? FIRST_READ_WAIT_MS : 0);
   // Never read (or Orbit could not check): the grant stays as it is, and the next read tries again
   if (!catalog?.refreshedAt) return false;
-  if (!force && head.appActionsVersion === catalog.version) return false;
+  // Up to date with the list: only an action whose starting choice no longer matches its heading (the person moved the heading) is synced
+  if (!force && head.appActionsVersion === catalog.version && !(await startingChoicesOff(serverId, toolkit))) return false;
+  if (head.appActionsVersion === catalog.version) force = true;
 
   try {
     return await prisma.$transaction(
@@ -98,7 +140,10 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           SELECT "version", "refreshed_at" IS NOT NULL AS refreshed FROM "app_action_catalogs" WHERE "toolkit" = ${toolkit} FOR SHARE`;
         const version = listLock[0]?.version;
         if (version === undefined || !listLock[0].refreshed) return false;
-        const server = await tx.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, tools: { select: TOOL_SELECT } } });
+        const server = await tx.botMcpServer.findUnique({
+          where: { id: serverId },
+          select: { appActionsVersion: true, lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true, tools: { select: TOOL_SELECT } },
+        });
         // Gone, or brought up to this list by another call while this one waited for the grant
         if (!server || (!force && server.appActionsVersion === version)) return false;
 
@@ -130,6 +175,26 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           return { key, slug, title: detail?.title ?? slug, description: detail?.description ?? null, heading: headingOf.get(key)!, fingerprint: actionFingerprint(toolkit, slug) };
         });
 
+        // Brought over for the first time: the rows were the tools a bot server read, judged by the headings a person or the bot server
+        // put them under. Where that judged one stricter than its new heading does, the stricter choice stays as the action's own choice,
+        // so nothing a person set gets looser by moving (a tool they had under a heading set Off stays Off)
+        const firstTime = server.appActionsVersion === null;
+        const settings: Record<Heading, Setting> = {
+          looksUp: server.lookUpSetting as Setting,
+          makesNew: server.makeSetting as Setting,
+          changesThings: server.changeSetting as Setting,
+          deletesOrSends: server.deleteSendSetting as Setting,
+        };
+        const carried = (rows: readonly ToolRow[], heading: Heading, own: Setting | null): Setting | null => {
+          if (!firstTime) return own;
+          const current = effectiveSetting(own, heading, settings);
+          const before = rows.reduce<Setting | null>((acc, tool) => {
+            const old = (tool.heading ?? tool.suggestedHeading) as Heading | null;
+            return old ? stricterSetting(acc, settings[old]) : acc;
+          }, null);
+          return before !== null && stricterSetting(current, before) !== current ? before : own;
+        };
+
         const now = new Date();
         const fresh: Prisma.BotMcpToolCreateManyInput[] = [];
         const drop: string[] = [];
@@ -139,7 +204,18 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           const rows = groups.get(entry.key) ?? [];
           // The row that stays: the one already named as the App names it now, else the one with the strictest choice
           const keeper = rows.find((tool) => tool.name === entry.slug) ?? rows.reduce<ToolRow | undefined>((best, tool) => (!best || stricterSetting(best.setting as Setting | null, tool.setting as Setting | null) !== best.setting ? tool : best), undefined);
-          const setting = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          // The person's strictest choice for it. An action Universe starts on its own choice (own lists: Run a workflow asks first) holds
+          // that choice while the person made none (or left it as it started), only where it is stricter than its heading. Then never looser
+          // than what it was judged by before it was brought over
+          // (An action Universe starts on its own choice counts only what a person chose: Universe's start is worked out again here.)
+          const start = startsOn(toolkit, entry.slug);
+          const persons = start ? rows.filter((tool) => tool.settingByPerson) : rows;
+          const chosen = persons.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          const byPerson = chosen !== null && rows.some((tool) => tool.settingByPerson && tool.setting !== null);
+          const own = start && chosen === null ? startingChoice(toolkit, entry.slug, settings[entry.heading]) : chosen;
+          const setting = carried(rows, entry.heading, own);
+          // A stricter choice carried from before the grant was brought over is the person's too (it is what their older headings said)
+          const settingByPerson = setting !== null && ((byPerson && setting === chosen) || (firstTime && setting !== own));
           for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
             name: entry.slug,
@@ -153,7 +229,7 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             confirmedById: null,
           };
           if (!keeper) {
-            fresh.push({ serverId, ...data, confirmedAt: now });
+            fresh.push({ serverId, ...data, setting, settingByPerson, confirmedAt: now });
             rowsUpToDate = false;
             continue;
           }
@@ -168,13 +244,15 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             keeper.suggestionSource === data.suggestionSource &&
             !!keeper.confirmedAt &&
             keeper.confirmedById === null &&
-            keeper.movedById === null;
+            keeper.movedById === null &&
+            (keeper.setting ?? null) === setting &&
+            keeper.settingByPerson === settingByPerson;
           if (same) continue;
           rowsUpToDate = false;
           // Only what Universe says the action is, its name as the App spells it now, and the person's strictest choice for it
           const written = await tx.botMcpTool.updateMany({
             where: { id: keeper.id, fingerprint: keeper.fingerprint, heading: keeper.heading, confirmedAt: keeper.confirmedAt },
-            data: { ...data, setting, confirmedAt: keeper.confirmedAt ?? now },
+            data: { ...data, setting, settingByPerson, confirmedAt: keeper.confirmedAt ?? now },
           });
           if (written.count !== 1) throw new StaleRows();
         }
@@ -249,7 +327,7 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   const load = () =>
     prisma.botMcpServer.findUnique({
       where: { id: grant.id },
-      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
+      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true, settingByPerson: true } } },
     });
   let server = await load();
   if (!server) return null;
@@ -259,7 +337,7 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     server = await load();
     if (!server) return null;
   }
-  const toolkit = grant.connection!.providerToolkit!.toLowerCase();
+  const toolkit = actionsKeyOf(grant.connection!);
   const settings: Record<Heading, Setting> = {
     looksUp: server.lookUpSetting as Setting,
     makesNew: server.makeSetting as Setting,
@@ -272,7 +350,12 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   for (const tool of server.tools) {
     if (!tool.heading) continue;
     const heading = tool.heading as Heading;
-    const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(tool.setting as Setting | null, heading, settings) };
+    // A row with no choice of its own: an action Universe starts on its own choice (Run a workflow asks first) is judged by it here too,
+    // so a heading moved since the rows were last brought up to date never makes it looser for a moment
+    // Universe's starting choice is worked out from the heading read with it (never the one saved before the heading last moved); a
+    // person's choice is theirs as saved
+    const own = startsOn(toolkit, tool.name) && !tool.settingByPerson ? startingChoice(toolkit, tool.name, settings[heading]) : (tool.setting as Setting | null);
+    const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(own, heading, settings) };
     const key = slugKey(tool.name);
     const before = rows.get(key);
     rows.set(key, before ? { title: before.title, heading: stricterHeading(before.heading, heading), setting: stricterSetting(before.setting, verdict.setting)! } : verdict);
@@ -291,14 +374,17 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     toolkit,
     knows(slug: string): boolean {
       const key = slugKey(slug);
-      return rows.has(key) || listed.has(key);
+      return rows.has(key) || listed.has(key) || !!ownActionList(toolkit)?.some((action) => slugKey(action.slug) === key);
     },
     judge(slug: string): ActionVerdict {
       const key = slugKey(slug);
       const row = rows.get(key);
       if (row) return { slug, ...row };
       const known = listed.get(key);
-      if (known) return { slug, title: known.title, heading: known.heading, setting: settings[known.heading] };
+      if (known) return { slug, title: known.title, heading: known.heading, setting: startingChoice(toolkit, slug, settings[known.heading]) ?? settings[known.heading] };
+      // Universe's own list knows it even when the saved list does not have it yet (a release's new action, before its list is saved)
+      const ownAction = ownActionList(toolkit)?.find((action) => slugKey(action.slug) === key);
+      if (ownAction) return { slug, title: ownAction.title, heading: ownAction.heading, setting: startingChoice(toolkit, ownAction.slug, settings[ownAction.heading]) ?? settings[ownAction.heading] };
       if (!noted) {
         noted = true;
         void noteUnknownAction(toolkit);

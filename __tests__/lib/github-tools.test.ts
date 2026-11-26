@@ -353,3 +353,31 @@ describe('what a Brick can do on GitHub', () => {
     expect(github.calls).toHaveLength(0);
   });
 });
+
+describe('Run a workflow', () => {
+  it('describes every tool with plain types only, never a list of types or a map of values (some model providers refuse those)', () => {
+    const walk = (schema: unknown, path: string): string[] => {
+      if (!schema || typeof schema !== 'object') return [];
+      const node = schema as Record<string, unknown>;
+      const here = [...(Array.isArray(node.type) ? [`${path}: a list of types`] : []), ...(node.additionalProperties && typeof node.additionalProperties === 'object' ? [`${path}: a map of values`] : [])];
+      return [...here, ...Object.entries(node).flatMap(([key, value]) => walk(value, `${path}.${key}`))];
+    };
+    expect(GITHUB_TOOLS.flatMap((tool) => walk(tool.inputSchema, tool.name))).toEqual([]);
+  });
+
+  it('starts it with its inputs given as name and value pairs, or by name, each sent as text', async () => {
+    for (const inputs of [[{ name: 'target', value: 'prod' }, { name: 'dry', value: 'false' }], { target: 'prod', dry: false }]) {
+      const github = fakeGitHub([['POST', '/repos/acme/tools/actions/workflows/deploy.yml/dispatches', 204, null]]);
+      const result = await runGitHubTool('ghu_x', 'github_run_workflow', { repo: 'acme/tools', workflow: 'deploy.yml', branch: 'main', inputs }, github.impl);
+      expect(result.isError).toBe(false);
+      expect(github.calls[0].body).toEqual({ ref: 'main', inputs: { target: 'prod', dry: 'false' } });
+    }
+  });
+
+  it('refuses an input without a name before asking GitHub', async () => {
+    const github = fakeGitHub([]);
+    const result = await runGitHubTool('ghu_x', 'github_run_workflow', { repo: 'acme/tools', workflow: 'deploy.yml', branch: 'main', inputs: [{ value: 'prod' }] }, github.impl);
+    expect(result).toMatchObject({ text: 'Input 1 needs a name and a value.', isError: true });
+    expect(github.calls).toHaveLength(0);
+  });
+});
