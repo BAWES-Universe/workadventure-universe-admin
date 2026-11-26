@@ -19,9 +19,14 @@ export const UNKNOWN_SLUG_RETRY_MS = 10 * 60_000;
 const CLAIM_MS = 2 * 60_000;
 /** After a read that failed, how long before the provider is asked again (every poll would ask it otherwise). */
 const RETRY_AFTER_FAILURE_MS = 5 * 60_000;
-/** A list this much shorter than the one kept (or empty) is not believed: one bad answer must never drop actions and the choices made for them. */
+/**
+ * A list this much shorter than the one kept (or empty) is not believed at once: one bad answer must never drop actions. When the
+ * provider keeps answering it for this long, it is believed (the App really lost those actions). A person's own choice for an action
+ * stays on the grant either way.
+ */
 const SHRINK_LIMIT = 0.5;
 const SHRINK_CHECK_FROM = 10;
+export const SHRINK_BELIEVED_AFTER_MS = 6 * 60 * 60_000;
 const DESCRIPTION_MAX = 2000;
 
 const running = new Map<string, Promise<boolean>>();
@@ -59,9 +64,15 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   }
   const kept = await prisma.appAction.count({ where: { toolkit } });
   if (kept > 0 && (listed.length === 0 || (kept >= SHRINK_CHECK_FROM && listed.length < kept * SHRINK_LIMIT))) {
-    console.error(`[AppActions] The provider listed ${listed.length} actions for an App that had ${kept}: the list is kept as it was`);
-    await backOff();
-    return false;
+    const row = await prisma.appActionCatalog.findUnique({ where: { toolkit }, select: { shrunkSince: true } });
+    const since = row?.shrunkSince ?? null;
+    if (!since || Date.now() - since.getTime() < SHRINK_BELIEVED_AFTER_MS) {
+      console.error(`[AppActions] The provider listed ${listed.length} actions for an App that had ${kept}: the list is kept as it was for now`);
+      if (!since) await prisma.appActionCatalog.updateMany({ where: { toolkit, shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
+      await backOff();
+      return false;
+    }
+    console.error(`[AppActions] The provider has listed ${listed.length} actions for an App that had ${kept} since ${since.toISOString()}: the shorter list is taken`);
   }
   try {
     await save(toolkit, listed);
@@ -111,7 +122,7 @@ async function save(toolkit: string, listed: readonly ProviderAction[]): Promise
       changed ||= fresh.length > 0 || gone.length > 0;
       await tx.appActionCatalog.update({
         where: { toolkit },
-        data: { refreshedAt: new Date(), claimedUntil: null, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
+        data: { refreshedAt: new Date(), claimedUntil: null, shrunkSince: null, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
       });
     },
     { maxWait: 15_000, timeout: 60_000 },

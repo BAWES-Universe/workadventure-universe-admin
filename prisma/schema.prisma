@@ -1945,6 +1945,8 @@ model AppActionCatalog {
   actionCount  Int       @default(0) @map("action_count")
   // Goes up whenever an action of the App is added, removed or sorted differently: a grant made from this version needs no new look
   version      Int       @default(0)
+  // Since when the provider keeps answering a list much shorter than the one kept: once that lasts, the shorter list is believed
+  shrunkSince  DateTime? @map("shrunk_since")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   @@map("app_action_catalogs")

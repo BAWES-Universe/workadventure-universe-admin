@@ -18,7 +18,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 import { readServerTools, syncCatalog } from '@/lib/mcp-tool-policy';
 import { ensureAppActionTools, actionJudgeFor, actionFingerprint } from '@/lib/app-actions/grant';
-import { refreshAppActions } from '@/lib/app-actions/catalog';
+import { refreshAppActions, SHRINK_BELIEVED_AFTER_MS } from '@/lib/app-actions/catalog';
 import { GET as getTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { PATCH as patchTool } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/[toolId]/route';
 import { POST as confirmTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/confirm/route';
@@ -269,6 +269,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(await refreshAppActions(KEY)).toBe(false);
       expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(12);
       expect((await readServerTools(saraBrick, serverId)).tools).toHaveLength(12);
+      // When the provider keeps answering the shorter list for hours, the App really lost those actions: it is taken
+      const since = (await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).shrunkSince;
+      expect(since).not.toBeNull();
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null, shrunkSince: new Date(Date.now() - SHRINK_BELIEVED_AFTER_MS - 60_000) } });
+      expect(await refreshAppActions(KEY)).toBe(true);
+      expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(1);
+      expect((await prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } })).shrunkSince).toBeNull();
+      expect((await readServerTools(saraBrick, serverId)).tools.map((tool) => tool.name)).toEqual([`${U}_LOOK_0`]);
     });
 
     it('keeps an action the provider calls old, after the others', async () => {
