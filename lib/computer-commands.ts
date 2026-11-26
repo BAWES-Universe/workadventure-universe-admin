@@ -71,6 +71,20 @@ export async function keepOutcome(db: Pick<Prisma.TransactionClient, '$executeRa
     WHERE "command_id" = ${command.id}::uuid`;
 }
 
+/**
+ * Keeps a FINAL outcome only while the command's stored outcome is still pending (or none): the first final outcome stays, so two copies of one command that finish together answer, and later replay, the same thing
+ * (CodeRabbit on #1038). Answers the outcome that was already stored when this write lost (the caller returns it), or null when this write landed.
+ */
+export async function keepFinalOutcome(command: Command, outcome: StoredOutcome): Promise<StoredOutcome | null> {
+  const written = await prisma.$queryRaw<Array<{ command_id: string }>>`
+    UPDATE "computer_job_commands" SET "outcome" = ${JSON.stringify(outcome)}::jsonb
+    WHERE "command_id" = ${command.id}::uuid AND ("outcome" IS NULL OR "outcome"->>'pending' = 'true')
+    RETURNING "command_id"`;
+  if (written.length === 1) return null;
+  const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.outcome ?? null;
+}
+
 /** Claims a command in a transaction of its own (Cancel, Stop: their effect runs in the finalizer's transactions). */
 export const claimCommand = (command: Command, row: CommandRow, initial: StoredOutcome) =>
   prisma.$transaction((tx) => claimCommandIn(tx, command, row, initial), { timeout: 15_000, maxWait: 15_000 });
