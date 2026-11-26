@@ -26,16 +26,19 @@ run('setting_by_person after the upgrade', () => {
       INSERT INTO bots (id, name, owner_id, updated_at) VALUES ('bot-1', 'Sara', 'u-1', now());
       INSERT INTO app_connections (id, owner_id, name, server_url, source, updated_at) VALUES
         ('conn-own', 'u-1', 'My deploy App', 'https://deploy.example.test/mcp', 'link', now()),
-        ('conn-gh', 'u-1', 'GitHub', '', 'github', now());
+        ('conn-gh', 'u-1', 'GitHub', '', 'github', now()),
+        ('conn-rm', 'u-1', 'GitHub', '', 'ready_made', now());
       INSERT INTO bot_mcp_servers (id, bot_id, name, server_url, connection_id, updated_at) VALUES
         ('srv-own', 'bot-1', 'My deploy App', 'https://deploy.example.test/mcp', 'conn-own', now()),
         ('srv-gh', 'bot-1', 'GitHub', '', 'conn-gh', now()),
+        ('srv-rm', 'bot-1', 'GitHub (ready-made)', '', 'conn-rm', now()),
         ('srv-loose', 'bot-1', 'Old App', 'https://old.example.test/mcp', NULL, now());
       INSERT INTO bot_mcp_tools (id, server_id, name, fingerprint, setting, updated_at) VALUES
         ('own-run', 'srv-own', 'github_run_workflow', 'f1', 'asksFirst', now()),
         ('own-other', 'srv-own', 'deploy_now', 'f2', 'off', now()),
         ('own-none', 'srv-own', 'list_runs', 'f3', NULL, now()),
         ('loose-run', 'srv-loose', 'github_run_workflow', 'f4', 'asksFirst', now()),
+        ('rm-run', 'srv-rm', 'github_run_workflow', 'f7', 'asksFirst', now()),
         ('gh-run', 'srv-gh', 'github_run_workflow', 'f5', 'asksFirst', now()),
         ('gh-run-off', 'srv-gh', 'github_run_workflow_off', 'f6', 'off', now());
     `);
@@ -44,8 +47,9 @@ run('setting_by_person after the upgrade', () => {
   });
   afterAll(() => dropThrowaway(db));
 
-  it('keeps Run a workflow’s Asks first as the person’s choice on their own App with a tool of the same name, and on a grant with no connection', async () => {
+  it('keeps Run a workflow’s Asks first as the person’s choice on their own App with a tool of the same name, on a ready-made App, and on a grant with no connection', async () => {
     expect(await byPerson('own-run')).toBe(true);
+    expect(await byPerson('rm-run')).toBe(true);
     expect(await byPerson('loose-run')).toBe(true);
   });
 
