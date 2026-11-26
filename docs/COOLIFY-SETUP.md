@@ -94,7 +94,9 @@ Nothing to configure. The image's CMD (`sh scripts/start.sh`) applies every pend
 container exits non-zero and Orbit does not start; see docs/PRISMA-DEPLOYMENT.md for recovering.
 
 Keep Coolify's health check on: a new container that never becomes healthy is then not put in front of
-users. A post-deploy command `npx prisma migrate deploy` is no longer needed (it is harmless if set).
+users. Do not configure a post-deploy migration command (`npx prisma migrate deploy`): the container
+already applies migrations at startup, a post-deploy hook only runs after the new code is serving, and
+`npx` is not pinned to the Prisma CLI bundled in the image (it could run another version, or fail).
 
 ## Step 7: Deploy
 
@@ -125,7 +127,7 @@ When you push new code to the main branch:
 1. GitHub Actions automatically builds a new image
 2. Image is tagged as `latest` and pushed to GHCR
 3. In Coolify, click "Redeploy" to pull the latest image
-4. Migrations run automatically (if using startup script or post-deploy command)
+4. Migrations run automatically when the new container starts; if they fail, it does not start
 
 ## Troubleshooting
 

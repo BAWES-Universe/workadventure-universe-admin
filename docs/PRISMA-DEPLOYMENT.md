@@ -7,9 +7,10 @@ only if every migration applied. If a migration fails (or the database cannot be
 `DATABASE_URL` is missing) the container exits non-zero and Orbit does NOT start, so a new image never
 serves on a database it was not written for. Nothing needs to run after a deploy.
 
-A Coolify post-deploy command `npx prisma migrate deploy` is no longer needed. It is harmless if it is
-still set: by then the start script has applied everything, and `migrate deploy` only applies what is
-pending.
+Do not configure a Coolify post-deploy migration command (`npx prisma migrate deploy`): the container
+already applies migrations at startup, and a post-deploy hook runs only after the new code is serving.
+`npx` is also not pinned to the Prisma CLI bundled in the image, so it could run another version, or
+fail. Remove such a hook if one is set.
 
 To check by hand:
 ```bash
@@ -68,23 +69,14 @@ Run migrations **before** deploying new code:
 **Pros**: Can verify migrations work before deploying
 **Cons**: Requires database access from CI/CD or local machine
 
-### Strategy 2: Post-Deployment (Easiest)
+### Strategy 2: At container start (what the image does)
 
-Run migrations **after** container starts:
+The image's CMD is `sh scripts/start.sh`: migrations are applied before the app starts, and the app
+never starts if they fail. Do not add a Coolify post-deploy migration command on top: it runs after the
+new code already serves, through an unpinned `npx`.
 
-**Using startup script** (recommended):
-```dockerfile
-# Update Dockerfile CMD
-CMD ["sh", "scripts/start.sh"]
-```
-
-**Using Coolify Post-Deploy Command**:
-```bash
-npx prisma migrate deploy
-```
-
-**Pros**: Simple, automatic
-**Cons**: Container starts before migrations complete (can cause brief errors)
+**Pros**: Automatic; new code never serves on an older schema
+**Cons**: A failed migration keeps the new container from starting until it is fixed
 
 ### Strategy 3: Init Container (Advanced)
 
@@ -112,13 +104,18 @@ The container stops on purpose: this version needs a database change that did no
 reason above that line (`docker logs <container-name>`). Then:
 
 1. If the database could not be reached, fix the connection and start the container again.
-2. If a migration failed, Postgres rolled back that migration's own changes, but it is recorded as
-   failed and every later start refuses (Prisma error P3009) until it is resolved. Fix the migration in
-   a new image, mark the failed one as rolled back (from any container of this image, or a one-off one):
-   ```bash
-   node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
-   ```
-   and deploy the fixed image. Migrations that applied before the failing one stay applied.
+2. If a migration failed, it is recorded as failed and every later start refuses (Prisma error P3009)
+   until it is resolved. Migrations that applied before the failing one stay applied.
+   - Check what the failed migration left behind. A migration that runs as one transaction (the usual
+     case: plain DDL and data statements, no explicit `COMMIT`) leaves nothing: Postgres rolls all of it
+     back. One that commits part-way (an explicit `COMMIT`, or statements that cannot run in a
+     transaction such as `CREATE INDEX CONCURRENTLY`) keeps what ran before the failure. Undo those
+     changes by hand first, so the fixed migration starts from the state it expects.
+   - Then mark it as rolled back (from any container of this image, or a one-off one):
+     ```bash
+     node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
+     ```
+     and deploy an image with the fixed migration.
 
 ### "Prisma Client not found"
 
