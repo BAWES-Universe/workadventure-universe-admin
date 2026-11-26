@@ -1090,10 +1090,24 @@ describe('getting a machine ready for a job', () => {
     it('a start that lost its wake while the image update was on its way is told as soon as it returns, before anything else is brought up (CodeRabbit on #1040)', async () => {
       const { w, p } = await behind('outside_check=1 any=0\n');
       let asks = 0;
+      (Sentry.captureMessage as jest.Mock).mockClear();
       await expect(p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
       expect(asks).toBe(2);
       expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
       expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(false);
+      // The update was sent and the wake that sent it was lost: one warning, with the machine and both revisions (Opus on #1040)
+      const warnings = (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2 } });
+    });
+
+    it('a start that is still its own after the image update, and one that lost its wake BEFORE the update (nothing was sent), warn nothing', async () => {
+      const own = await behind('outside_check=1 any=0\n');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await own.p.ready('m1', { stillMine: async () => true });
+      const lost = await behind('outside_check=1 any=0\n');
+      await expect(lost.p.ready('m1', { stillMine: async () => false })).rejects.toBeInstanceOf(WakeReplaced);
+      expect((Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement')).toEqual([]);
     });
 
     it('a machine that is not behind the image is not asked about for an update (nothing is sent)', async () => {
