@@ -266,6 +266,11 @@ const describeNow = (serverId: string): Promise<ServerToolsJson> =>
   prisma.$transaction((tx) => describe(tx, serverId), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 
 const bump = { policyRevision: { increment: 1 } } as const;
+/**
+ * A write that holds a grant may wait for it behind one that is bringing the grant over (which itself may wait for the App's list
+ * while a read of the provider saves it): more time than the default five seconds, the same as that write allows.
+ */
+const GRANT_WRITE = { maxWait: 15_000, timeout: 60_000 } as const;
 
 export interface ReadToolsOptions {
   /**
@@ -364,7 +369,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });
     }
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
-  });
+  }, GRANT_WRITE);
 }
 
 export const APP_ACTIONS_DONT_MOVE = 'An App’s actions stay under their heading. Give this one its own choice instead';
@@ -390,7 +395,7 @@ export async function setToolSetting(botId: string, serverId: string, toolId: st
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 /** A tool the server changed while a person was looking at it: what they saw is not what is there now. */
@@ -419,7 +424,7 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 /**
@@ -477,7 +482,7 @@ export async function confirmTools(
       if (settled.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
     }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 /** Set what a bot does under each heading on one server. Only the headings named change. */
@@ -493,7 +498,7 @@ export async function saveServerSettings(botId: string, serverId: string, body: 
     }
     if (Object.keys(data).length > 0) await tx.botMcpServer.update({ where: { id: serverId }, data: { ...data, ...bump } });
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 export interface BotToolSettings {

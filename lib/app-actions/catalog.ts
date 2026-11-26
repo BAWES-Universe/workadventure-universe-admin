@@ -222,15 +222,15 @@ export interface UnsortedAction {
 
 /** Actions nothing has sorted yet (no tag, no name rule): the bot server's small model sorts them, a batch at a time. */
 export async function unsortedActions(limit: number): Promise<UnsortedAction[]> {
-  const rows = await prisma.appAction.findMany({
-    where: { source: 'fallback' },
-    select: { id: true, toolkit: true, slug: true, title: true, description: true },
-    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
-    take: limit,
+  return prisma.$transaction(async (tx) => {
+    // Rows the sorter's answer is being saved on right now are passed over (SKIP LOCKED): this read never waits on that write, so the two never deadlock
+    const rows = await tx.$queryRaw<{ id: string; toolkit: string; slug: string; title: string; description: string | null }[]>`
+      SELECT "id", "toolkit", "slug", "title", "description" FROM "app_actions"
+      WHERE "source" = 'fallback' ORDER BY "updated_at" ASC, "id" ASC LIMIT ${limit} FOR UPDATE SKIP LOCKED`;
+    // Handed out: they go to the back of the line, so a batch the sorter never answers does not hold up the ones behind it
+    if (rows.length > 0) await tx.appAction.updateMany({ where: { id: { in: rows.map((row) => row.id) } }, data: { updatedAt: new Date() } });
+    return rows.map(({ id: _id, ...row }) => row);
   });
-  // Handed out: they go to the back of the line, so a batch the sorter never answers does not hold up the ones behind it
-  if (rows.length > 0) await prisma.appAction.updateMany({ where: { id: { in: rows.map((row) => row.id) } }, data: { updatedAt: new Date() } });
-  return rows.map(({ id: _id, ...row }) => row);
 }
 
 /**

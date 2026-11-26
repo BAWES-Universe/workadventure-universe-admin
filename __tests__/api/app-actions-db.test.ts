@@ -19,7 +19,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 import { readServerTools, syncCatalog } from '@/lib/mcp-tool-policy';
 import { ensureAppActionTools, actionJudgeFor, actionFingerprint, lockGrant } from '@/lib/app-actions/grant';
-import { ensureAppActions, refreshAppActions, saveSorterPicks, SHRINK_BELIEVED_AFTER_MS } from '@/lib/app-actions/catalog';
+import { ensureAppActions, refreshAppActions, saveSorterPicks, unsortedActions, SHRINK_BELIEVED_AFTER_MS } from '@/lib/app-actions/catalog';
 import { GET as getTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { PATCH as patchTool } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/[toolId]/route';
 import { POST as confirmTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/confirm/route';
@@ -437,6 +437,8 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       setAdapterForTests(adapter);
       const connectionId = await readyMadeConnection();
       const old = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Gmail', serverUrl: '', authType: 'none' } });
+      // The bot server sends the list the grant already has: nothing on the grant's row would change, so only holding the grant makes it wait
+      await prisma.botMcpTool.create({ data: { serverId: old.id, name: 'COMPOSIO_SEARCH_TOOLS', fingerprint: 'f', suggestedHeading: 'looksUp', suggestionSource: 'server' } });
       let release!: () => void;
       let locked!: () => void;
       const isLocked = new Promise<void>((resolve) => (locked = resolve));
@@ -454,11 +456,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
         done = true;
         return result;
       });
-      await sleep(300);
-      expect(done).toBe(false);
-      release();
-      await holding;
-      await put;
+      try {
+        await sleep(300);
+        expect(done).toBe(false);
+      } finally {
+        release();
+        await holding;
+        await put;
+      }
       // Both at once end the same way whichever goes first: the App's actions, and nothing of the link's meta tools
       await Promise.all([
         syncCatalog(saraBrick, old.id, { tools: [{ name: 'COMPOSIO_MULTI_EXECUTE_TOOL', fingerprint: 'g', suggestedHeading: 'looksUp', suggestionSource: 'server' }] }),
@@ -508,9 +513,8 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       const rows = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.replace('-', '_') === `${U}_DELETE_MESSAGE`);
       // The first spelling in the App's order names it, under the stricter heading of the two
       expect(rows).toEqual([expect.objectContaining({ name: `${U}_DELETE_MESSAGE`, heading: 'deletesOrSends' })]);
-      expect((await patch(serverId, rows[0].id, { setting: 'off' })).status).toBe(200);
-      // A second row for the same action (made before this was one row) that follows its heading
-      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_delete-message`, fingerprint: 'x', heading: 'looksUp', suggestedHeading: 'looksUp', suggestionSource: 'builtIn', confirmedAt: new Date() } });
+      // A second row for the same action (made before this was one row): the person's Off is on it, not on the row the App's spelling names
+      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_delete-message`, fingerprint: 'x', heading: 'looksUp', suggestedHeading: 'looksUp', suggestionSource: 'builtIn', confirmedAt: new Date(), setting: 'off' } });
       const judge = await actionJudgeFor(saraBrick, connectionId);
       for (const spelling of [`${U}_DELETE_MESSAGE`, `${U}_DELETE-MESSAGE`, `${U}_delete-message`]) expect(judge!.judge(spelling).setting).toBe('off');
       // The next sync makes them one row again, with the person's Off
@@ -518,6 +522,17 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(await ensureAppActionTools(serverId)).toBe(true);
       const again = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.toUpperCase().replace('-', '_') === `${U}_DELETE_MESSAGE`);
       expect(again).toEqual([expect.objectContaining({ name: `${U}_DELETE_MESSAGE`, setting: 'off' })]);
+      // The same for an action the App's list no longer has: its two rows become one, and the stricter choice is the one kept
+      await prisma.botMcpTool.createMany({
+        data: [
+          { serverId, name: `${U}_GONE_ONE`, fingerprint: 'g1', heading: 'looksUp', confirmedAt: new Date(), setting: 'rightAway' },
+          { serverId, name: `${U}_gone-one`, fingerprint: 'g2', heading: 'looksUp', confirmedAt: new Date(), setting: 'off' },
+        ],
+      });
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
+      expect(await ensureAppActionTools(serverId)).toBe(true);
+      const gone = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.toUpperCase().replace('-', '_') === `${U}_GONE_ONE`);
+      expect(gone).toEqual([expect.objectContaining({ setting: 'off' })]);
     });
 
     it('never moves an App’s action to another heading, and has nothing to confirm', async () => {
@@ -585,6 +600,34 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       await refreshAppActions(KEY);
       expect((await prisma.appAction.findFirstOrThrow({ where: { toolkit: KEY, slug: `${U}_MYSTERY` } })).heading).toBe('looksUp');
       expect((await putUnsorted(request('/x', { method: 'PUT', token: SERVICE_TOKEN, body: { actions: [{ toolkit: KEY, slug: 'x', heading: 'maybe' }] } }))).status).toBe(400);
+    });
+
+    it('hands out unsorted actions without waiting on a sorter answer being saved for some of them', async () => {
+      await granted(() => [...GMAIL_LIKE(), action('MAKE_THING', [])]);
+      let release!: () => void;
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      // The sorter's answer for MYSTERY is being saved right now
+      const saving = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "app_actions" WHERE "toolkit" = ${KEY} AND "slug" = ${`${U}_MYSTERY`} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 10_000 },
+      );
+      await isLocked;
+      const timer = setTimeout(() => release(), 2_000);
+      try {
+        const started = Date.now();
+        const handed = (await unsortedActions(60)).filter((entry) => entry.toolkit === KEY).map((entry) => entry.slug);
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(handed).toEqual([`${U}_MAKE_THING`]);
+      } finally {
+        clearTimeout(timer);
+        release();
+        await saving;
+      }
     });
 
     it('saves the sorter’s picks together with the version that makes grants follow them, or neither', async () => {
