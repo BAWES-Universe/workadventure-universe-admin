@@ -23,8 +23,9 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals } from '@/lib/computer';
-import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
-import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
+import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
+import { readControl } from '@/lib/computer-control';
+import { endPowerOp, openPowerOpOf, powerTiming, underPowerOp, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { costOfSeconds } from '@/lib/computer-values';
 
@@ -508,6 +509,38 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
       expect((await machineOf(sara)).machine).toBe('waking');
     });
+
+    it('CodeRabbit on #1040: a hand back whose wake finds a stop of ours still open after even the extended wait keeps its jobs and stays pending: no job ends, the machine is not marked broken, and the sweep finishes it once the stop is done', async () => {
+      const sara = await owner('handback-inflight');
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 300, waitMs: 300, pollMs: 20 });
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      // The fence stopped the machine, and a stop of ours is still in flight (a live sender, beating): it outlasts the hand back's whole wait
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      let release: () => void = () => undefined;
+      const inFlight = underPowerOp(op, () => new Promise<void>((resolve) => (release = resolve)));
+      try {
+        const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+        expect(await handBack(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'in_progress' });
+        // Nothing was tried, so nothing failed: the job is Brick's again and running, the machine is as it was, and the return waits
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+        expect(await machineOf(sara)).toMatchObject({ machine: 'stopped' });
+        expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+        expect(await readControl(sara.brickId)).toMatchObject({ state: 'returning' });
+        expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ controlLeaseUntil: null });
+      } finally {
+        release();
+        await inFlight;
+      }
+      // The stop is done: the sweep finishes the return, the machine is woken for the job, and control is Brick's
+      await endPowerOp(op).catch(() => undefined);
+      expect(await recoverControl(NOW)).toBeGreaterThanOrEqual(1);
+      expect(await readControl(sara.brickId)).toMatchObject({ state: 'agent' });
+      expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+    }, 30_000);
 
     it('a stop that threw may still land: its operation stays open (beating) for the provider\'s margin after the call returned, then closes by itself, and nothing waits for it', async () => {
       const sara = await owner('threw');

@@ -4166,18 +4166,26 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-export async function wakeIfStopped(botId: string): Promise<void> {
+export async function wakeIfStopped(botId: string): Promise<'up' | 'pending'> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
-  if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return;
+  if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return 'up';
   try {
     // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included
     await bringUp(botId, provider, new Date(), undefined, { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true });
+    return 'up';
   } catch (error) {
+    // A stop of ours that outlasted even the extended wait is not a machine that will not come back (CodeRabbit on #1040): no wake was tried, so no job ends and nothing is marked broken. The caller keeps the return pending
+    // (the transition's lease is let go, so the sweep and the next request ask again) and the jobs stay as they are
+    if (error instanceof StopInFlight) {
+      console.error('[Computer] A machine was not woken after a hand back, because a stop of ours may still land; the return stays pending');
+      return 'pending';
+    }
     console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
     for (const job of jobs) await endJob(job.id, 'stopped', 'error', new Date());
     await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] } }, data: { machine: 'broken' } });
+    return 'up';
   }
 }
 
@@ -4190,7 +4198,7 @@ export async function wakeIfStopped(botId: string): Promise<void> {
  *   4. only then does control become Brick's.
  * Brick is not admitted at any point before step 4, whatever state the jobs are in.
  */
-async function finishReturn(botId: string, epoch: number | null): Promise<'back' | 'lost'> {
+async function finishReturn(botId: string, epoch: number | null): Promise<'back' | 'lost' | 'pending'> {
   const mine = async () => epoch === null || (await renewTransition(botId, 'returning', epoch));
   if (epoch !== null) await drainHumanInput(botId);
   if (!(await mine())) return 'lost';
@@ -4203,7 +4211,11 @@ async function finishReturn(botId: string, epoch: number | null): Promise<'back'
   await noteHands(botId, 'brick');
   // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
   await fenceControl(botId);
-  await wakeIfStopped(botId);
+  if ((await wakeIfStopped(botId)) === 'pending') {
+    // The machine could not be woken yet (a stop of ours may still land): control does not go back to Brick's with its jobs on a stopped machine. The lease is let go, so the sweep (or the next request) finishes the return
+    if (epoch !== null) await releaseLease(botId, 'returning', epoch);
+    return 'pending';
+  }
   if (epoch === null) return 'back';
   return (await finishTransition(botId, 'returning', epoch, 'agent')) ? 'back' : 'lost';
 }
@@ -4228,7 +4240,9 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
       // From `fencing` with its leader gone (a fence that was never proved): the person never had input, so there is nothing to drain
       const epoch = await beginTransition(botId, row.state, row.epoch, 'returning');
       if (epoch === null) continue;
-      if ((await finishReturn(botId, epoch)) === 'lost') continue;
+      const finished = await finishReturn(botId, epoch);
+      if (finished === 'lost') continue;
+      if (finished === 'pending') return { ok: false, reason: 'in_progress' };
       break;
     }
     if (row.state === 'agent') break;

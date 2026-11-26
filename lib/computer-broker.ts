@@ -381,7 +381,11 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       }
       // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
       // if it will not come back, its room given back), so the job goes on instead of failing for nothing
-      await wakeIfStopped(fresh.job.botId);
+      if ((await wakeIfStopped(fresh.job.botId)) === 'pending') {
+        // A stop of ours may still land: the machine is not woken under it and the job is not ended; the caller asks again
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return { ok: false, reason: 'starting' };
+      }
       fresh = await liveJob(job.jobId, owner);
       if (!fresh.ok) {
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
