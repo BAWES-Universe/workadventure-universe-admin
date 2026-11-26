@@ -6,7 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { recordPowerOp, recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
+import { recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
