@@ -24,7 +24,7 @@ const bodySchema = z
     arguments: z.record(z.string(), z.unknown()).default({}),
     /** The bot server's own id for this call (its attempt id): a retry is the same call and never runs or pays twice. */
     callId: z.string().trim().min(1).max(200),
-    /** The task this call is part of (the key its receipt is opened under): rules about one task count all of its runs. Omitted for a call that is no task's. */
+    /** The task this call is part of (the key its receipt is opened under): rules about one task count all of its runs. While "Most research runs for one question" is set, a call without one is refused (`no_question`): it could not be counted. */
     taskKey: z.string().trim().min(1).max(255).optional(),
   })
   .strict();
