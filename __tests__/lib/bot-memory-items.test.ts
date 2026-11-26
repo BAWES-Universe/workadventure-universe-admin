@@ -424,3 +424,31 @@ describe('forgetting leans to taking too much (deliberate)', () => {
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['I will travel soon']);
   });
 });
+
+describe('a reply after a taken line, when several things are forgotten together', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it("also takes a reply that says the short value of another forgotten thing already said earlier (a like, and an age)", () => {
+    const jam = {
+      personalInfo: { preferences: ['jam', 'tea'], facts: [], heard: {}, drawnFrom: { 'pref:jam': 1000, 'pref:tea': 2000 } },
+      conversationHistory: chat([['person', 'I like jam', 1000], ['person', 'I like tea', 2000], ['bot', 'Have it with jam!', 2500], ['person', 'I like walking', 3000]]),
+    };
+    const afterJam = withoutItems(jam, new Set([memoryItemKey('pref', null, 'jam'), memoryItemKey('pref', null, 'tea')])).data as typeof jam;
+    expect(afterJam.conversationHistory.map((line) => line.message)).toEqual(['I like walking']);
+    const age = {
+      personalInfo: { preferences: ['tea'], facts: [['age', '30']], heard: {}, drawnFrom: { 'fact:age': 1000, 'pref:tea': 2000 } },
+      conversationHistory: chat([['person', "I'm 30", 1000], ['person', 'I like tea', 2000], ['bot', 'Great choice at 30!', 2500], ['person', 'I like walking', 3000]]),
+    };
+    const afterAge = withoutItems(age, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('fact', 'age', '30')])).data as typeof age;
+    expect(afterAge.conversationHistory.map((line) => line.message)).toEqual(['I like walking']);
+  });
+
+  it('keeps a reply that says a thing which is only said later', () => {
+    const data = {
+      personalInfo: { preferences: ['tea', 'jam'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:jam': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Jam is nice too', 1500], ['person', 'I like jam', 3000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('pref', null, 'jam')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
+  });
+});

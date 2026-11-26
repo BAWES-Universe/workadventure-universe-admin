@@ -316,8 +316,12 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       for (const taste of shortTastes) if (taste.person.test(lower) && stillTheirs(line, taste.forgotAt) === again) owners.add(taste.owner);
       return owners;
     };
+    const ownersAt = history.map((line) => takenBy(line));
+    // Where each thing was first said in the chat: a reply can only keep a thing's short value back from where it was said on
+    const firstSaid = new Map<number, number>();
+    ownersAt.forEach((owners, at) => owners.forEach((one) => firstSaid.set(one, Math.min(firstSaid.get(one) ?? at, at))));
     data.conversationHistory = history.filter((line, index) => {
-      if (takenBy(line).size > 0) return false;
+      if (ownersAt[index].size > 0) return false;
       if (!isObject(line) || line.sender !== 'bot') return true;
       const text = textOf(line);
       const lower = text.toLowerCase();
@@ -331,12 +335,12 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
         if (shortNames.some((name) => name.bot.test(name.exact ? text : lower))) return false;
         if (shortTastes.some((taste) => taste.bot.test(lower))) return false;
       }
-      // The bot's reply right after a line a thing took, when it says that same thing's short value back ("I like tea" / "Tea it is!", "I'm ill" / "Sorry you are ill")
-      const earlier = index > 0 ? history[index - 1] : null;
-      if (earlier === null) return true;
-      const owners = takenBy(earlier);
-      if (owners.size === 0) return true;
-      return !(shortTastes.some((taste) => owners.has(taste.owner) && taste.word.test(lower)) || shortOthers.some((other) => owners.has(other.owner) && other.word.test(lower)));
+      // The bot's reply right after a line a thing took, when it says a short value back of that thing or of any other forgotten thing the
+      // person had already said ("I like tea" / "Tea it is!", "I'm ill" / "Sorry you are ill", "I like jam" / "I like tea" / "Have it with jam!").
+      // A thing said only later is not in it ("I like tea" / "Jam is nice too" / "I like jam").
+      if (index === 0 || ownersAt[index - 1].size === 0) return true;
+      const alreadySaid = (owner: number) => (firstSaid.get(owner) ?? Infinity) <= index - 1;
+      return !(shortTastes.some((taste) => alreadySaid(taste.owner) && taste.word.test(lower)) || shortOthers.some((other) => alreadySaid(other.owner) && other.word.test(lower)));
     });
   }
   return { data, removed };
