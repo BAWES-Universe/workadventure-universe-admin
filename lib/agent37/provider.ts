@@ -337,7 +337,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
    * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
    */
-  private async settle(ref: string, options: { update?: boolean | 'unless_outside'; /** Asked right before the image update (it restarts the machine, and can come after minutes of waiting): a start that lost its wake sends nothing (Opus on #1040) */ beforeUpdate?: () => Promise<void> } = {}): Promise<Instance> {
+  private async settle(ref: string, options: { update?: boolean | 'unless_outside'; /** Asked right before the image update (it restarts the machine, and can come after minutes of waiting): a start that lost its wake sends nothing (Opus on #1040) */ beforeUpdate?: () => Promise<void>; /** Asked right after the image update returned (the second look, CodeRabbit on #1040) */ afterUpdate?: () => Promise<void> } = {}): Promise<Instance> {
     // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
     const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
@@ -365,6 +365,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
       } else {
         await options.beforeUpdate?.();
         await this.client.updateInstance(ref);
+        await options.afterUpdate?.();
         instance = await this.untilHealthy(ref, instance.url);
       }
     }
@@ -397,7 +398,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const owned = async () => {
       if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     };
-    let instance = await this.settle(ref, { update: 'unless_outside', beforeUpdate: owned });
+    let instance = await this.settle(ref, { update: 'unless_outside', beforeUpdate: owned, afterUpdate: owned });
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
     // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
@@ -412,6 +413,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.untilDown(ref, true);
       await owned();
       await this.client.startInstance(ref);
+      // A start that lost its wake while its request was on the way (its sender was paused after the check above) finds out as soon as the request returns: the machine it started is stopped by the caller's cleanup, never left running (CodeRabbit on #1040)
+      await owned();
       instance = await this.untilHealthy(ref, instance.url);
     }
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
@@ -428,6 +431,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.untilDown(ref, true);
       await owned();
       await this.client.startInstance(ref);
+      await owned();
       await this.untilHealthy(ref, instance.url);
       up = await again(await this.up(ref));
     }
@@ -505,6 +509,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
       // After the waits above (a machine going down, the billing call): a start that lost its wake in the meantime sends nothing (Opus on #1040)
       if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       await this.client.startInstance(ref);
+      // Asked again as soon as the request returns: a start whose sender was paused after the check above, and whose wake was given up on meanwhile, is told so now and its caller stops the machine it started (CodeRabbit on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     }
     // Running, starting, waking or provisioning: it is on its way, and asking again would only queue a second wake
     await this.untilHealthy(ref, instance.url);

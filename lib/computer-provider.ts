@@ -350,6 +350,8 @@ export class FakeComputerProvider implements ComputerProvider {
       // The pretend restart is a stop and a start: it is only sent while the start still owns its wake
       if (options.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       this.freshBoots.push(ref);
+      this.awake_.add(ref);
+      if (options.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       if (this.freshBootUnproved) return null;
       this.rebootForTests(ref);
     }
@@ -380,12 +382,19 @@ export class FakeComputerProvider implements ComputerProvider {
     return [{ name: 'provider', ok: true, detail: 'The pretend provider (development only)' }];
   }
 
+  /** Test seam: what happens after the pretend start returned and was told it still owns its wake (the real one waits for the machine to be healthy). */
+  afterStartForTests: ((ref: string) => Promise<void>) | null = null;
+
   async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     this.note('wake', ref);
     this.fail('wake');
     // The pretend start is only sent while the start still owns its wake
     if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     this.awake_.add(ref);
+    // ...and asked again as soon as the start returned (a sender that was paused after the check): the caller stops what it started
+    if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
+    // What the real provider does next: it waits for the machine to be healthy (a test holds it here)
+    await this.afterStartForTests?.(ref);
   }
 
   async rest(ref: string): Promise<void> {

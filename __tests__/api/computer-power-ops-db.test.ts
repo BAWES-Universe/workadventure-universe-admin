@@ -68,13 +68,33 @@ class HeldStops extends FakeComputerProvider {
       this.holdWake--;
       await new Promise<void>((resolve) => this.heldWake.push(resolve));
     }
-    await super.wake(ref, options);
+    await super.wake(ref, this.pausedAfterCheck(options));
     // The start was SENT: it passed the check of the start's wake (a test reads this to see that nothing was sent)
     this.wakeSent.push(ref);
     if (this.failWakeAfterLanding) {
       this.failWakeAfterLanding = false;
       throw new Error('The pretend provider started the machine and then did not find it healthy');
     }
+  }
+  /** How many of the next calls pause right AFTER their first successful stillMine check (a sender that is slow to send after the check). */
+  holdAfterCheck = 0;
+  readonly heldAfterCheck: Array<() => void> = [];
+  private pausedAfterCheck<T extends { stillMine?: () => Promise<boolean> } | undefined>(options: T): T {
+    if (!options?.stillMine || this.holdAfterCheck <= 0) return options;
+    this.holdAfterCheck--;
+    const check = options.stillMine;
+    let paused = false;
+    return {
+      ...options,
+      stillMine: async () => {
+        const ok = await check();
+        if (ok && !paused) {
+          paused = true;
+          await new Promise<void>((resolve) => this.heldAfterCheck.push(resolve));
+        }
+        return ok;
+      },
+    };
   }
   /** The wake calls that were sent to the machine (a call refused by the start's own check never gets here). */
   readonly wakeSent: string[] = [];
@@ -92,7 +112,7 @@ class HeldStops extends FakeComputerProvider {
       this.failReadyAfterHold = false;
       throw new Error('The pretend provider failed on ready');
     }
-    return super.ready(ref, options);
+    return super.ready(ref, this.pausedAfterCheck(options));
   }
   /** The held readiness check fails when it is released (the late wake could not be made ready). */
   failReadyAfterHold = false;
@@ -715,6 +735,53 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         await starting;
         expect(fake.wakeSent).toEqual([]);
         expect(await fake.awake(sara.ref)).toBe(false);
+      }, 30_000);
+
+      it('CodeRabbit on #1040, the exact sequence: the check passed, the sender is paused, the wake is given up on and its hold lifted, the start returns late: it is told at once and the machine it started is stopped (not left running through the wait for health)', async () => {
+        const sara = await freshBootReady('stillmine-paused-after-check', { beatMs: 60_000, staleMs: 400 });
+        fake.holdAfterCheck = 1;
+        const healthHeld: Array<() => void> = [];
+        // What the real provider does after its start: it waits for the machine to be healthy
+        fake.afterStartForTests = () => new Promise<void>((resolve) => healthHeld.push(resolve));
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldAfterCheck.length === 1);
+        // The check passed (a beat was written); the sender is paused. Nobody beats any more: the wake is given up on and its hold is lifted after the watch time
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+        await sleep(600);
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        await watchPassed(sara);
+        expect(await settleTurnHold(sara.brickId)).toBe(true);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+        const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+        // The sender resumes: its start reaches the machine (awake), and it is told it lost its wake as soon as the request returned
+        fake.heldAfterCheck.splice(0).forEach((release) => release());
+        await until(() => fake.calls.filter((call) => call.name === 'stop').length > stopsBefore, 4_000);
+        expect(await fake.awake(sara.ref)).toBe(false);
+        // Nothing waited for the machine to be healthy under a wake that was lost
+        expect(healthHeld).toEqual([]);
+        await starting;
+        expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, title: 'A', status: 'failed' } })).toBe(0);
+        fake.afterStartForTests = null;
+      }, 30_000);
+
+      it('the same when a replacement wake owns the machine meanwhile: the late start is NOT stopped (the machine is the replacement\'s) and the old start looks again', async () => {
+        const sara = await freshBootReady('stillmine-paused-replaced', { beatMs: 60_000, staleMs: 120_000 });
+        fake.holdAfterCheck = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldAfterCheck.length === 1);
+        const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+        // A replacement took the wake over and is waking the machine itself
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "wake_epoch" = "wake_epoch" + 1, "machine" = 'waking', "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
+        fake.heldAfterCheck.splice(0).forEach((release) => release());
+        await sleep(400);
+        expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+        expect(await fake.awake(sara.ref)).toBe(true);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
+        await expect(starting).resolves.toMatchObject({ ok: true });
+        expect(await fake.awake(sara.ref)).toBe(true);
+        expect((await machineOf(sara)).machine).toBe('working');
       }, 30_000);
 
       it('a start that still owns its wake sends the restart once, as before', async () => {

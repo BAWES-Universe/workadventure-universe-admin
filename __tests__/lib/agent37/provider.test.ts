@@ -898,11 +898,14 @@ describe('getting a machine ready for a job', () => {
     };
     const power = (w: { calls: string[] }) => w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
 
+    // The asks of a fresh boot that is followed by a restart a part asked for: before the stop, before the start, right after the start (the sender may have been paused since the check), then the same again
     it.each([
       [1, []],
       [2, ['stop:m1']],
       [3, ['stop:m1', 'start:m1']],
-      [4, ['stop:m1', 'start:m1', 'stop:m1']],
+      [4, ['stop:m1', 'start:m1']],
+      [5, ['stop:m1', 'start:m1', 'stop:m1']],
+      [6, ['stop:m1', 'start:m1', 'stop:m1', 'start:m1']],
     ])('ready: refused at ask %i, only the calls before it were sent, and WakeReplaced is thrown', async (refusedAt, sent) => {
       const { w, p } = await prepare();
       let asks = 0;
@@ -911,13 +914,13 @@ describe('getting a machine ready for a job', () => {
       expect(asks).toBe(refusedAt);
     });
 
-    it('ready: a start that still owns its wake asks before each of the four calls, and every call is sent once', async () => {
+    it('ready: a start that still owns its wake asks before each of the four calls and after each start, and every call is sent once', async () => {
       const { w, p } = await prepare();
       const order: string[] = [];
       await expect(p.ready('m1', { freshBoot: true, stillMine: async () => (order.push(`ask@${power(w).length}`), true) })).resolves.toMatchObject({ bootId: BOOT });
       expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
-      // Asked with 0, 1, 2 and 3 calls sent so far: right before each of them
-      expect(order).toEqual(['ask@0', 'ask@1', 'ask@2', 'ask@3']);
+      // Asked right before each call, and again right after each start (CodeRabbit on #1040)
+      expect(order).toEqual(['ask@0', 'ask@1', 'ask@2', 'ask@2', 'ask@3', 'ask@4']);
     });
 
     it('ready: an Orbit that asks nothing (no stillMine) restarts as before', async () => {
@@ -938,6 +941,20 @@ describe('getting a machine ready for a job', () => {
       expect(w.calls).not.toContain('start:m1');
       // Still its own: started once
       await p.wake('m1', { stillMine: async () => true });
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a start whose sender was paused after the check and lost its wake is told right after the request returns, not after the wait for the machine to be healthy (CodeRabbit on #1040)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      // The machine never answers as healthy: without the second ask the start would wait for it (and fail with the error of the wait, the machine left running)
+      w.setHealthy(false);
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
       expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
     });
 
@@ -1012,6 +1029,15 @@ describe('getting a machine ready for a job', () => {
       // Still its own: the update is sent once, after the check
       await expect(p.ready('m1', { stillMine: async () => true })).resolves.toMatchObject({ bootId: BOOT });
       expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+    });
+
+    it('a start that lost its wake while the image update was on its way is told as soon as it returns, before anything else is brought up (CodeRabbit on #1040)', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      await expect(p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+      expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(false);
     });
 
     it('a machine that is not behind the image is not asked about for an update (nothing is sent)', async () => {
