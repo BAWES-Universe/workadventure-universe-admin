@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { canManageBotMcpServers, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
+import { KEY_NO_ANSWER_HOLDS_MS } from '@/lib/app-same';
 
 /**
  * A bot's tool sign-in that stopped working (game #1819).
@@ -300,6 +301,27 @@ export async function reportKeyWorked(connectionId: string, keyVersion: number, 
   ]);
   // The cards of a loss cleared here, and of an earlier change that did not finish, are finished now
   if (lost.count === 1 || row.noticesPendingAt) await finishConnectionNotices(connectionId);
+}
+
+/**
+ * A key App's service did not answer a call Orbit made with the key (no answer in time, or it could not be reached). Written on the App, as a
+ * "no-answer" report is, and also over a mark older than KEY_NO_ANSWER_HOLDS_MS: that mark no longer holds (lib/app-same.ts ownCopyWorks), so
+ * a service still down when it is tried again starts a new while. Never over a refused key, and never for a call that started before the key
+ * was replaced or before a call that worked. Never throws.
+ */
+export async function reportKeyNoAnswer(connectionId: string, at: Date): Promise<void> {
+  await prisma.appConnection
+    .updateMany({
+      where: {
+        id: connectionId,
+        kind: 'direct',
+        signInLostAt: null,
+        OR: [{ noAnswerAt: null }, { noAnswerAt: { lt: new Date(at.getTime() - KEY_NO_ANSWER_HOLDS_MS) } }],
+        AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: at } }] }],
+      },
+      data: { noAnswerAt: at },
+    })
+    .catch((error) => console.error('[ToolSignIn] Could not write that a key App did not answer:', error instanceof Error ? error.message : 'unknown'));
 }
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */

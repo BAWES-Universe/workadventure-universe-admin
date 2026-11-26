@@ -10,8 +10,9 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
-import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
+import { WITH_CONNECTION, connectedState, effectiveServer } from '@/lib/app-connections';
 import { sharedJobsOf } from '@/lib/app-share';
+import { isReadyMade, ownCopyOf, ownGrantsOf } from '@/lib/app-same';
 
 export const runtime = 'nodejs';
 
@@ -105,6 +106,8 @@ export async function GET(
     // A ready-made app's address is the provider's and is never shown to a person. Only the bot server (admin token) is handed them.
     const seesWay = (s: (typeof servers)[number]) => isAdminToken || !s.connection || (s.connection.ownerId === userId && s.connection.source !== 'ready_made');
     const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
+    // A ready-made App this bot also has its own copy of (switched on) gives way to it (lib/app-same.ts): only read when there is one to ask about
+    const ownGrants = servers.some((row) => isReadyMade(row.connection)) ? await ownGrantsOf(botId, (own) => connectedState(own).connected) : [];
     const transformed = await Promise.all(
       servers.map(async (s) => {
         let oauthConnected = false;
@@ -172,6 +175,10 @@ export async function GET(
             // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
             // POST /api/ready-made/link. False for every other server.
             readyMade: s.connection?.source === 'ready_made' || s.connection?.source === 'github',
+            // On a ready-made App: the id of this bot's own copy of the same App, switched on (a link App's server id, or a key App's id as
+            // GET .../key-apps gives it). When set, the bot server offers nothing of this ready-made App: the person's own account comes first and
+            // is never paid for, counted or limited by Universe. Null when there is none, and on every other row.
+            ownCopyServerId: isReadyMade(s.connection) ? (ownCopyOf(ownGrants, { key: s.connection?.providerToolkit, name: s.connection?.name })?.serverId ?? null) : null,
             // For the bot server only: the jobs this Brick's owner lets other people ask it for from this app, with the inputs people may fill in
             // and the fields that may come back. A job whose tool changed since it was picked is not listed, as it is not shared
             ...(isAdminToken ? sharedJobsOf(s as Parameters<typeof sharedJobsOf>[0]) : {}),

@@ -139,6 +139,9 @@ export function readCookie(header: string | null | undefined, name: string): str
 /**
  * What a private page is sent with: the lock the bucket's address puts on every artifact (it runs, but with no origin of
  * its own, no network except the common libraries, and no forms), and it can be framed only by the game and by Orbit.
+ * A link it holds opens in a new tab when tapped (`allow-popups`), and that tab is the other site as it is, not locked
+ * (`allow-popups-to-escape-sandbox`): a booking or a map opens like any link. Browsers open a new tab only on a tap, and
+ * never to the page's own address as a page (`Sec-Fetch-Dest: document` is turned away below).
  *
  * One line is tighter than the bucket's. There a page's pictures, songs and videos come from `'self'`, an address that
  * holds nothing but artifacts. Here `'self'` would be all of Orbit, so they come from `mediaFolder` only: this pass's own
@@ -146,7 +149,7 @@ export function readCookie(header: string | null | undefined, name: string): str
  */
 export function pagePolicy(mediaFolder: string): string {
   return [
-    'sandbox allow-scripts',
+    'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox',
     "default-src 'none'",
     "script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com",
     "style-src 'unsafe-inline' https://fonts.googleapis.com",
