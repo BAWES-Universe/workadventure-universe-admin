@@ -192,6 +192,62 @@ run('the honest check before a take over (1B)', () => {
     });
   });
 
+  describe('take over anyway, when the leader dies', () => {
+    // Sentry on #1034: the choice was held only in memory until the fence ended, so the sweep that finished a dead leader's fence asked the person again
+    it('is kept from the moment it is chosen: the sweep that finishes the fence goes on with the program running, and the person is not asked again', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      let held = false;
+      let atFence: () => void = () => {};
+      const reached = new Promise<void>((resolve) => (atFence = resolve));
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      // The first fence command stalls (the leader is in the middle of the fence); later ones answer at once
+      fake.execAnswer = async (command) => {
+        if (command === 'universe-fence' && !held) {
+          held = true;
+          atFence();
+          await gate;
+          return {};
+        }
+        return command.startsWith('universe-fence --check') ? LEFT : {};
+      };
+      const leader = takeOver(sara.brickId, sara.id, NOW, { anyway: true });
+      await reached;
+      const during = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect(during.controlState).toBe('fencing');
+      expect(during.takeOverCheck).toBe('anyway');
+      // Never shown as a line on the computer: nothing is said until the fence has ended
+      expect((await computerView(sara.brickId, sara.id, NOW))?.check ?? null).toBeNull();
+      // The leader is gone: its lease runs out and the sweep finishes the change of hands
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlLeaseUntil: new Date(Date.now() - 60_000) } });
+      await sweepComputers(NOW);
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+      expect((await computerView(sara.brickId, sara.id, NOW))?.check).toMatchObject({ state: 'running' });
+      release();
+      await leader;
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+    });
+
+    it('is kept for a plain take over that finds the dead leader first: it goes on with the program running too', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlState: 'fencing', controlEpoch: { increment: 1 }, controlLeaseUntil: new Date(Date.now() - 1000), takeOverCheck: 'anyway' } });
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+      expect((await computerView(sara.brickId, sara.id, NOW))?.check).toMatchObject({ state: 'running' });
+    });
+
+    it('is not kept past the end of the fence: when the program is gone by then nothing is said', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      leftAfter.still = false;
+      expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect(row.takeOverCheck).toBeNull();
+    });
+  });
+
   describe('Restart first', () => {
     it('restarts the computer, keeps the job and its ask, gives Brick back its hands, and Brick is told to ask again with the same words', async () => {
       const { sara, jobId } = await waitingForSignIn();

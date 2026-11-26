@@ -3659,11 +3659,25 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
 
 export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' | 'still_running' | 'not_offered' };
 
-type TakeOverCheck = 'blocked' | 'restarting' | 'running';
+/** `anyway` is never shown: it is only the person's choice to go on with a program running, kept from the moment they made it until the fence ends (it becomes `running`, or nothing). */
+type TakeOverCheck = 'blocked' | 'restarting' | 'running' | 'anyway';
 
 /** What the take over's check found, kept on the computer's row (null = nothing to say). */
 async function setTakeOverCheck(botId: string, check: TakeOverCheck | null): Promise<void> {
   await prisma.brickComputer.updateMany({ where: { botId }, data: { takeOverCheck: check } });
+}
+
+/**
+ * The person's "Take over anyway" is kept on the computer's row before the fence runs, so a leader that dies in the middle does not lose it: whoever finishes the fence
+ * (the sweep, or another request) goes on with the program running instead of asking again. Only while this fence is the one in charge (control `fencing`, and its epoch).
+ */
+async function noteAnyway(botId: string, epoch: number | null): Promise<void> {
+  await prisma.brickComputer.updateMany({ where: { botId, controlState: 'fencing', ...(epoch === null ? {} : { controlEpoch: epoch }) }, data: { takeOverCheck: 'anyway' } });
+}
+
+/** Whether the person already chose to take over anyway for the fence that is going (kept by `noteAnyway`). */
+async function anywayChosen(botId: string): Promise<boolean> {
+  return (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck === 'anyway';
 }
 
 /** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see leadFence). */
@@ -3797,6 +3811,8 @@ async function leadFence(botId: string, epoch: number | null, now: Date, anyway 
       return 'idle';
     }
     if (!(await mine())) return 'lost';
+    // The person's choice is kept before the fence runs (see noteAnyway)
+    if (anyway) await noteAnyway(botId, epoch);
     // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
     await fenceControl(botId);
     if (!(await mine())) return 'lost';
@@ -3882,7 +3898,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       const resumed = await resumeTransition(botId, row);
       if (resumed === null) continue;
       if (row.state === 'fencing') {
-        const done = await leadFence(botId, resumed, now, anyway);
+        const done = await leadFence(botId, resumed, now, anyway || (await anywayChosen(botId)));
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
         if (done === 'blocked') return { ok: false, reason: 'still_running' };
       } else {
@@ -4131,7 +4147,7 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
     const resumed = await resumeTransition(botId, row);
     if (resumed === null) continue;
     try {
-      if (row.state === 'fencing') await leadFence(botId, resumed, now);
+      if (row.state === 'fencing') await leadFence(botId, resumed, now, await anywayChosen(botId));
       else await finishReturnOf(botId, resumed);
       finished++;
     } catch (error) {
