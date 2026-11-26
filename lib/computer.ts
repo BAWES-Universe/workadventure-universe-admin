@@ -3663,8 +3663,10 @@ export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_fou
 type TakeOverCheck = 'blocked' | 'restarting' | 'running' | 'anyway';
 
 /** What the take over's check found, kept on the computer's row (null = nothing to say). */
-async function setTakeOverCheck(botId: string, check: TakeOverCheck | null): Promise<void> {
-  await prisma.brickComputer.updateMany({ where: { botId }, data: { takeOverCheck: check } });
+async function setTakeOverCheck(botId: string, check: TakeOverCheck | null, fencing?: number): Promise<boolean> {
+  // A fence's leader names its epoch: a leader that stalled past its lease (another finished or took over the fence) writes nothing, and is told so (Sentry on #1034)
+  const { count } = await prisma.brickComputer.updateMany({ where: { botId, ...(fencing === undefined ? {} : { controlState: 'fencing', controlEpoch: fencing }) }, data: { takeOverCheck: check } });
+  return fencing === undefined || count === 1;
 }
 
 /**
@@ -3822,13 +3824,13 @@ async function leadFence(botId: string, epoch: number | null, now: Date, anyway 
     if (secured === 'lost') return 'lost';
     if (secured === 'unproved') {
       // The person's choice stands for the next try (the sweep finishes this fence again), as it does when the rounds run out below
-      await setTakeOverCheck(botId, anyway ? 'anyway' : null);
+      if (!(await setTakeOverCheck(botId, anyway ? 'anyway' : null, epoch ?? undefined))) return 'lost';
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'unproved';
     }
     if (secured === 'blocked') {
       // The jobs are the person's and Brick is shut out; the person has no input yet. They are asked, and the next take over (or the restart) goes on from here: the sweep leaves it alone
-      await setTakeOverCheck(botId, 'blocked');
+      if (!(await setTakeOverCheck(botId, 'blocked', epoch ?? undefined))) return 'lost';
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'blocked';
     }

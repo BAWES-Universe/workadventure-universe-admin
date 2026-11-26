@@ -292,6 +292,40 @@ run('the honest check before a take over (1B)', () => {
       }
     });
 
+    // Sentry on #1034: the check was written by botId alone, so a leader that stalled past its lease wrote over the newer fence's state
+    it('a leader that stalls past its lease writes nothing over the fence that took over from it', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      const original = prisma.brickComputer.updateMany.bind(prisma.brickComputer);
+      let held = false;
+      let atWrite: () => void = () => {};
+      const reached = new Promise<void>((resolve) => (atWrite = resolve));
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      // The first leader's "a program is still running" write is held (it stalled just before it); every other write goes straight through
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+        if (!held && (args as { data?: { takeOverCheck?: string | null } })?.data?.takeOverCheck === 'blocked') {
+          held = true;
+          atWrite();
+          await gate;
+        }
+        return original(args);
+      }) as unknown as typeof prisma.brickComputer.updateMany);
+      try {
+        const stalled = takeOver(sara.brickId, sara.id, NOW);
+        await reached;
+        // Its lease runs out, and the person asks again, this time to go on anyway: a newer leader finishes the fence
+        await original({ where: { botId: sara.brickId }, data: { controlLeaseUntil: new Date(Date.now() - 60_000) } });
+        expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
+        release();
+        await stalled;
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect({ state: row.controlState, check: row.takeOverCheck }).toEqual({ state: 'human_ready', check: 'running' });
+    });
+
     it('is not kept past the end of the fence: when the program is gone by then nothing is said', async () => {
       const { sara } = await waitingForSignIn();
       stillRunning();
