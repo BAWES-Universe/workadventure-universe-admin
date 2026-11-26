@@ -38,7 +38,7 @@ export async function GET(
     const isServiceToken = validateServiceToken(request);
     const { id: botId } = await params;
     if (!isServiceToken) {
-      const denied = await botContentReadDenied(request, corsHeaders(request));
+      const denied = await botContentReadDenied(request, botId, corsHeaders(request));
       if (denied) return denied;
       // Hide bot conversations (#435): whoever is not the bot server gets the tally, never the contents: a person,
       // a super admin, and the deployment admin token alike (#444). The bot server reads everything back with its

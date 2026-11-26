@@ -6,10 +6,14 @@ import { wokaLayersForMany } from '@/lib/woka-avatar';
 import {
   ClashRefused,
   endProgram,
+  endPrograms,
+  endProgramsIn,
   listPrograms,
+  readExceptionForUpdateIn,
   previewGrant,
   saveDefault,
-  saveException,
+  lockForSavesIn,
+  saveExceptionIn,
   createGift,
   type GrantInput,
   type Issuer,
@@ -19,7 +23,7 @@ import {
 import { markCreditBilled } from '@/lib/credit-billing';
 import { CreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
 import { PLATFORM_ACCOUNT_ID, exposureOf } from '@/lib/credit-funding';
-import { currentRules, idsReached } from '@/lib/credit-store';
+import { currentRules, idsReached, type Tx } from '@/lib/credit-store';
 import { MONEY_CATEGORIES, type AudienceView, type ClashView, type ExceptionSetting, type ExceptionView, type GiftScope, type GiftView, type GrantsOverview, type MoneyDefaultView, type PersonView, type PreviewNumbers, type PreviewRequest, type PreviewView, type Recipients } from '@/lib/grants-view';
 
 /**
@@ -142,7 +146,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     exposureOf(PLATFORM_ACCOUNT_ID, now),
   ]);
   const money = programs.filter((program) => asMoney(program.categoryId));
-  const names = await namesFor(money);
 
   const defaults = {} as Record<MoneyCategory, MoneyDefaultView>;
   for (const category of MONEY_CATEGORIES) {
@@ -156,9 +159,22 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     else defaults[category] = { set: false, amountMicros: null, interval: 'none', recipients: null };
   }
 
+  // Gifts: every one still running, and the ones that ended most recently (so a long history never hides a running gift)
+  const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
+  const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
+  const allGifts = money.filter((program) => program.kind === 'gift');
+  const endedGifts = allGifts.filter(isEnded).sort((a, b) => endedAt(b) - endedAt(a));
+  // An ended gift that was to be billed and was not billed yet stays listed however old it is: it is where "Mark as billed" is
+  const older = endedGifts.slice(RECENTLY_ENDED_GIFTS);
+  const owed = older.length === 0 ? [] : await prisma.creditLot.findMany({ where: { programId: { in: older.map((program) => program.programId) }, settlement: 'to_bill', billedAt: null }, select: { programId: true }, distinct: ['programId'] });
+  const stillOwed = new Set(owed.map((lot) => lot.programId));
+  const gifts = [...allGifts.filter((program) => !isEnded(program)), ...endedGifts.filter((program, index) => index < RECENTLY_ENDED_GIFTS || stillOwed.has(program.programId))];
+  // Only the people, universes and funding accounts of what is shown are looked up: the older ended gifts are not listed, so they cost nothing here
+  const activeExceptions = money.filter((entry) => entry.kind === 'exception' && entry.status === 'active');
+  const names = await namesFor([...activeExceptions, ...gifts]);
   // Exceptions: the active ones, one line for each group of people
   const groups = new Map<string, { audience: AudienceView; apps?: ProgramView; computers?: ProgramView }>();
-  for (const program of money.filter((entry) => entry.kind === 'exception' && entry.status === 'active')) {
+  for (const program of activeExceptions) {
     const key = recipientKey(program.recipients);
     const group = groups.get(key) ?? { audience: audienceOf(program, names) };
     if (program.categoryId === 'instant_apps') group.apps = program;
@@ -167,11 +183,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   }
   const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
 
-  // Gifts: every one still running, and the ones that ended most recently (so a long history never hides a running gift)
-  const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
-  const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
-  const allGifts = money.filter((program) => program.kind === 'gift');
-  const gifts = [...allGifts.filter((program) => !isEnded(program)), ...allGifts.filter(isEnded).sort((a, b) => endedAt(b) - endedAt(a)).slice(0, RECENTLY_ENDED_GIFTS)];
   const figures = await giftFigures(gifts.map((gift) => gift.programId));
   const giftViews: GiftView[] = gifts
     .map((gift): GiftView => {
@@ -313,8 +324,10 @@ function numbersOf(preview: Preview, request: PreviewRequest, extra: { interval:
     startsOn: extra.startsOn,
     // A changing universe gift can reach the people there now and the joiners the admin allowed: that is the most it can issue
     mostNowMicros: shared ? each : each * (countNow + (request.what === 'gift' && request.joinerCap && preview.recipients.growing ? request.joinerCap : 0)),
-    // The funding check is about who is there now: joiners are funded as they join
-    issuedNowMicros: shared ? each : each * countNow,
+    // The funding check is about who is there now: joiners are funded as they join. A monthly default that starts on the 1st issues nothing
+    // now: its first month is said apart
+    issuedNowMicros: request.what === 'default' && extra.interval === 'monthly' && extra.startsOn !== 'now' ? 0 : shared ? each : each * countNow,
+    firstMonthMicros: request.what === 'default' && extra.interval === 'monthly' && extra.startsOn !== 'now' ? (shared ? each : each * countNow) : null,
     noLifetimeMax: preview.mostIssued.unbounded,
     endsOn: extra.endsOn,
     audienceName: extra.audienceName,
@@ -342,10 +355,20 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
     }
     // An exception: each money category it sets, over the same people
     const recipients = recipientOf(request.audience);
+    // The rule this save would change is never a clash with itself: the one the admin opened, or (when none was named) the one the save would
+    // find for the same people, as saving does
+    const replaced = async (category: MoneyCategory): Promise<string | undefined> => {
+      if (request.replaceId) return readExceptionId(request.replaceId)?.[category] ?? undefined;
+      const key = recipientKey(recipients);
+      return (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.categoryId === category && recipientKey(program.recipients) === key)?.programId;
+    };
     let numbers: PreviewNumbers | null = null;
     let clash: ClashView | null = null;
     let most = 0;
+    let mostOnce = 0;
+    let mostMonthly = 0;
     let issuedNow = 0;
+    let ownInterval: PreviewNumbers['interval'] | null = null;
     for (const category of MONEY_CATEGORIES) {
       const setting = request[category];
       const input = settingInput(category, setting, recipients, now);
@@ -354,13 +377,20 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
       const first = numbersOf(preview, request, { interval: setting.mode === 'own' ? setting.interval : 'none', ownRules: 0 });
       if (setting.mode === 'own') {
         most += first.mostNowMicros ?? 0;
+        if (setting.interval === 'once') mostOnce += first.mostNowMicros ?? 0;
+        else mostMonthly += first.mostNowMicros ?? 0;
         issuedNow += first.issuedNowMicros ?? 0;
+        // What the funding check reads: the first category that gives credit, not one set to "No grant"
+        ownInterval = ownInterval ?? setting.interval;
       }
       numbers = numbers ?? first;
       // "No grant" is a figure like any other: the books refuse it too when another rule of the same rank says something else for the same people
-      if (!clash) clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
+      if (!clash) clash = await clashOf(category, recipients, await replaced(category), setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
     }
-    return { numbers: numbers ? { ...numbers, mostNowMicros: most > 0 ? most : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null, clash };
+    return {
+      numbers: numbers ? { ...numbers, interval: ownInterval ?? numbers.interval, mostNowMicros: most > 0 ? most : null, mostOnceMicros: mostOnce > 0 ? mostOnce : null, mostMonthlyMicros: mostMonthly > 0 ? mostMonthly : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null,
+      clash,
+    };
   } catch (error) {
     if (error instanceof CreditRefused || error instanceof GrantsRefused) return { numbers: null, clash: null, problem: error.message };
     throw error;
@@ -371,17 +401,20 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
 
 export async function saveDefaultFor(request: Extract<PreviewRequest, { what: 'default' }>, issuer: Issuer, now: Date = new Date()): Promise<void> {
   const category = request.category;
-  await saveDefault(defaultInput(request, now), issuer, now);
-  // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here
+  // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here.
+  // Both are written in the one commit as the default, so the screen never says "failed" for a change that half happened
+  const everyone = request.recipients.kind === 'all';
+  let allowance: ((tx: Tx) => Promise<void>) | undefined;
   if (category === 'computers') {
-    const everyone = request.recipients.kind === 'all';
-    if (request.interval === 'none') await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId);
+    if (request.interval === 'none') allowance = async (tx) => void (await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId, tx));
     else if (request.interval === 'monthly' && everyone && request.amountMicros) {
+      const micros = request.amountMicros;
       // "On the 1st" waits for the 1st, as the default itself does; "Now" changes the allowance now
-      if (request.startsOn === 'now') await saveMeterSettings({ memberAllowanceMicros: request.amountMicros }, issuer.userId);
-      else await scheduleMemberAllowance(request.amountMicros, firstOfNextMonth(now), issuer.userId);
+      if (request.startsOn === 'now') allowance = async (tx) => void (await saveMeterSettings({ memberAllowanceMicros: micros }, issuer.userId, tx));
+      else allowance = (tx) => scheduleMemberAllowance(micros, firstOfNextMonth(now), issuer.userId, now, tx);
     }
   }
+  await saveDefault(defaultInput(request, now), issuer, now, allowance);
 }
 
 /** A program as the input that would save it again, so it can be saved with some people taken out. */
@@ -389,114 +422,92 @@ function inputOfProgram(program: ProgramView): GrantInput {
   return { categoryId: program.categoryId, amount: program.amount, schedule: program.schedule, recipients: program.recipients, share: program.share, claimStartsAt: program.claimStartsAt, claimEndsAt: program.claimEndsAt, lotExpiresAt: program.lotExpiresAt, label: program.label };
 }
 
-/** What taking people out of another rule changed, so a refused save can put the other rule back. */
-interface TakenOut {
-  before: ProgramView;
-  ended: boolean;
-}
-
-async function takeOut(programId: string, people: string[], issuer: Issuer, now: Date, taken: TakenOut[]): Promise<void> {
-  const other = (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.programId === programId);
+/**
+ * Takes people out of another rule (inside the save's own transaction, so a save that is refused afterwards leaves it as it was): the rule
+ * ends when nobody is left in it, and is saved again with the rest otherwise.
+ */
+async function takeOut(tx: Tx, programId: string, people: string[], issuer: Issuer, now: Date): Promise<void> {
+  // Read on the save's own connection and under the locks of a save of that rule: what is written back is built from the rule as it is now
+  const other = await readExceptionForUpdateIn(tx, programId);
   if (!other) return;
   if (other.recipients.kind !== 'people') {
     throw new GrantsRefused('That other rule is for a universe’s members, so these people can’t be taken out of it. End that rule, or give each of them a rule of their own (a person’s own rule comes first).', 400, 'clash');
   }
   const left = other.recipients.userIds.filter((id) => !people.includes(id));
-  if (left.length === 0) {
-    await endProgram(programId, issuer, now);
-    taken.push({ before: other, ended: true });
-  } else {
-    await saveException({ ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
-    taken.push({ before: other, ended: false });
-  }
+  if (left.length === 0) await endProgramsIn(tx, [programId], issuer, now);
+  else await saveExceptionIn(tx, { ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
 }
 
-/**
- * Gives other rules back the people a refused save had taken out of them. A shortened rule is saved as it was. A rule that had to
- * end can't be reopened, so it is made again with the same figures and people (its old id is gone, its people have it again).
- */
-async function putBack(taken: TakenOut[], issuer: Issuer, now: Date): Promise<void> {
-  let failed = 0;
-  for (const { before, ended } of [...taken].reverse()) {
-    try {
-      await saveException({ ...inputOfProgram(before), programId: ended ? undefined : before.programId }, issuer, now);
-    } catch (error) {
-      failed += 1;
-      console.error('[Grants] Could not give a rule back its people after a refused save:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  // Never let the screen say "nothing changed" when another rule could not be put back
-  if (failed > 0) throw new GrantsRefused('That didn’t save, and another rule could not be fully put back. Check the exceptions list before trying again.', 500);
-}
-
-/** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
-async function undo(done: { before: ProgramView | undefined; after: ProgramView }[], issuer: Issuer, now: Date): Promise<void> {
-  for (const { before, after } of done.reverse()) {
-    try {
-      if (before) await saveException({ ...inputOfProgram(before), programId: before.programId }, issuer, now);
-      else await endProgram(after.programId, issuer, now);
-    } catch (error) {
-      console.error('[Grants] Could not put back a rule after a refused save:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-}
+/** How long one save of an exception may take as a whole (it holds the rules it touches while it does). */
+const SAVE_EXCEPTION_MS = 30_000;
 
 /**
  * Saves an exception: one rule for each money category it sets, over the same people. A category set to "As everyone" has no rule (an
  * existing one ends). A clash is refused with the people named; with `clashChoice` the admin says which rule applies to them: "this"
  * takes them out of the other rule, "other" takes them out of this one.
+ *
+ * The whole save is ONE commit: every category's rule, the rules that end, and the people taken out of another rule. A refusal anywhere
+ * leaves nothing of it behind, so nothing is ever put back by a second write that another admin's change could have got in front of, and
+ * two saves that both fail never leave a failed rule standing.
  */
 export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 'exception' }> & { clashChoice?: 'this' | 'other' }, issuer: Issuer, now: Date = new Date()): Promise<void> {
   let recipients = recipientOf(request.audience);
+  // The people as the admin opened them (before any clash takes some out of this rule)
+  const opened = recipients;
   const existing = request.replaceId ? readExceptionId(request.replaceId) : null;
   if (request.replaceId && !existing) throw new GrantsRefused('That exception was not found', 404);
   // The same people already have a rule for this category: this is a change to it, never a second one
-  let active = await listPrograms(undefined, { kind: 'exception' });
+  const active = await listPrograms(undefined, { kind: 'exception' });
+  // The people as the admin opened them: taking clashing people out of this rule later never makes the save look for another rule
+  const openedKey = recipientKey(recipients);
   const findExisting = (category: MoneyCategory): ProgramView | undefined => {
-    const named = existing?.[category] ? active.find((program) => program.programId === existing[category]) : undefined;
-    return named ?? active.find((program) => program.categoryId === category && recipientKey(program.recipients) === recipientKey(recipients));
+    const wanted = existing?.[category];
+    if (wanted) {
+      const named = active.find((program) => program.programId === wanted);
+      // The rule the admin opened has ended or been replaced since: it is theirs to look at again, never quietly this save onto its replacement
+      if (!named) throw new GrantsRefused('That exception changed since you opened it. Close it, open it again and look before saving.', 409);
+      return named;
+    }
+    return active.find((program) => program.categoryId === category && recipientKey(program.recipients) === openedKey);
   };
 
-  // Changes to other rules made to settle a clash: put back if the save is refused after all
-  const taken: TakenOut[] = [];
+  // The rules the admin chose to take people out of, once a clash was settled that way (the second try)
+  let takeFrom: { programId: string; userIds: string[] }[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
-    // What this attempt changed, so a refusal part-way puts it back: one rule for each category is saved on its own, never half-saved
-    const done: { before: ProgramView | undefined; after: ProgramView }[] = [];
     try {
-      const toEnd: ProgramView[] = [];
-      for (const category of MONEY_CATEGORIES) {
-        const current = findExisting(category);
-        const input = settingInput(category, request[category], recipients, now);
-        if (!input) {
-          if (current) toEnd.push(current);
-          continue;
-        }
-        done.push({ before: current, after: await saveException({ ...input, programId: current?.programId }, issuer, now) });
-      }
-      // Ending comes last: it is the one step that cannot be put back
-      for (const program of toEnd) await endProgram(program.programId, issuer, now);
+      await prisma.$transaction(
+        async (tx) => {
+          // Everything this save will lock (the rules it replaces, the ones people are taken out of, both categories, the platform account) in one
+          // sorted order before the first write: locks met one rule at a time could be met the other way round by a second transaction
+          const replacing = MONEY_CATEGORIES.map((category) => findExisting(category)?.programId).filter((id): id is string => !!id);
+          await lockForSavesIn(tx, { programIds: [...takeFrom.map((clash) => clash.programId), ...replacing], categoryIds: [...MONEY_CATEGORIES], accountIds: [PLATFORM_ACCOUNT_ID] });
+          for (const clash of takeFrom) await takeOut(tx, clash.programId, clash.userIds, issuer, now);
+          const toEnd: ProgramView[] = [];
+          for (const category of MONEY_CATEGORIES) {
+            const current = findExisting(category);
+            const input = settingInput(category, request[category], recipients, now);
+            if (!input) {
+              if (current) toEnd.push(current);
+              continue;
+            }
+            await saveExceptionIn(tx, { ...input, programId: current?.programId }, issuer, now);
+          }
+          if (toEnd.length > 0) await endProgramsIn(tx, toEnd.map((program) => program.programId), issuer, now);
+        },
+        { timeout: SAVE_EXCEPTION_MS, maxWait: 10_000 },
+      );
       return;
     } catch (error) {
-      await undo(done, issuer, now);
-      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) {
-        await putBack(taken, issuer, now);
-        throw error;
-      }
-      // The admin chose which rule applies to the people the two disagree about
-      try {
-        const clashing = new Set(error.clashes.flatMap((clash) => clash.userIds));
-        if (request.clashChoice === 'this') {
-          for (const clash of error.clashes) await takeOut(clash.programId, clash.userIds, issuer, now, taken);
-        } else {
-          if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
-          const left = recipients.userIds.filter((id) => !clashing.has(id));
-          if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
-          recipients = { kind: 'people', userIds: left };
-        }
-        active = await listPrograms(undefined, { kind: 'exception' });
-      } catch (settling) {
-        await putBack(taken, issuer, now);
-        throw settling;
+      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) throw error;
+      // The admin chose which rule applies to the people the two disagree about. Nothing was saved by the try that was refused
+      const clashing = new Set(error.clashes.flatMap((clash) => clash.userIds));
+      if (request.clashChoice === 'this') {
+        takeFrom = error.clashes.map((clash) => ({ programId: clash.programId, userIds: clash.userIds }));
+      } else {
+        if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
+        const left = recipients.userIds.filter((id) => !clashing.has(id));
+        if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
+        recipients = { kind: 'people', userIds: left };
       }
     }
   }
@@ -505,16 +516,12 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
 export async function endException(id: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'not_found'> {
   const parts = readExceptionId(id);
   if (!parts) return 'not_found';
-  let found = false;
   // Only exception rules are ended here, never a default or a gift that an id happens to name
   const exceptionIds = new Set((await listPrograms(undefined, { kind: 'exception' })).map((program) => program.programId));
-  for (const category of MONEY_CATEGORIES) {
-    const programId = parts[category];
-    if (!programId || !exceptionIds.has(programId)) continue;
-    const result = await endProgram(programId, issuer, now);
-    if (result !== 'not_found') found = true;
-  }
-  return found ? 'ended' : 'not_found';
+  const toEnd = MONEY_CATEGORIES.map((category) => parts[category]).filter((programId): programId is string => !!programId && exceptionIds.has(programId));
+  // Both categories' rules end in one commit: a refusal on the second never leaves the first ended behind an error
+  const results = await endPrograms(toEnd, issuer, now);
+  return results.some((result) => result !== 'not_found') ? 'ended' : 'not_found';
 }
 
 export async function createGiftFor(request: Extract<PreviewRequest, { what: 'gift' }> & { settlement?: 'gift' | 'to_bill'; note?: string | null; grantKey?: string }, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {

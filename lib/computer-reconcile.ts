@@ -142,6 +142,21 @@ async function booksFor(day: string, now: Date): Promise<Books> {
     list.push([from0, from0 + length]);
     spans.set(job.botId, list);
   }
+  // A job that was paused held the machine in stretches: each stretch before a pause is kept as its own row (the job's own start and seconds are only the stretch since it last started)
+  const pauses = await prisma.computerJobPause.findMany({
+    where: { startedAt: { not: null, lt: to }, at: { gt: from }, seconds: { gt: 0 } },
+    select: { startedAt: true, at: true, seconds: true, job: { select: { botId: true } } },
+  });
+  for (const pause of pauses) {
+    const started = pause.startedAt as Date;
+    const from0 = Math.max(started.getTime(), from.getTime());
+    const overlap = Math.max(0, (Math.min(pause.at.getTime(), to.getTime()) - from0) / 1000);
+    const length = Math.min(overlap, pause.seconds) * 1000;
+    if (length <= 0) continue;
+    const list = spans.get(pause.job.botId) ?? [];
+    list.push([from0, from0 + length]);
+    spans.set(pause.job.botId, list);
+  }
   // A pack-away holds a Brick's computer awake with no job on it: that time is the books' own (written in computer_cold_runs), so it is not "unbooked"
   const packs = await prisma.computerColdRun.findMany({ where: { scratch: false, botId: { not: null }, startedAt: { lt: to }, OR: [{ endedAt: null }, { endedAt: { gt: from } }] }, select: { botId: true, startedAt: true, endedAt: true } });
   // It goes on the same line as the jobs, so a pack-away that overlaps a job is counted once too

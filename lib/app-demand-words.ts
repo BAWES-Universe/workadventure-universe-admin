@@ -1,5 +1,5 @@
 import { dollars } from '@/lib/costs-words';
-import type { AppRow } from '@/lib/app-demand';
+import type { AppRow, CostCompleteness } from '@/lib/app-demand';
 
 /** The plain words of the "Apps: use and demand" page, written once. Wording is only "Apps": never tool, MCP or connector. */
 
@@ -22,11 +22,34 @@ export function failedWords(app: Pick<AppRow, 'ended' | 'failed'>): string | nul
 
 /** "$118.40 to us · 4% failed". An App with no priced run says so instead of "$0.00". */
 export function costLine(app: Pick<AppRow, 'costMicros' | 'unpriced' | 'ended' | 'failed' | 'uses'>): string[] {
-  const cost = app.costMicros === null ? (app.uses > 0 ? 'No price yet' : 'Not used yet') : `${dollars(app.costMicros)} to us`;
+  // A total that leaves some runs out says so, the same as the sheet does: it is never shown as the whole cost
+  const cost = app.costMicros === null ? (app.uses > 0 ? 'No price yet' : 'Not used yet') : app.unpriced > 0 ? `${dollars(app.costMicros)} to us so far` : `${dollars(app.costMicros)} to us`;
   return [cost, failedWords(app)].filter((part): part is string => !!part);
 }
 
 export const runsOnWords = (route: AppRow['route']): string => (route === 'universe' ? 'Runs on Universe' : 'Runs on Composio');
+
+/** The App key GitHub has on this page (the same key the ready-made list uses). */
+export const GITHUB_APP_KEY = 'github';
+
+/** Universe's own GitHub App on the Apps page (game #2041): the words of GitHub's row and its sheet, written once. */
+export const githubAppWords = {
+  /** Under the GitHub row until the App is made, and after. The row itself still says what it runs on: people who connected GitHub through Composio still use it. */
+  rowHintBefore: 'Tap to set up Universe’s GitHub App',
+  rowHintAfter: 'New connections use Universe’s GitHub App',
+  title: 'Universe’s GitHub App',
+  button: 'Set up Universe’s GitHub App',
+  /** Before it is made. */
+  notMade: 'GitHub runs on Composio today. Set up Universe’s GitHub App so people connect GitHub through Universe. You press Create once on GitHub’s page, and GitHub connections people already made keep running on Composio.',
+  /** Once it is made. */
+  madeStatus: 'Set up',
+  made: 'People connect GitHub through it, and their Bricks work on GitHub as them.',
+  openOnGitHub: 'Open on GitHub',
+  /** Under "Runs on" once it is made: the choice below is for the older connections only. */
+  runsOnOnly: 'Only for GitHub connections made through Composio before.',
+  /** The Universe choice's line once it is made, instead of "no version of our own yet". */
+  universeLine: 'New connections use Universe’s GitHub App above.',
+} as const;
 
 /** The detail line of an App's sheet: "412 uses · 96 people · 4% failed, all refunded". */
 export function sheetLine(app: AppRow): string {
@@ -54,3 +77,23 @@ export function byRouteLine(app: AppRow): string | null {
 export const askedLine = (row: { times: number; people: number }): string => `${plural(row.times, 'time', 'times')} · by ${plural(row.people, 'person', 'people')}`;
 
 export const dayWords = (iso: string): string => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+/** The label under the headline cost: a total that is a part of the cost says so, and one built on estimates says that. Never the plain label for a part. */
+export function costTotalLabel(cost: CostCompleteness): string {
+  if (cost.state === 'incomplete') return 'cost to us so far';
+  if (cost.state === 'correcting') return 'cost to us (being corrected)';
+  return cost.state === 'estimated' ? 'cost to us (partly estimated)' : 'cost to us';
+}
+
+/** What the headline leaves out or has estimated, in words, or null when it is whole and measured. */
+export function costTotalNote(cost: CostCompleteness): string | null {
+  const parts: string[] = [];
+  if (cost.unpriced > 0) parts.push(`${plural(cost.unpriced, 'use has', 'uses have')} no price yet`);
+  if (cost.notCounted > 0) parts.push(`${plural(cost.notCounted, 'run is', 'runs are')} not in this total yet (still being settled)`);
+  const fixing = cost.mismatched > 0 ? `${plural(cost.mismatched, 'run is', 'runs are')} counted at a figure that differs from the provider’s own, and will be corrected` : null;
+  // Runs that are counted at a wrong figure are in the total, so they never make it "only part of it": that is said of the ones that are not in it
+  if (parts.length > 0) return `The cost so far is only part of it: ${parts.join(' and ')}.${fixing ? ` Also, ${fixing}.` : ''}`;
+  if (fixing) return `${fixing[0].toUpperCase()}${fixing.slice(1)}.`;
+  if (cost.estimated > 0) return `${plural(cost.estimated, 'use is', 'uses are')} priced with our estimate until the provider’s own figure is in.`;
+  return null;
+}

@@ -173,7 +173,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const res = await shareAs(person('owner'), id, { openScope: 'everyone' });
       expect(res.status).toBe(422);
-      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat or link.' });
+      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat, link or public.' });
     });
 
     it('does nothing when it is "Just you" already: the files stay where they are', async () => {
@@ -343,6 +343,33 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(await fakeFiles.get(versionRows(id)[0].fileKey)).toBe(PAGE);
       // Asking again is refused like any other request from them
       expect((await friendsChange(id)).status).toBe(404);
+    });
+
+    it('holds the original\'s row (shared) before it looks at how it is shared and makes the copy a bot\'s change to it asks for, so the owner cannot change it between the two', async () => {
+      const id = await makePage();
+      expect((await shareAs(person('owner'), id, { changeScope: 'openers' })).status).toBe(200);
+      const order: string[] = [];
+      const lock = jest.spyOn(fakePrisma, '$queryRaw').mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        order.push(`${strings.join('?').includes('FOR SHARE') ? 'share-lock' : 'other-lock'}:${values[0]}`);
+        return [];
+      }) as never);
+      const realCount = fakePrisma.artifact.count.bind(fakePrisma.artifact);
+      const count = jest.spyOn(fakePrisma.artifact, 'count').mockImplementation((async (args: unknown) => {
+        order.push('look-at-sharing');
+        return realCount(args as never);
+      }) as never);
+      try {
+        // Another bot, asked by someone who is not the owner: the change becomes a copy
+        const res = await call(change, { botId: 'bot2', person: person('friend'), chat: NEARBY, content: '<p>by Pixel</p>' }, { id, ...asBot });
+        expect(res.status).toBe(200);
+        expect(res.body.artifact.copiedFromId).toBe(id);
+      } finally {
+        lock.mockRestore();
+        count.mockRestore();
+      }
+      const at = order.indexOf(`share-lock:${id}`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('look-at-sharing', at)).toBeGreaterThan(at);
     });
 
     it('does not land from someone else once its owner took back who may ask for changes', async () => {

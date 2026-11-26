@@ -235,6 +235,36 @@ run('what a bot remembers about a person (real database)', () => {
     expect((await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: 'x' }), params(melodyId))).status).toBe(400);
   });
 
+  it('keeps the Forget for every name the bot server may know her by, not only for a row that holds the thing', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    const email = `sara-${tag}@example.test`;
+    expect((await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId))).status).toBe(200);
+    // Her email has no saved row, and the bot server may hold the thing under it: a save under it must not bring it back
+    expect(await prisma.botMemoryItemForget.count({ where: { botId: melodyId, userUuid: email, itemKey: id } })).toBe(1);
+    expect(await prisma.botMemoryItemForget.count({ where: { botId: melodyId, userUuid: people.sara.uuid, itemKey: id } })).toBe(1);
+  });
+
+  it('never makes a Forget older than one another Forget wrote first, one thing or everything', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    const ahead = new Date(Date.now() + 60 * 60 * 1000);
+    await prisma.botMemoryItemForget.create({ data: { botId: melodyId, userUuid: people.sara.uuid, itemKey: id, kind: 'pref', createdAt: ahead, droppedAt: new Date() } });
+    await forgetKeys(melodyId, [people.sara.uuid], new Map([[id, 'pref']]));
+    const kept = await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, userUuid: people.sara.uuid, itemKey: id } });
+    expect(kept.createdAt.getTime()).toBe(ahead.getTime());
+    // Said once more and forgotten again: the bot server is told again
+    expect(kept.droppedAt).toBeNull();
+    await prisma.botMemoryItemForget.update({ where: { id: kept.id }, data: { droppedAt: new Date() } });
+    // The thing is in her saved row again (said after even the Forget that is ahead of the clock), so the Forget of everything really meets it
+    await save(asBotServer(`/api/bots/memory/${melodyId}`, { memories: [{ userUuid: people.sara.uuid, isGuest: false, memories: memoryOf({ drawnFrom: { [`pref:${COFFEE}`]: ahead.getTime() + 60_000 } }) }] }), params(melodyId));
+    await settle();
+    expect(prefsOf(await rows(melodyId, people.sara.uuid))).toContain(COFFEE);
+    expect((await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { everything: true }), params(melodyId))).status).toBe(200);
+    const again = await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, userUuid: people.sara.uuid, itemKey: id } });
+    expect(again.createdAt.getTime()).toBe(ahead.getTime());
+    // It was said again, so the bot server is told again
+    expect(again.droppedAt).toBeNull();
+  });
+
   const prefsOf = (row: { memories: unknown } | null | undefined) => ((row?.memories as { personalInfo?: { preferences?: string[] } } | null)?.personalInfo?.preferences ?? []);
 
   it('a late report of a Forget leaves in the saved row what the person said after they asked', async () => {
@@ -258,8 +288,9 @@ run('what a bot remembers about a person (real database)', () => {
     const id = memoryItemKey('pref', null, COFFEE);
     await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
     const kept = await prisma.botMemoryItemForget.findMany({ where: { botId: melodyId } });
-    expect(kept).toHaveLength(1);
-    expect(kept[0]).toMatchObject({ userUuid: people.sara.uuid, itemKey: id, kind: 'pref', droppedAt: null });
+    // Under each name the bot server may know her by: her id, and her email
+    expect(kept.map((row) => row.userUuid).sort()).toEqual([people.sara.uuid, `sara-${tag}@example.test`].sort());
+    for (const row of kept) expect(row).toMatchObject({ itemKey: id, kind: 'pref', droppedAt: null });
     expect(JSON.stringify(kept)).not.toContain('coffee');
   });
 
@@ -284,7 +315,7 @@ run('what a bot remembers about a person (real database)', () => {
     expect(answer.status).toBe(200);
     // ... and is told to drop it, by key
     const body = (await answer.json()) as { forgetItems?: { itemKey: string; userUuid: string }[] };
-    expect(body.forgetItems).toEqual([expect.objectContaining({ itemKey: id, userUuid: people.sara.uuid, at: expect.any(Number) })]);
+    expect(body.forgetItems).toEqual(expect.arrayContaining([expect.objectContaining({ itemKey: id, userUuid: people.sara.uuid, at: expect.any(Number) })]));
     await settle();
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain(COFFEE);
     expect(await valuesOf('sara', melodyId)).toEqual(expect.arrayContaining(['Sara', 'lo-fi']));
@@ -324,16 +355,39 @@ run('what a bot remembers about a person (real database)', () => {
     await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
     const asked = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
     const notice = ((await asked.json()) as { forgetItems?: { id: string; itemKey: string }[] }).forgetItems;
-    expect(notice).toHaveLength(1);
-    const reported = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { itemIds: [notice![0].id] }), params(melodyId));
-    expect(await reported.json()).toMatchObject({ itemsAcknowledged: 1 });
+    // One for each name the bot server may hold it under
+    expect(notice).toHaveLength(2);
+    const reported = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { itemIds: notice!.map((one) => one.id) }), params(melodyId));
+    expect(await reported.json()).toMatchObject({ itemsAcknowledged: 2 });
     const again = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
     expect(((await again.json()) as { forgetItems?: unknown }).forgetItems).toBeUndefined();
     // The Forget itself stays, so a stale copy still cannot bring it back
-    expect(await prisma.botMemoryItemForget.count({ where: { botId: melodyId, itemKey: id } })).toBe(1);
+    expect(await prisma.botMemoryItemForget.count({ where: { botId: melodyId, itemKey: id } })).toBe(2);
     await save(asBotServer(`/api/bots/memory/${melodyId}`, { memories: [{ userUuid: people.sara.uuid, isGuest: false, memories: memoryOf() }] }), params(melodyId));
     await settle();
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain(COFFEE);
+  });
+
+  it('a Forget said again after a notice went out is not marked dropped by that notice, and is handed out again', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
+    const asked = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    const notice = ((await asked.json()) as { forgetItems?: { id: string; at: number }[] }).forgetItems!;
+    expect(notice).toHaveLength(2);
+    // The person says it again, after the notice went out and before the bot server reports it dropped what it was told
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await forgetKeys(melodyId, (await prisma.botMemoryItemForget.findMany({ where: { botId: melodyId, itemKey: id }, select: { userUuid: true } })).map((one) => one.userUuid), new Map([[id, 'pref' as const]]));
+    const reported = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { items: notice.map((one) => ({ id: one.id, at: one.at })) }), params(melodyId));
+    expect(await reported.json()).toMatchObject({ itemsAcknowledged: 0 });
+    const again = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    const second = ((await again.json()) as { forgetItems?: { id: string; at: number }[] }).forgetItems!;
+    expect(second).toHaveLength(2);
+    expect(second.every((one) => one.at > notice[0].at)).toBe(true);
+    // Reported with the new time: dropped. And ids sent the old way (no time) still work
+    const done = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { items: second.map((one) => ({ id: one.id, at: one.at })) }), params(melodyId));
+    expect(await done.json()).toMatchObject({ itemsAcknowledged: 2 });
+    const none = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    expect(((await none.json()) as { forgetItems?: unknown }).forgetItems).toBeUndefined();
   });
 
   it('takes a "forget that" said in the chat by its key, even for a thing Orbit has not saved yet', async () => {

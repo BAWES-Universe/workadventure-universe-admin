@@ -144,6 +144,36 @@ describe('the Agent37 client', () => {
       expect(await api.activeTurn('https://abc.agent37.app', 'sess-1')).toBeNull();
     });
 
+    it('says the machine was not reached, never idle, when the answer about the session is not JSON', async () => {
+      const { api } = client([new Response('<html>bad gateway page</html>', { status: 200 }), new Response('{"active_response_id": "resp', { status: 200 }), new Response(' \n', { status: 200 }), new Response('', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      // Whitespace only, and nothing at all, are no answer either: never "idle"
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('says the machine was not reached, never idle, when the answer about the session is empty or only blanks', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('  \n ', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('says the machine was not reached, never idle, for an empty answer, `null`, a list or a bare value about the session', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('null', { status: 200 }), new Response('"idle"', { status: 200 }), new Response('7', { status: 200 }), new Response('[]', { status: 200 })]);
+      for (let ask = 0; ask < 5; ask++) await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('gives the saved-files archive a signal, so a machine that stops answering cannot hold a save for ever, and takes the caller’s own', async () => {
+      const { api, calls } = client([new Response('bytes', { status: 200 }), new Response('bytes', { status: 200 })]);
+      await api.archive('https://abc.agent37.app');
+      expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+      expect(calls[0].init.signal!.aborted).toBe(false);
+      const mine = new AbortController();
+      await api.archive('https://abc.agent37.app', mine.signal);
+      expect(calls[1].init.signal).toBe(mine.signal);
+    });
+
     it('sets what the machine may reach on the account address', async () => {
       const { api, calls } = client([json(200, { id: 'abc', status: 'running' })]);
       await api.setNetwork('abc', { allow: ['github.com'] });

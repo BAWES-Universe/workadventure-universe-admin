@@ -9,10 +9,19 @@ game (open, versions, code, share, restore, copy, delete).
 - **Owner:** the person who asked. The bot is its maker (id and the name it had). A guest owns nothing: what a guest asks
   for is kept for a day from its last change, and anyone in that chat may change it meanwhile.
 - **Who can open it** (`openScope`): `me` ("Just you": nobody but its owner, in its chat or by link, game #1994), `chat`
-  (people in the chat it was made in, the default) or `link` (anyone with the link). The owner always can. Someone who
+  (people in the chat it was made in, the default), `link` (anyone with the link) or `public` (anyone with the link, and
+  only the version its owner published, below). The owner always can. Someone who
   may not open it hears `404 not_found`, the same as for an artifact that does not exist. One exception: a "Just you"
   artifact asked for from the chat it was made in answers `404 kept_private`, because its card is in front of that
   person already ("Its owner keeps this one private."). A guest owns nothing, so a guest's artifact is never "Just you".
+- **Publish** (game #2115): the owner publishes a version (`publishedVersion`, with the `publishedTitle` it had and
+  `publishedAt`). From then on whoever opens it only by its link (the public page `/a/:id`, someone in the game who is not in
+  its chat, a bot reading a link someone pasted) sees that version under that title, and nothing else: not another version
+  by number, not the version list, the code or a copy of one, and nothing says a newer version exists. Its owner and the
+  people in the chat it was made in see the latest, as before. A `link` artifact that was never published keeps showing
+  the latest to everyone, as every link did before Publish; a `public` one that was never published is `404 not_found` to
+  everyone outside, and so is one whose published version is gone (never the latest in its place). Taking it off Public but
+  keeping the link keeps what was published. Only the owner publishes, from the game (there is no bot route).
 - **Who can ask for changes** (`changeScope`): `owner` (the default) or `openers` (everyone who can open it, in the chat
   it was made in). The owner may ask in any chat they have with a bot; nobody else asks from another chat.
 - **One bot's work is not another bot's context (game #1781, Orbit #790):** by id, a bot reaches the artifacts made in the
@@ -82,7 +91,7 @@ when the limit is 0); a wrong name or type answers `422` (`invalid_media_name`, 
 `media_not_found` for a dropped name that is not there, `too_many_media_files` when the save would leave more files than
 "Files in one artifact" allows, with both numbers in the message).
 
-**A change by another bot makes a copy.** When the calling bot is not the artifact's maker (`makerBotId`), the original is left exactly as it was (no new version, no new title) and the answer is a **new artifact**: made by the calling bot for the person who asked, in the chat the call came from, with `copiedFromId` set to the original, version 1 being the original's latest text and media with the change applied (summary "Copy of version N, changed" unless the bot sent one). It starts shared with its chat only, whatever the original's sharing; the bot's next change to it is an ordinary new version. The same edits, `baseVersion`, size and media rules apply (`baseVersion` is checked against the original); the original's version limit does not, since the copy starts at version 1. A bot sees that it happened by `artifact.id` in the answer differing from the id it sent.
+**A change by another bot makes a copy.** When the calling bot is not the artifact's maker (`makerBotId`), the original is left exactly as it was (no new version, no new title) and the answer is a **new artifact**: made by the calling bot for the person who asked, in the chat the call came from, with `copiedFromId` set to the original, version 1 being the original's latest text and media with the change applied (summary "Copy of version N, changed" unless the bot sent one). It starts shared with its chat only, except that the copy of a "Just you" artifact is "Just you" too (nothing widens by itself); the bot's next change to it is an ordinary new version. The same edits, `baseVersion`, size and media rules apply (`baseVersion` is checked against the original); the original's version limit does not, since the copy starts at version 1. A bot sees that it happened by `artifact.id` in the answer differing from the id it sent.
 
 Edits are applied in order, each on the result of the one before. An edit whose `old` is not in the file (`422
 edit_not_found`) or appears more than once without `all` (`422 edit_ambiguous`) changes nothing; the message names the
@@ -100,9 +109,13 @@ Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in 
 | `POST /api/artifacts/:id/versions` | `viewer` | `{ versions }`, newest first |
 | `POST /api/artifacts/:id/versions/:number` | `viewer` | `{ version, content }` (the Code view) |
 | `PUT /api/artifacts/:id/share` | `viewer`, `openScope?`, `changeScope?` | `{ artifact }`; owner only (`403` for others who can open it) |
+| `POST /api/artifacts/:id/publish` | `viewer`, `version?` | `{ artifact }` with `artifact.published { version, at }`; owner only, and only while it is `link` or `public` (`409 not_shared`) |
 | `POST /api/artifacts/:id/restore` | `viewer`, `number` | `{ artifact, version, you }`; owner only |
 | `POST /api/artifacts/:id/copy` | `viewer`, `version?` | `{ artifact, version, you }`; `403 sign_in_required` for a guest |
 | `DELETE /api/artifacts/:id` | `viewer` | `{ deleted: true }`; owner only. Removes every version and file; a copy keeps its own files |
+
+`artifact.published` is `{ version, at }` once the owner published (and `available`, in the answer to `open` for its owner: false when that
+version is gone), else null. For someone who sees only what was published, `artifact.version` and `artifact.title` are the published ones.
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
 `version.url` is where the file is served from, for the locked box. For a "Just you" artifact it is `null` everywhere

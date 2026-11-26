@@ -69,6 +69,9 @@ export async function GET(request: NextRequest) {
       where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
         { serverUrl: { contains: search, mode: 'insensitive' } },
+        // A grant on a person's connection shows the connection's name and link (effectiveServer), so those are what search must find too
+        { connection: { is: { name: { contains: search, mode: 'insensitive' } } } },
+        { connection: { is: { serverUrl: { contains: search, mode: 'insensitive' } } } },
         {
           bot: {
             name: { contains: search, mode: 'insensitive' },

@@ -8,7 +8,7 @@ import { transformVisitingBrickToServerFormat } from '@/lib/bot-config-helpers';
 
 export const runtime = 'nodejs';
 
-const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), people: z.array(z.string().max(255)).max(500), enteredAt: z.number().int().positive().optional(), clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional() }).strict();
+const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), people: z.array(z.string().max(255)).max(500), enteredAt: z.number().int().positive().optional(), clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(), withLate: z.boolean().optional() }).strict();
 
 /**
  * POST /api/brick-visits/room  { roomUrl, people: [WorkAdventure ids], enteredAt?: ms when their game saw them come in, clientId?: which page load of the game says so }
@@ -20,6 +20,13 @@ const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), peopl
  * that is late (`enteredAt` is not newer than the visit's last move, both told by the same `clientId`) moves nothing and
  * answers 409 when it has nothing else to say.
  *
+ * A sync that says `withLate: true` is one that can read who was late: it is always answered 200 with
+ * { bricks: [the Bricks above], late: [WorkAdventure ids of the people whose sighting was late] }. A person named in `late` was
+ * seen in another room more recently than this sync says, so their Brick is not in `bricks` here and the bot server must leave
+ * the Brick it has standing in their newer room alone, never read the omission as "no Brick" (a sync with some people standing and
+ * some late would otherwise take it down). A sync that does not say it keeps the plain list, and the 409 for one that is late
+ * and has nothing else, as before.
+ *
  * Auth: service token only.
  */
 export async function POST(request: NextRequest) {
@@ -27,16 +34,15 @@ export async function POST(request: NextRequest) {
     requireServiceToken(request);
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const { roomUrl, people, enteredAt, clientId } = parsed.data;
+    const { roomUrl, people, enteredAt, clientId, withLate } = parsed.data;
     const { visiting, late } = await bricksForRoom(roomUrl, people, new Date(), enteredAt === undefined ? undefined : new Date(enteredAt), clientId);
     // A late sync, from a room its person has already left: nothing changed, and the bot server must not read it as "no Brick"
     // (it would take down the one standing in their new room), so it is told the sync is stale and leaves things as they are
-    if (visiting.length === 0 && late.length > 0) return NextResponse.json({ error: 'Late: the person is in another room now' }, { status: 409 });
+    if (!withLate && visiting.length === 0 && late.length > 0) return NextResponse.json({ error: 'Late: the person is in another room now' }, { status: 409 });
     const defaults = visiting.length > 0 ? await prisma.defaultBrick.findMany({ where: { botId: { in: visiting.map((row) => row.bot.id) } }, select: { botId: true } }) : [];
     const defaultIds = new Set(defaults.map((row) => row.botId));
-    return NextResponse.json(
-      visiting.map((row) => transformVisitingBrickToServerFormat(row.bot, defaultIds.has(row.bot.id), { roomUrl }, { uuid: row.ownerUuid, name: row.ownerName })),
-    );
+    const bricks = visiting.map((row) => transformVisitingBrickToServerFormat(row.bot, defaultIds.has(row.bot.id), { roomUrl }, { uuid: row.ownerUuid, name: row.ownerName }));
+    return NextResponse.json(withLate ? { bricks, late } : bricks);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

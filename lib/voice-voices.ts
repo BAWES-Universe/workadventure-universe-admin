@@ -7,8 +7,7 @@ import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { accountRegion, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
 import { signAwsGet } from '@/lib/aws-sign';
-import { isBrick } from '@/lib/brick';
-import { NO_UNIVERSE } from '@/lib/bot-voice';
+import { NO_UNIVERSE, homeOf } from '@/lib/bot-voice';
 import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
@@ -423,14 +422,8 @@ interface Source {
  * whose keys a bot speaks on, lib/bot-voice.ts). Anything else reads as "not found", so a key's existence is never confirmed.
  */
 async function sourceFor(botId: string, source: string, part: VoicePart = 'speech'): Promise<Source> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, ownerId: true, roomId: true, deletedAt: true, room: { select: { world: { select: { universeId: true } } } } } });
-  if (!bot) throw new BotSettingsError(404, 'Bot not found');
-  // A Brick has no room, so no universe lends it a voice key: it picks voices from its owner's own keys, wherever they are lent
-  // (or lent at all), as it speaks on them
-  const brick = isBrick(bot);
-  if (brick ? bot.deletedAt : !bot.room) throw new BotSettingsError(404, 'Bot not found');
-  const universeId = bot.room?.world.universeId ?? null;
-  const keysOf = brick ? bot.ownerId : bot.createdById;
+  // Whose keys a bot speaks on, and where they are lent, is `homeOf`'s rule (a Brick: its owner's own keys, lent nowhere; a room bot: its maker's, lent to its universe)
+  const { createdById: keysOf, universeId } = await homeOf(botId);
   let provider: (VoiceProvider & { lends?: { models: unknown }[] }) | null;
   if (source === UNIVERSE_AI_SOURCE) {
     provider = await prisma.voiceProvider.findFirst({ where: { ownerId: null, enabled: true, speech: true, defaultSpeech: true } });

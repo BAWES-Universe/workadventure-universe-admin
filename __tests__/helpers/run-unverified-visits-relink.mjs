@@ -16,7 +16,7 @@ const unverified = (claimed) => `unverified-${createHash('sha256').update(claime
 
 const db = new PGlite();
 for (const name of fs.readdirSync(MIGRATIONS).filter((name) => /^\d/.test(name)).sort()) {
-  await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8'));
+  await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8').replace(/\bCONCURRENTLY\s+/g, '') /* PGlite has one session: CONCURRENTLY cannot run there */);
 }
 
 await db.exec(`

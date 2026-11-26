@@ -117,7 +117,7 @@ export function artifactRoute<B extends z.ZodType>(
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       if (error instanceof ArtifactError) {
-        return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
+        return NextResponse.json({ error: error.code, message: error.message, ...(error.extra ?? {}) }, { status: error.status });
       }
       // Never the content: only where it broke
       Sentry.captureException(error, { tags: { area: 'artifacts', route: name } });
@@ -202,6 +202,9 @@ export const openSchema = z.object({ viewer: viewerSchema, version: versionNumbe
 export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();
 
 export const shareSchema = z.object({ viewer: viewerSchema, openScope: z.string().optional(), changeScope: z.string().optional() }).strict();
+
+/** `version`: the one the owner was looking at when they pressed Publish; the latest when left out. */
+export const publishSchema = z.object({ viewer: viewerSchema, version: versionNumber.nullish() }).strict();
 
 export const deleteSchema = z.object({ viewer: viewerSchema }).strict();
 

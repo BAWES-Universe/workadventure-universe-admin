@@ -33,7 +33,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  *   snooze: a reminder or briefing comes back after the Limits setting "Snooze" (starting value 1 hour); a one-off that was just delivered is switched on again for that time
  *   change: { words?, condition?, outcome?, cadence?, timeZone?, waitingFor?, statusLine?, steps? }
  * Every action but run raises the item's revision, so a run that already started is stopped at its next step. Asking twice gives
- * the item as it is. Answers { item }.
+ * the item as it is, except `snooze`, which has two cases. A one-off that is not due yet moves from its due time, so asking again puts it back by
+ * another delay: a caller that retries must not retry a snooze that was answered. Anything else (a repeating reminder or briefing, or a one-off that was just
+ * delivered) comes back the delay after the tap, whatever it was due before: at 10:00 with a 60-minute delay, a repeating one due at 12:00 is due at 11:00
+ * (earlier), and asking again later moves it to the delay after that tap, not by another delay. Answers { item }.
  */
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string; itemId: string }> }) {
   try {

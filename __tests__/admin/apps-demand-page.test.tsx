@@ -39,7 +39,7 @@ const report = (over: Partial<DemandReport> = {}): DemandReport => ({
   from: '2026-10-17',
   to: '2026-11-15',
   days: 30,
-  totals: { uses: 14017, people: 402, costMicros: 170_950_000, asks: 156 },
+  totals: { uses: 14017, people: 402, costMicros: 170_950_000, asks: 156, cost: { state: 'measured', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 0 } },
   apps: [
     app(),
     app({ key: 'gmail', name: 'Gmail', kind: 'own', uses: 5940, people: 188, costMicros: 1_780_000, ended: 5940, failed: 24, allFailedRefunded: false, refundedMicros: null, route: 'universe', routeVersion: 2, own: { ready: true, why: [], passedChecksOn: '2026-11-12T00:00:00.000Z', topPriceMicros: 100 } }),
@@ -67,6 +67,8 @@ describe('Apps: use and demand', () => {
     expect(await screen.findByText('14,017')).toBeInTheDocument();
     expect(screen.getByText('402')).toBeInTheDocument();
     expect(screen.getByText('$170.95')).toBeInTheDocument();
+    expect(screen.getByText('cost to us')).toBeInTheDocument();
+    expect(screen.queryByTestId('apps-cost-note')).not.toBeInTheDocument();
     expect(screen.getByText('156')).toBeInTheDocument();
 
     const video = screen.getByTestId('apps-row-video');
@@ -87,6 +89,31 @@ describe('Apps: use and demand', () => {
     expect(screen.getByText(/3 more App names were asked for/)).toBeInTheDocument();
     // Only the name is kept, and the page says so
     expect(screen.getByText(/Only the App’s name is kept, never what people wrote/)).toBeInTheDocument();
+  });
+
+  it('says the headline cost is a part, never the whole, while some uses have no price or some runs are not settled yet; a measured total says nothing extra', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'incomplete', unpriced: 2, estimated: 1, notCounted: 3, mismatched: 0 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us so far')).toBeInTheDocument();
+    expect(screen.queryByText('cost to us')).not.toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('only part of it');
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('2 uses have no price yet');
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('3 runs are not in this total yet');
+  });
+
+  it('a total that holds a run at a wrong figure says it is being corrected, and never calls it a part', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'correcting', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 2 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us (being corrected)')).toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('2 runs are counted at a figure that differs from the provider’s own, and will be corrected');
+    expect(screen.getByTestId('apps-cost-note')).not.toHaveTextContent('only part of it');
+  });
+
+  it('a total priced partly with estimates says so', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'estimated', unpriced: 0, estimated: 4, notCounted: 0, mismatched: 0 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us (partly estimated)')).toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('4 uses are priced with our estimate');
   });
 
   it('uses only the word Apps: never tool, MCP or connector', async () => {
@@ -202,6 +229,61 @@ describe('Apps: use and demand', () => {
     expect(within(screen.getByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
   });
 
+  it('does not say the page is reloaded when reading it again failed', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    let reads = 0;
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      // The GitHub App read is not a read of the page
+      if (url === '/api/admin/github-app') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+      reads += 1;
+      return reads === 1 ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }) : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    const said = await within(await screen.findByTestId('apps-sheet')).findByTestId('apps-sheet-error');
+    expect(said).toHaveTextContent('could not be reloaded');
+    expect(said).not.toHaveTextContent('It is reloaded');
+    // It says what to do: the sheet cannot reload the Apps itself, so it is told to try loading them again, then open the App again
+    expect(said).toHaveTextContent('try loading the Apps again, then open the App again');
+  });
+
+  it('moves between the two routes with the arrow keys, Tab stops only on the picked one, and the one that is off is skipped', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    answer(ready);
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    const composio = within(sheet).getByTestId('apps-route-composio');
+    const universe = within(sheet).getByTestId('apps-route-universe');
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([0, -1]);
+    fireEvent.keyDown(composio, { key: 'ArrowDown' });
+    expect(universe).toHaveAttribute('aria-checked', 'true');
+    expect(universe).toHaveFocus();
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([-1, 0]);
+    fireEvent.keyDown(universe, { key: 'ArrowUp' });
+    expect(composio).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows no figures of the days that were selected before while the new days are read', async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('days=7') ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report()) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-range-7'));
+    expect(screen.queryByText('14,017')).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+    await act(async () => finish({ ok: true, status: 200, json: () => Promise.resolve(report({ days: 7, totals: { uses: 99, people: 5, costMicros: 1_000_000, asks: 1, cost: { state: 'measured', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 0 } } })) }));
+    expect(await screen.findByText('99')).toBeInTheDocument();
+  });
+
   it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {
     answer(403);
     const { unmount } = render(<AppsDemandPage />);
@@ -218,5 +300,95 @@ describe('Apps: use and demand', () => {
     await screen.findByText('14,017');
     fireEvent.click(screen.getByTestId('apps-range-7'));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+  });
+});
+
+/** Universe's own GitHub App on the Apps page (game #2041): the one place a super admin starts it, with no typed address. */
+describe('GitHub row: Universe’s GitHub App', () => {
+  const github = (over: Partial<AppRow> = {}) => app({ key: 'github', name: 'GitHub', kind: 'own', ...over });
+  const serve = (githubAnswer: { made: boolean; slug?: string; url?: string } | number) =>
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/admin/github-app') {
+        return typeof githubAnswer === 'number' ? Promise.resolve({ ok: false, status: githubAnswer, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(githubAnswer) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report({ apps: [app(), github()] })) });
+    });
+
+  it('before the App is made: the row says Composio and points at the setup, and the sheet has the button to the setup page', async () => {
+    serve({ made: false });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    expect(screen.getByTestId('apps-github-hint')).toHaveTextContent('Tap to set up Universe’s GitHub App');
+    expect(screen.getByTestId('apps-github-hint')).not.toHaveTextContent('own');
+    // Only GitHub gets it
+    expect(screen.getByTestId('apps-row-video')).not.toHaveTextContent('GitHub App');
+
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    const button = within(sheet).getByTestId('apps-github-setup');
+    expect(button).toHaveTextContent('Set up Universe’s GitHub App');
+    // A link Orbit follows itself, not an address someone types
+    expect(button.getAttribute('href')).toBe('/admin/github-app');
+    expect(within(sheet).getByTestId('apps-github-text')).toHaveTextContent('keep running on Composio');
+    expect(within(sheet).queryByTestId('apps-github-status')).not.toBeInTheDocument();
+    // How GitHub runs through Composio is untouched: the Runs on choice is still there, in its old words
+    expect(within(sheet).getByTestId('apps-route-composio')).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-route-universe')).toHaveTextContent('We have no version of our own for this App yet.');
+    expect(within(sheet).queryByTestId('apps-github-runs-on-note')).not.toBeInTheDocument();
+  });
+
+  it('once the App is made: the row STILL says Runs on Composio (people still use it) with the line about new connections, and the sheet shows the status, where it lives, no setup button and new words under Runs on', async () => {
+    serve({ made: true, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    await waitFor(() => expect(screen.getByTestId('apps-github-hint')).toHaveTextContent('New connections use Universe’s GitHub App'));
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    // Other Apps are not touched
+    expect(screen.getByTestId('apps-runs-on-video')).toHaveTextContent('Runs on Composio');
+    expect(screen.getByTestId('apps-row-video')).not.toHaveTextContent('New connections');
+
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-github-status')).toHaveTextContent('Set up');
+    expect(within(sheet).queryByTestId('apps-github-setup')).not.toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-github-open').getAttribute('href')).toBe('https://github.com/apps/bawes-universe');
+    expect(within(sheet).getByTestId('apps-github-open')).toHaveTextContent('bawes-universe');
+    expect(within(sheet).getByTestId('apps-github-runs-on-note')).toHaveTextContent('Only for GitHub connections made through Composio before.');
+    expect(within(sheet).getByTestId('apps-route-universe')).toHaveTextContent('New connections use Universe’s GitHub App above.');
+    expect(within(sheet).getByTestId('apps-route-universe')).not.toHaveTextContent('no version of our own');
+    // The choice itself works as before: still Composio, still not pickable
+    expect(within(sheet).getByTestId('apps-route-composio')).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-route-universe')).toBeDisabled();
+  });
+
+  it('made but its address not known (another server just made it): says it is set up and shows no link', async () => {
+    serve({ made: true });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    await waitFor(() => expect(within(sheet).getByTestId('apps-github-status')).toBeInTheDocument());
+    expect(within(sheet).queryByTestId('apps-github-open')).not.toBeInTheDocument();
+    expect(within(sheet).queryByTestId('apps-github-setup')).not.toBeInTheDocument();
+  });
+
+  it('when it cannot be read, the setup is still offered (the setup page says when the App is already made), and the page works as before', async () => {
+    serve(500);
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-github-setup')).toBeInTheDocument();
+  });
+
+  it('no other App’s sheet has the GitHub panel', async () => {
+    serve({ made: false });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).queryByTestId('apps-github-panel')).not.toBeInTheDocument();
   });
 });

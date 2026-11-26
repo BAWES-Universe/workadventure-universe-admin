@@ -40,11 +40,16 @@ export async function grantKeyAppToBricks(ownerId: string, connection: { id: str
   try {
     const bricks = await prisma.bot.findMany({ where: { ownerId, roomId: null, deletedAt: null }, select: { id: true }, orderBy: { createdAt: 'asc' } });
     for (const brick of bricks) {
-      const had = await prisma.botMcpServer.findFirst({ where: { botId: brick.id, connectionId: connection.id }, select: { id: true } });
-      if (had) continue;
-      const done = await prisma.$transaction((tx) => grantOne(tx, ownerId, brick.id, connection));
-      if (done) granted += 1;
-      else full += 1;
+      // One Brick that could not be given the app (a dropped connection, a deadlock Postgres broke) never keeps the others from it
+      try {
+        const had = await prisma.botMcpServer.findFirst({ where: { botId: brick.id, connectionId: connection.id }, select: { id: true } });
+        if (had) continue;
+        const done = await prisma.$transaction((tx) => grantOne(tx, ownerId, brick.id, connection));
+        if (done) granted += 1;
+        else full += 1;
+      } catch (error) {
+        console.error('[KeyApps] Could not give a Brick the app:', error instanceof Error ? error.message : 'unknown');
+      }
     }
   } catch (error) {
     console.error('[KeyApps] Could not give every Brick the app:', error instanceof Error ? error.message : 'unknown');
@@ -55,9 +60,10 @@ export async function grantKeyAppToBricks(ownerId: string, connection: { id: str
 /** A Brick was just made: it gets every key app its owner has. Inside the caller's transaction, so a Brick never exists half-granted. */
 export async function grantKeyAppsToNewBrick(tx: Db, ownerId: string, botId: string): Promise<void> {
   const apps = await tx.appConnection.findMany({ where: { ownerId, kind: 'direct' }, select: { id: true, name: true }, orderBy: { createdAt: 'asc' } });
+  const most = await maxAppsPerBot(tx);
   for (const app of apps) {
     // A brand-new Brick has nothing else yet, so the slot count needs no lock; the limit is still held
-    if ((await tx.botMcpServer.count({ where: { botId } })) >= (await maxAppsPerBot())) break;
+    if ((await tx.botMcpServer.count({ where: { botId } })) >= most) break;
     await tx.botMcpServer.create({ data: { botId, connectionId: app.id, name: app.name, serverUrl: '', authType: 'none', connectedById: ownerId } });
   }
 }

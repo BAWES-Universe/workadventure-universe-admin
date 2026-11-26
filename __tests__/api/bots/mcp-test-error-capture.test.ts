@@ -33,6 +33,12 @@ jest.mock('@/lib/bot-permissions', () => ({
   canManageBotMcpServers: jest.fn().mockResolvedValue(true),
 }));
 
+// The request goes through the pretend fetch (the pinned connection has its own test)
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  ...jest.requireActual('@/lib/mcp/outbound-guard'),
+  pinnedFetch: jest.fn(async (url: string, init?: RequestInit) => global.fetch(url, init)),
+}));
+
 jest.mock('@/lib/auth-session', () => ({
   getSessionUser: jest.fn(),
 }));
@@ -44,6 +50,13 @@ jest.mock('@/lib/super-admin', () => ({
 jest.mock('@/lib/encryption', () => ({
   encryptApiKey: (value: string) => `encrypted:${value}`,
   decryptApiKey: (value: string) => value.replace('encrypted:', ''),
+}));
+
+// The request itself goes through the pretend fetch (the pinned connection has its own test); the address check is the allow-list's own
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  ...jest.requireActual('@/lib/mcp/outbound-guard'),
+  isAllowedServerIp: jest.fn(async () => ({ allowed: true })),
+  pinnedFetch: jest.fn(async (url: string, init?: RequestInit) => global.fetch(url, init)),
 }));
 
 jest.mock('dns/promises', () => ({

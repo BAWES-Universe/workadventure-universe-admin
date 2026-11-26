@@ -89,6 +89,9 @@ export class CopyOutcomeUnknown extends Error {
 
 /** The longest the copy into place may take (a copy is seconds; this is the bound that keeps a write's whole life under its limit). */
 export const COPY_REQUEST_MAX_MS = 5 * 60 * 1000;
+/** The longest a delete may take: a bucket that stops answering never holds a save (or the report of its outcome) for ever; the delete is given up on and, where it matters, tried again by the caller. */
+export const DELETE_REQUEST_MAX_MS = 60 * 1000;
+const bounded = () => ({ abortSignal: AbortSignal.timeout(DELETE_REQUEST_MAX_MS) });
 
 /**
  * Writes a folder's tar.gz (as Agent37 streams it) into the bucket, encrypted, under `finalKey`, and says its size and SHA-256. The stream is read to its
@@ -136,13 +139,13 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
   if (failed) {
     await upload.abort().catch(() => undefined);
     // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }), bounded()).then(leftNothing, () => undefined);
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The write may have been settled meanwhile (a purge gives a write that ran too long up and calls the files gone): then nothing is published, and what
   // was uploaded is taken out again. Asked right before the copy goes in place, so a save that was slow cannot publish after the purge was done with it.
   if (mayPublish && !(await mayPublish().catch(() => false))) {
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }), bounded()).then(leftNothing, () => undefined);
     throw new Error('The copy was not published: its save is no longer allowed to');
   }
   // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
@@ -152,10 +155,14 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
     await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }), { abortSignal: AbortSignal.timeout(COPY_REQUEST_MAX_MS) });
   } catch (error) {
     // Given up on by the signal: the request may still finish at the bucket, so the caller is told the outcome is not known (not that it failed)
+    // The staging object goes whether the copy worked or threw: a copy that fails is not a saved copy, and nothing else would ever remove it
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }), bounded()).catch(() => undefined);
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw new CopyOutcomeUnknown();
+    // The save's row is NOT let go of here: a transport error (a reset connection) after the request went out may still let the copy land, so the row stays for the
+    // purge to settle once it is stale, and a purge cannot call the files gone while a late copy is still possible
     throw error;
   }
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }), bounded()).catch(() => undefined);
   return { bytes, sha256: hash.digest('hex') };
 }
 
@@ -182,7 +189,7 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
     // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
     if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
       const { s3, bucket } = artifactBucket();
-      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }), bounded());
       settled = true;
       throw new Error('The Brick was deleted while its files were being saved');
     }
@@ -320,10 +327,10 @@ export async function deleteSavedCopy(botId: string): Promise<void> {
   do {
     const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }));
     for (const object of page.Contents ?? []) {
-      if (object.Key) await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: object.Key }));
+      if (object.Key) await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: object.Key }), bounded());
     }
     token = page.IsTruncated ? page.NextContinuationToken : undefined;
   } while (token);
   // The saved copy itself, by its name, in case the list was not complete (a bucket that lists late): deleting a missing object is not an error
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }), bounded());
 }

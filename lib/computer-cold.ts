@@ -6,15 +6,16 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { COLD_RUN_MAX_MS, costOfSeconds } from '@/lib/computer-values';
+import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
   archiveById,
   archiveBytes,
   deleteAllArchives,
   removeStrayCopies,
+  STORAGE_DELETION_ALERT_MS,
+  storageDeletionsWaiting,
   downloadUrl,
-  markFailed,
   markVerified,
   mintDownloadToken,
   pruneArchives,
@@ -642,7 +643,8 @@ async function idleCandidates(now: Date, days: number, take: number, skip: strin
   for (const row of rows) {
     if (row.packTriedAt && now.getTime() - row.packTriedAt.getTime() < backoffMs(row.packFailures)) continue;
     // Anything queued or running, or any job made or ended inside the idle days, means the Brick was used
-    if ((await prisma.computerJob.count({ where: { botId: row.botId, OR: [{ status: { in: ['queued', 'running', 'waiting'] } }, { createdAt: { gt: before } }, { endedAt: { gt: before } }] } })) > 0) continue;
+    // A paused job is not use: it holds nothing and may wait for weeks, and when it is resumed it goes through the line, which brings the computer back
+    if ((await prisma.computerJob.count({ where: { botId: row.botId, OR: [{ status: { in: ['running', 'waiting'] } }, { status: 'queued', ...NOT_PAUSED }, { createdAt: { gt: before } }, { endedAt: { gt: before } }] } })) > 0) continue;
     idle.push(row.botId);
     if (idle.length >= take) break;
   }
@@ -707,6 +709,9 @@ export async function restoreDrill(provider: ComputerProvider | null, now: Date 
 
 let lastScratchSweep = 0;
 let lastStraySweep = 0;
+let lastDeletionAlert = 0;
+/** Said again at most this often: one message per few hours while a deletion stays blocked, not one per sweep. */
+const DELETION_ALERT_EVERY_MS = 6 * 60 * MIN;
 let stepRunning = false;
 
 /**
@@ -741,6 +746,16 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     if (now.getTime() - lastStraySweep > 30 * MIN) {
       lastStraySweep = now.getTime();
       await removeStrayCopies(now).catch((error) => console.error('[Computer] Could not look for copies no row points at:', words(error)));
+    }
+    // A deletion that has waited more than a day is not a slow bucket: it is said, with how many and since when, and again every few hours while it lasts
+    const waiting = await storageDeletionsWaiting(now).catch(() => null);
+    if (waiting && waiting.ageMs !== null && waiting.ageMs > STORAGE_DELETION_ALERT_MS && now.getTime() - lastDeletionAlert > DELETION_ALERT_EVERY_MS) {
+      lastDeletionAlert = now.getTime();
+      Sentry.captureMessage('A deletion of stored computer copies has waited more than a day: the bucket may have stopped accepting deletes', {
+        level: 'warning',
+        tags: { area: 'computer', step: 'storage_deletion_waiting' },
+        extra: { waiting: waiting.count, since: waiting.oldestSince?.toISOString(), strayCopiesSince: waiting.strayCopiesSince?.toISOString() ?? null },
+      });
     }
     if (windingDown) return out;
     const { coldStorageDays } = await getBrickLimits();

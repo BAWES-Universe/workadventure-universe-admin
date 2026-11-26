@@ -18,6 +18,8 @@ jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/speech-cap', () => ({ checkSpeechCap: jest.fn() }));
 // What admitted notes and replies hold is read from the database (the real figures are in __tests__/api/voice-notes-db.test.ts)
 jest.mock('@/lib/speech-reserved', () => ({ ...jest.requireActual('@/lib/speech-reserved'), speechReserved: jest.fn() }));
+// A super admin's reply exception for a person: the usual number unless a test says otherwise
+jest.mock('@/lib/credit-replies', () => ({ repliesPerWindowFor: jest.fn(async (_personId: string, base: number) => base) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
@@ -49,6 +51,8 @@ const db = prisma as unknown as {
 const HOUR_MS = 60 * 60 * 1000;
 const NOW = new Date('2026-11-02T10:00:00Z');
 const STARTED = new Date('2026-11-02T08:00:00Z');
+import { repliesPerWindowFor } from '@/lib/credit-replies';
+const exceptionFor = repliesPerWindowFor as unknown as jest.Mock;
 const SARA = { userId: 'wa-sara', isGuest: false, turnId: 'bot-1-player-4-aaa' };
 const GUEST = { userId: 'wa-guest', isGuest: true, turnId: 'bot-1-player-5-bbb' };
 
@@ -72,6 +76,22 @@ beforeEach(() => {
   db.$executeRaw.mockReset().mockResolvedValue(0);
   // The transaction runs its steps against the same mocks, in order
   db.$transaction.mockReset().mockImplementation(async (steps: (tx: unknown) => Promise<unknown>) => steps(db));
+});
+
+describe('a super admin’s reply exception', () => {
+  afterEach(() => exceptionFor.mockImplementation(async (_personId: string, base: number) => base));
+
+  it('gives no spoken place to a person whose exception gives no replies, and counts spoken places from the number it sets', async () => {
+    exceptionFor.mockResolvedValue(0);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z' });
+    expect(await voiceRepliesLeft('bot-1', SARA, NOW)).toMatchObject({ left: 0 });
+    // 10 replies a window keeps 2 for text and leaves 8 to hear
+    exceptionFor.mockResolvedValue(10);
+    db.voiceReplyUse.count.mockResolvedValue(7);
+    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'ten' }, NOW)).toMatchObject({ allowed: true, left: 0 });
+    db.voiceReplyUse.count.mockResolvedValue(8);
+    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'ten-2' }, NOW)).toMatchObject({ allowed: false });
+  });
 });
 
 describe('the numbers', () => {
@@ -419,6 +439,16 @@ describe('with extra usage running (game #1999)', () => {
     expect(await checkVoiceAllowance('bot-1', again('c'), NOW)).toMatchObject({ allowed: false });
   });
 
+  it('works the reserve and the spoken places out from the window the person really has: a 1-reply exception with a 2x grant leaves one place, as the text limit does', async () => {
+    exceptionFor.mockResolvedValue(1);
+    grant({ multiplier: 2 });
+    // The window is 2 replies; 1 is kept for text and 1 can be heard (the usual window's own 1 reply and its 1 kept, doubled, would leave none)
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 0 });
+    spokenBefore(1);
+    expect(await checkVoiceAllowance('bot-1', again('b'), NOW)).toMatchObject({ allowed: false });
+    exceptionFor.mockImplementation(async (_personId: string, base: number) => base);
+  });
+
   it('raises the text side with a multiple too: typed replies past the usual 30 no longer refuse a spoken one', async () => {
     grant({ multiplier: 2 });
     // 31 typed is past the usual window (30), so before this fix byText went below zero and voice was refused outright
@@ -461,7 +491,8 @@ describe('with extra usage running (game #1999)', () => {
     db.voiceReplyUse.count.mockResolvedValue(10);
     expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 40, resetsAt: '2026-11-02T13:00:00.000Z' });
     grant({ noLimit: true });
-    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: '2026-11-02T13:00:00.000Z' });
+    // No limit says so: null alone is a person nobody could name
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: '2026-11-02T13:00:00.000Z', unlimited: true });
   });
 
   it('applies it before a window runs too: 2x gives 50, no limit gives no count', async () => {
@@ -469,13 +500,15 @@ describe('with extra usage running (game #1999)', () => {
     grant({ multiplier: 2 });
     expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 50, resetsAt: null });
     grant({ noLimit: true });
-    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: null });
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: null, unlimited: true });
+    // A person nobody could name has no count and is not unlimited
+    expect(await voiceRepliesLeft('bot-1', {}, NOW)).toBeNull();
   });
 
   it('looks up a signed-in person by their account and the moment now, and a guest not at all: a guest never has extra usage', async () => {
     grant({ noLimit: true });
     await checkVoiceAllowance('bot-1', SARA, NOW);
-    expect(db.meterGrant.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { personId: 'u-sara', startsAt: { lte: NOW }, endsAt: { gt: NOW } } }));
+    expect(db.meterGrant.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { personId: 'u-sara', cancelledAt: null, startsAt: { lte: NOW }, endsAt: { gt: NOW } } }));
     db.meterGrant.findMany.mockClear();
     spokenBefore(3);
     expect(await checkVoiceAllowance('bot-1', GUEST, NOW)).toMatchObject({ allowed: false });

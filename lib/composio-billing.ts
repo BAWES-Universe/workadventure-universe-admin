@@ -238,7 +238,8 @@ export function billFrom(events: Iterable<ScannedEvent>, settings: ComposioBilli
     out.recordedMicros += event.costMicros ?? 0;
     if (event.executions === 0 && event.sandboxRuns === 0) out.freeLookups += 1;
     const managed = event.tier !== 'own';
-    const free = Math.min(event.executions, totalFree, managed ? managedFree : Number.POSITIVE_INFINITY);
+    // Google Maps is charged from the first call and sits outside the free calls (see lib/composio-rates.ts): it takes none of them
+    const free = event.tier === 'managed_maps' ? 0 : Math.min(event.executions, totalFree, managed ? managedFree : Number.POSITIVE_INFINITY);
     totalFree -= free;
     if (managed) managedFree -= free;
     const paid = event.executions - free;

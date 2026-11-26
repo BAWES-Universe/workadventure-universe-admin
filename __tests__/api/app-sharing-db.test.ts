@@ -15,6 +15,7 @@ jest.mock('@/lib/mcp/outbound-guard', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { waitForLockWait } from '../helpers/wait-for-lock';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
 import { managerCandidates } from '@/lib/app-sharing';
@@ -30,7 +31,7 @@ import { GET as teamGet, DELETE as teamDisconnect } from '@/app/api/me/team-apps
 import { POST as addManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/route';
 import { DELETE as removeManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/[personId]/route';
 import { GET as available, POST as letBotUse } from '@/app/api/bots/[id]/apps/available/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as listServers, POST as addServer } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as botSignInStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
@@ -71,7 +72,7 @@ const letGuide = async (userId: string, connectionId: string, botId = guide) => 
   return letBotUse(request(`/api/bots/${botId}/apps/available`, { method: 'POST', body: { connectionId } }), params({ id: botId }));
 };
 const check = async (botId: string, serverId: string, body: Record<string, unknown> = {}) => {
-  const response = await useCheck(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
+  const response = await checkUse(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
   return { status: response.status, body: await response.json() };
 };
 async function lentAndLet(extra: Record<string, unknown> = {}) {
@@ -322,6 +323,22 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
     });
 
+    it('a person who no longer has Manage bots in a universe cannot change the limits of their lend there, and can still take it back', async () => {
+      const app = await keyApp(nora);
+      as(nora);
+      expect((await lendTo(app.id, { universeId: universeA, usesPerDay: 5 })).status).toBe(201);
+      await prisma.worldMember.delete({ where: { userId_worldId: { userId: nora, worldId: worldA } } });
+      try {
+        const widen = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { usesPerDay: 1_000 } }), params({ connectionId: app.id, universeId: universeA }));
+        expect(widen.status).toBe(403);
+        expect((await prisma.appLend.findFirstOrThrow({ where: { connectionId: app.id } })).usesPerDay).toBe(5);
+        expect((await takeBackRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'DELETE' }), params({ connectionId: app.id, universeId: universeA }))).status).toBe(204);
+        expect(await prisma.appLend.count({ where: { connectionId: app.id } })).toBe(0);
+      } finally {
+        await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
+      }
+    });
+
     it('stops a bot at the Limits setting, five unless a super admin changes it, the same for apps added by hand and lent ones', async () => {
       const { app } = await lentAndLet();
       const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
@@ -408,7 +425,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         // What taking it back holds first: the lend, for update. A check that starts now has to wait for it.
         await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeId} FOR UPDATE`;
         waiting = recordUse({ connectionId: app.id, universeId, botId: guide, callId: 'late', limit: 5, serverId, lend: true });
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The check is seen waiting for the lend this transaction holds, then the lend is taken back
+        await waitForLockWait(prisma, '%app_lends%');
         await tx.botMcpServer.delete({ where: { id: serverId } });
         await tx.appLend.deleteMany({ where: { connectionId: app.id, universeId } });
       });
@@ -416,6 +434,21 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
       // And a check made afterwards finds nothing to use at all
       expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'gone' });
+    });
+
+    it('finds the grant switched off when a check was waiting for it, and records and lets through nothing', async () => {
+      const { app, serverId } = await lentAndLet({ usesPerDay: 5 });
+      let waiting: Promise<string> | null = null;
+      await prisma.$transaction(async (tx) => {
+        // What switching it off holds first: the grant, for update. A check that starts now has to wait for it.
+        await tx.$queryRaw`SELECT "id" FROM "bot_mcp_servers" WHERE "id" = ${serverId} FOR UPDATE`;
+        waiting = recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'switched', limit: 5, serverId, lend: true });
+        // The check is seen waiting for the grant this transaction holds, then the grant is switched off
+        await waitForLockWait(prisma, '%bot_mcp_servers%');
+        await tx.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
+      });
+      expect(await waiting).toBe('off');
+      expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
     });
 
     it('never deadlocks when an app is disconnected at the very moment it is used', async () => {

@@ -6,7 +6,8 @@ export const runtime = 'nodejs';
 
 /**
  * PATCH /api/voice-notes/cleanups/:id
- * What the provider answered a delete with: { status } or { failed: true }. See lib/voice-note-cleanups.ts.
+ * What the provider answered a delete with: { status, lease } or { failed: true, lease }. `lease` is required (400 without it) and is
+ * copied unchanged from the claim response (POST /api/voice-notes/cleanups/claim). See lib/voice-note-cleanups.ts.
  *
  * Auth: service token only.
  */

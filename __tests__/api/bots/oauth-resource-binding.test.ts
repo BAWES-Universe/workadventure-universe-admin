@@ -94,6 +94,8 @@ beforeEach(() => {
     CORS_ALLOWED_ORIGINS: ADMIN_BASE,
   };
   getSessionUser.mockResolvedValue({ id: 'user-1' });
+  // Starting a sign-in moves the row's generation up; the mocked rows are all at the number the start hands back
+  plainUpdate.mockResolvedValue({ signInGeneration: 0 });
   outboundCheck.mockResolvedValue({ allowed: true });
 });
 
@@ -108,6 +110,7 @@ describe('OAuth authorization request carries the RFC 8707 resource indicator', 
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
       bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
@@ -143,6 +146,7 @@ describe('OAuth authorization request carries the RFC 8707 resource indicator', 
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
       bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
@@ -167,6 +171,7 @@ describe('OAuth authorization request carries the RFC 8707 resource indicator', 
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: '',
       bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
@@ -205,6 +210,7 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
@@ -255,6 +261,7 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: '',
     });
@@ -293,6 +300,7 @@ describe('the token resource is bound to the authorization, not re-read from the
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
       bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
@@ -317,6 +325,7 @@ describe('the token resource is bound to the authorization, not re-read from the
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: 'https://moved.example.com/mcp',
     });
@@ -343,6 +352,7 @@ describe('the token resource is bound to the authorization, not re-read from the
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
@@ -385,6 +395,7 @@ describe('the code exchange applies the DNS-aware destination check', () => {
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
@@ -450,6 +461,7 @@ describe('the login stores its tokens only on the connection it was started for'
     id: SERVER_ID,
     botId: BOT_ID,
     authType: 'oauth',
+      signInGeneration: 0,
     authConfig,
     serverUrl,
   });
@@ -475,6 +487,7 @@ describe('the login stores its tokens only on the connection it was started for'
       id: SERVER_ID,
       serverUrl: MCP_SERVER_URL,
       authConfig: startedFrom,
+      signInGeneration: 0,
     });
     expect(plainUpdate).not.toHaveBeenCalled();
     expect(response.headers.get('location')).toContain('oauth=success');
@@ -488,7 +501,7 @@ describe('the login stores its tokens only on the connection it was started for'
     const response = await callback();
 
     expect(update).toHaveBeenCalledTimes(2);
-    expect(update.mock.calls[1][0].where).toEqual({ id: SERVER_ID, serverUrl: MCP_SERVER_URL, authConfig: saved });
+    expect(update.mock.calls[1][0].where).toEqual({ id: SERVER_ID, serverUrl: MCP_SERVER_URL, authConfig: saved, signInGeneration: 0 });
     const written = JSON.parse((update.mock.calls[1][0].data.authConfig as string).replace(/^enc:/, ''));
     expect(written.scopes).toBe('openid mcp mcp:write');
     expect(written.accessToken).toBe('access-new');
@@ -536,6 +549,7 @@ describe('a login that keeps losing to concurrent writes', () => {
     id: SERVER_ID,
     botId: BOT_ID,
     authType: 'oauth',
+      signInGeneration: 0,
     authConfig,
     serverUrl: MCP_SERVER_URL,
   });
@@ -581,6 +595,7 @@ describe('a fresh sign-in remembers who made it and clears a lost one (game #181
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
       bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
@@ -601,6 +616,7 @@ describe('a fresh sign-in remembers who made it and clears a lost one (game #181
       id: SERVER_ID,
       botId: BOT_ID,
       authType: 'oauth',
+      signInGeneration: 0,
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });

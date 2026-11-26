@@ -4,7 +4,7 @@
 // The super admin sets each default (amount, how often, who), the exceptions for people or a universe, and gifts. All amounts are
 // typed by the super admin: nothing here has a built-in value. Nothing needs a payment gateway.
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Gift, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
@@ -60,23 +60,39 @@ export default function GrantsPage() {
   const [failed, setFailed] = useState(false);
   const [sheet, setSheet] = useState<Sheet>(null);
 
-  const load = useCallback(async () => {
-    setFailed(false);
+  // Only the latest read may show: two saves in a row each read the list again, and the earlier read finishing last must not put its older list back
+  const latest = useRef(0);
+  const read = useCallback(async () => {
+    const mine = ++latest.current;
     const result = await sendJson('/api/admin/grants', 'GET');
-    if (result.status === 401 || result.status === 403) {
-      replacePage('/admin');
-      return;
-    }
-    if (!result.ok || !result.data) {
-      setFailed(true);
-      return;
-    }
-    setOverview(result.data as unknown as GrantsOverview);
-  }, [replacePage]);
+    return mine === latest.current ? result : null;
+  }, []);
+  const show = useCallback(
+    (result: Awaited<ReturnType<typeof sendJson>>) => {
+      if (result.status === 401 || result.status === 403) {
+        replacePage('/admin');
+        return;
+      }
+      if (!result.ok || !result.data) {
+        setFailed(true);
+        return;
+      }
+      setFailed(false);
+      setOverview(result.data as unknown as GrantsOverview);
+    },
+    [replacePage],
+  );
+  const load = useCallback(async () => {
+    const result = await read();
+    if (result) show(result);
+  }, [read, show]);
 
+  // The first read shows its answer in a callback, once it comes
   useEffect(() => {
-    load();
-  }, [load]);
+    void read().then((result) => {
+      if (result) show(result);
+    });
+  }, [read, show]);
 
   const saved = () => {
     setSheet(null);
