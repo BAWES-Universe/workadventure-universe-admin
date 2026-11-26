@@ -94,6 +94,10 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
     const early: IssueResult['skipped'] = [];
     const planned = plansFor(await currentRules(prisma, { now }), first, early);
     if (planned.length === 0) return { issued: [], skipped: early };
+    // Everything due this period is issued already (the answer on every look after the first one of a period, such as each chat turn's list
+    // of research Apps): nothing to lock and nothing to write, so no transaction takes the funding account's lock. A shared pool always takes
+    // the full way, which also answers this person's asks from a pool someone else's look made
+    if (await allIssuedAlready(personId, planned, now)) return { issued: [], skipped: early };
     const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
       // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
       // the rules of each category this person is due something from under a shared lock that a save of that category's rules waits for, so a
@@ -144,6 +148,18 @@ async function answerAsksFromPools(tx: Tx, person: PersonFacts, now: Date): Prom
 }
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
+
+/** Each plan already has its lot for this period (read without locks: a lot, once there, is never taken away), and none is a shared pool. */
+async function allIssuedAlready(personId: string, plans: readonly Plan[], now: Date): Promise<boolean> {
+  for (const { rule } of plans) {
+    if (rule.share !== 'each') return false;
+    const plan = planLot(rule, now);
+    if (!plan) continue;
+    const lot = await prisma.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey: subjectKeyFor(rule, personId), periodKey: plan.periodKey } }, select: { id: true } });
+    if (!lot) return false;
+  }
+  return true;
+}
 
 /** One rule's lot for one person, inside the locks. `skipped: null` means it was already issued (the quiet, normal answer). */
 async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, settings: MeterSettings): Promise<Issued> {

@@ -1289,12 +1289,20 @@ run('the bounded Instant executor, in a real database', () => {
       // Nothing was held or sent for it
       expect(f.funds.reserve.mock.calls.length).toBe(reserves);
       expect(p.instant.run).toHaveBeenCalledTimes(2);
-      // A new question, and a run that belongs to no task, are not held back by it
+      // A new question is not held back by it
       expect(await runInstant(ask({ taskKey: `task-${randomUUID()}` }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
-      expect(await runInstant(ask({ arguments: { query: 'no task' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
-      // Empty: no bound per question
+      // A run that names no question cannot be counted, so while a bound is set it is refused: nothing held, nothing sent, nothing saved
+      const sent = p.instant.run.mock.calls.length;
+      const held = f.funds.reserve.mock.calls.length;
+      const saved = await prisma.instantRun.count({ where: { personId: sara } });
+      expect(await runInstant(ask({ arguments: { query: 'no task' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'question_limit' });
+      expect(p.instant.run.mock.calls.length).toBe(sent);
+      expect(f.funds.reserve.mock.calls.length).toBe(held);
+      expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(saved);
+      // Empty: no bound per question, and a run with no question goes as before
       await setLimits({ maxRunsPerQuestion: null });
       expect(await runInstant(ask({ taskKey: task, arguments: { query: 'unbounded now' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      expect(await runInstant(ask({ arguments: { query: 'no task, no bound' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
     });
 
     it('five runs of one question at the same moment with a bound of 2: exactly 2 go out', async () => {
@@ -1374,6 +1382,30 @@ run('the bounded Instant executor, in a real database', () => {
         expect((await rolloutThisMonth()).notGivenPeople).toBe(leftOut - 1);
         const { forgetToolSchemas } = await import('@/lib/instant/tools');
         forgetToolSchemas();
+      });
+
+      it('once this month’s $2 is issued, a later look (each chat turn’s list) opens no transaction, so it never waits on the funding account’s lock', async () => {
+        await setBudget(1_000_000_000_000);
+        const { person } = await newOwner('rami');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        // This month's lots (Instant Apps, and computers where that default is on) are issued on the first look
+        expect((await ensureIssued(person)).issued.map((lot) => lot.programId)).toContain('seed-default-instant_apps');
+        const spy = jest.spyOn(prisma, '$transaction');
+        try {
+          expect(await ensureIssued(person)).toEqual({ issued: [], skipped: [] });
+          expect(spy).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+        // A person with nothing issued yet still takes the full way, under the locks
+        const { person: other } = await newOwner('huda');
+        const spied = jest.spyOn(prisma, '$transaction');
+        try {
+          expect((await ensureIssued(other)).issued.map((lot) => lot.programId)).toContain('seed-default-instant_apps');
+          expect(spied).toHaveBeenCalled();
+        } finally {
+          spied.mockRestore();
+        }
       });
 
       it('an owner who spent their monthly credit is offered none until it comes back on the 1st (UTC), and gets it back as soon as room frees up', async () => {

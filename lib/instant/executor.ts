@@ -185,8 +185,10 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
       const sameAsk = await openTwin(tx, input.personId, fingerprint);
       if (sameAsk) return { kind: 'refused', outcome: refuse('already_checking', { runId: sameAsk }) };
       // One question (one task) has at most so many runs, counted under this lock so two runs of one question at once cannot both slip past it.
-      // A run that was refused never went out, so it does not count
+      // A run that was refused never went out, so it does not count. While a bound is set, a run that names no question is refused: it could
+      // not be counted, so leaving the key out would be a way round the bound (the bot server always sends one)
       const taskKey = taskKeyOf(input);
+      if (!taskKey && limits.maxRunsPerQuestion !== null) return { kind: 'refused', outcome: refuse('question_limit') };
       if (taskKey && limits.maxRunsPerQuestion !== null) {
         const runs = await tx.instantRun.count({ where: { personId: input.personId, taskKey, state: { not: 'refused' } } });
         if (runs >= limits.maxRunsPerQuestion) return { kind: 'refused', outcome: refuse('question_limit') };
