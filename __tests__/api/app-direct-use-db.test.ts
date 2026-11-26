@@ -14,6 +14,8 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 type Answer = { status: number; body?: string; redirected?: boolean; truncated?: boolean };
 const mockSend: { current: ((target: { host: string; path: string; method: string; headers: Record<string, string>; body?: string }) => Answer | Promise<Answer>) | null } = { current: null };
 const mockDown = { current: false };
+// An error the guard throws before anything is asked (Orbit busy, or no answer in time)
+const mockThrow: { current: Error | null } = { current: null };
 // A change that commits right after the admission check, to see what the call does about it
 const mockAfterCheck: { current: (() => Promise<void>) | null } = { current: null };
 jest.mock('@/lib/app-connections', () => {
@@ -34,7 +36,9 @@ jest.mock('@/lib/app-direct/guard', () => {
   return {
     ...actual,
     guardedRequest: jest.fn((request: Parameters<typeof actual.guardedRequest>[0], deps?: Parameters<typeof actual.guardedRequest>[1]) =>
-      mockSend.current
+      mockThrow.current
+        ? Promise.reject(mockThrow.current)
+        : mockSend.current
         ? actual.guardedRequest(request, {
             // A name that resolves nowhere is a service that cannot be reached
             resolve: async () => (mockDown.current ? [] : [{ address: '93.184.216.34', family: 4 }]),
@@ -50,7 +54,9 @@ jest.mock('@/lib/app-direct/guard', () => {
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
-import { disconnect, removeGrant, grantToBrick } from '@/lib/app-connections';
+import { checkAppUse, disconnect, removeGrant, grantToBrick } from '@/lib/app-connections';
+import { GuardError } from '@/lib/app-direct/guard';
+import { KEY_NO_ANSWER_HOLDS_MS } from '@/lib/app-same';
 import { openKeyForm, submitKey, readKeyForm } from '@/lib/app-direct/connect';
 import { runKeyApp, keyAppsOf } from '@/lib/app-direct/use';
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
@@ -122,6 +128,8 @@ run('using a key app, in a real database', () => {
 
   afterEach(async () => {
     mockSend.current = null;
+    mockThrow.current = null;
+    mockDown.current = false;
     mockAfterCheck.current = null;
     mockUser.current = null;
     // The rows that count uses of a key stay when an app is disconnected, so they are cleared here
@@ -441,41 +449,29 @@ run('using a key app, in a real database', () => {
     expect(sent).toBe(2);
   });
 
-  it('holds requests an hour for a person and for everyone, both from Limits, and counts only what it took', async () => {
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
+  it('never limits the person\'s own key: no hourly allowance for the person, none for everyone, and page orders take no room from it', async () => {
+    // The smallest ceiling Limits can hold, a busy hour already behind the person (more than the old 300 an hour), other people's calls and a
+    // page order of this hour: none of it stops a Brick using its owner's own key (Khalid, 26 Nov 2026: own keys are never limited by us)
+    await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
     await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
+    const connection = await prisma.appConnection.findFirstOrThrow({ where: { ownerId: sara, kind: 'direct' }, select: { id: true } });
+    await prisma.appKeyCall.createMany({
+      data: Array.from({ length: 400 }, (_, index) => ({ connectionId: connection.id, ownerId: sara, botId: saraBrick, callId: `busy-${tag}-${index}`, operation: 'x', state: 'done', outcome: 'ok' })),
+    });
+    await prisma.appKeyCall.createMany({
+      data: Array.from({ length: 5 }, (_, index) => ({ connectionId: connection.id, ownerId: omar, botId: omarBrick, callId: `omar-${tag}-${index}`, operation: 'x', state: 'done', outcome: 'ok' })),
+    });
+    const order = await prisma.appPageOrder.create({ data: { ownerId: sara, artifactId: `art-${randomUUID()}`, definitionHash: 'h'.repeat(64), amountMinor: 100, currency: 'USD', visitorHash: 'v' } });
     let sent = 0;
     mockSend.current = () => ((sent += 1), { status: 200 });
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    const over = await call(saraBrick, app.serverId, app.definitionHash);
-    expect(over.status).toBe(429);
-    expect((await over.json()).code).toBe('limit');
-    expect(sent).toBe(2);
-    // An hour later the person has room again
-    await prisma.appKeyCall.updateMany({ where: { ownerId: sara }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-    // And everyone's ceiling holds too
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 100, keyCallsPlatform: 1 } }, sara);
-    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(429);
-  });
-
-  it('counts the page orders of the last hour under everyone\'s ceiling, as a checkout counts key calls: key calls cannot fill what orders already hold', async () => {
-    await connectGateway();
-    const [app] = await keyAppsOf(saraBrick);
-    mockSend.current = () => ({ status: 200 });
-    await saveServerLimits({ bricks: { keyCallsPerPerson: 100, keyCallsPlatform: 2 } }, sara);
-    // One order started in the last hour holds one of the two places
-    const order = await prisma.appPageOrder.create({ data: { ownerId: sara, artifactId: `art-${randomUUID()}`, definitionHash: 'h'.repeat(64), amountMinor: 100, currency: 'USD', visitorHash: 'v' } });
     try {
-      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
-      const over = await call(saraBrick, app.serverId, app.definitionHash);
-      expect(over.status).toBe(429);
-      expect((await over.json()).code).toBe('limit');
-      // An order from before the last hour holds nothing
-      await prisma.appPageOrder.update({ where: { id: order.id }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
-      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+      for (let index = 0; index < 3; index += 1) {
+        const used = await call(saraBrick, app.serverId, app.definitionHash);
+        expect(used.status).toBe(200);
+        expect((await used.json()).ok).toBe(true);
+      }
+      expect(sent).toBe(3);
     } finally {
       await prisma.appPageOrder.delete({ where: { id: order.id } }).catch(() => undefined);
     }
@@ -503,6 +499,66 @@ run('using a key app, in a real database', () => {
       mockDown.current = false;
       mockSend.current = null;
     }
+  });
+
+  it('counts an own key App whose service does not answer as not working, so the ready-made copy of it is the way until a good call, and never for Orbit being busy', async () => {
+    const id = await connectGateway();
+    const [app] = await keyAppsOf(saraBrick);
+    // Sara's ready-made copy of the same App on the same Brick (the rows only: no provider is asked)
+    const readyConnection = await prisma.appConnection.create({ data: { ownerId: sara, name: 'Example Pay', serverUrl: `https://ready.example/${tag}/examplepay`, source: 'ready_made', providerToolkit: 'examplepay', providerAccountId: 'ca_examplepay', providerConfirmedAt: new Date() } });
+    const ready = (await prisma.botMcpServer.create({ data: { botId: saraBrick, name: 'Example Pay', serverUrl: '', authType: 'none', connectionId: readyConnection.id } })).id;
+    const ownCopy = async () => {
+      const response = await listServers(request(`/api/bots/${saraBrick}/mcp-servers`, { token: ADMIN_TOKEN }), params({ id: saraBrick }));
+      return ((await response.json()) as { id: string; ownCopyServerId: string | null }[]).find((row) => row.id === ready)?.ownCopyServerId;
+    };
+    let use = 0;
+    const readyUse = () => checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-ready-${use++}` });
+    const noAnswerAt = async () => (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).noAnswerAt;
+    expect(await ownCopy()).toBe(app.serverId);
+    expect(await readyUse()).toMatchObject({ allowed: false, reason: 'off' });
+
+    // Orbit itself had no room to try: says nothing about the service, so the own copy stays the way
+    mockThrow.current = new GuardError('unreachable', 'Too many name lookups are waiting', true);
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    expect(await noAnswerAt()).toBeNull();
+    expect(await ownCopy()).toBe(app.serverId);
+    mockThrow.current = null;
+
+    // The service cannot be reached: the own copy no longer counts as working, and the ready-made copy is allowed meanwhile
+    mockSend.current = () => ({ status: 200 });
+    mockDown.current = true;
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    mockDown.current = false;
+    expect(await noAnswerAt()).not.toBeNull();
+    expect(await ownCopy()).toBeNull();
+    expect(await readyUse()).toMatchObject({ allowed: true });
+
+    // A good call clears it: the own copy is the way again
+    expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+    expect(await noAnswerAt()).toBeNull();
+    expect(await ownCopy()).toBe(app.serverId);
+    expect(await readyUse()).toMatchObject({ allowed: false, reason: 'off' });
+
+    // No answer in time counts the same
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    mockThrow.current = new GuardError('timeout', 'No answer in time');
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    const first = await noAnswerAt();
+    expect(first).not.toBeNull();
+    expect(await ownCopy()).toBeNull();
+    // Another failure inside the while keeps when it started
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    expect(await noAnswerAt()).toEqual(first);
+
+    // The while is over: nothing but a call can tell it answers again, so the own copy is the way again and is tried
+    await prisma.appConnection.update({ where: { id }, data: { noAnswerAt: new Date(Date.now() - KEY_NO_ANSWER_HOLDS_MS - 60_000), lastWorkedAt: new Date(Date.now() - KEY_NO_ANSWER_HOLDS_MS - 120_000) } });
+    expect(await ownCopy()).toBe(app.serverId);
+    expect(await readyUse()).toMatchObject({ allowed: false, reason: 'off' });
+    // Still down: written again, and the ready-made copy is the way for another while
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    expect(Date.now() - (await noAnswerAt())!.getTime()).toBeLessThan(60_000);
+    expect(await ownCopy()).toBeNull();
+    expect(await readyUse()).toMatchObject({ allowed: true });
   });
 
   it('cuts a long answer and gives back nothing from it, rather than half of it', async () => {
@@ -645,8 +701,8 @@ run('using a key app, in a real database', () => {
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
-    it('keeps what was used this hour when the app is disconnected and connected again', async () => {
-      await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
+    it('keeps working with no allowance after the app is disconnected and connected again', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
       const first = await connectGateway();
       const [app] = await keyAppsOf(saraBrick);
       mockSend.current = () => ({ status: 200 });
@@ -656,7 +712,7 @@ run('using a key app, in a real database', () => {
       expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(2);
       await connectGateway();
       const [again] = await keyAppsOf(saraBrick);
-      expect((await call(saraBrick, again.serverId, again.definitionHash)).status).toBe(429);
+      expect((await call(saraBrick, again.serverId, again.definitionHash)).status).toBe(200);
     });
 
     it('leaves no Brick behind when its starting access cannot be written', async () => {

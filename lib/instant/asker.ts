@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { findUserByIdentifier } from '@/lib/user-identifier';
+import { ownCopyOf, ownGrantsOf } from '@/lib/app-same';
+import { connectedState } from '@/lib/app-connections';
 
 /**
  * Who an Instant run is for. Instant runs only on a person's own Brick (no room), for the Brick's OWNER's own request, and is paid
@@ -22,16 +24,26 @@ export const appKeyOf = (toolkit: string): string => toolkit.toLowerCase().repla
 /**
  * The Apps this Brick's owner has switched on for THIS Brick: an enabled grant of one of the owner's own ready-made Apps. Nothing is on
  * for a Brick by default, so a Brick can rely on the model alone or use just the Apps its owner gave it. An Instant tool is offered and
- * run only for an App in this list.
+ * run only for an App in this list. An App this Brick also has the owner's own copy of (switched on) is left out: their own comes first.
  */
 export async function brickApps(botId: string): Promise<Set<string>> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
   if (!bot?.ownerId) return new Set();
-  const grants = await prisma.botMcpServer.findMany({
-    where: { botId, enabled: true, connection: { ownerId: bot.ownerId, providerToolkit: { not: null } } },
-    select: { connection: { select: { providerToolkit: true } } },
-  });
-  return new Set(grants.map((grant) => appKeyOf(grant.connection?.providerToolkit ?? '')).filter(Boolean));
+  const [grants, own] = await Promise.all([
+    prisma.botMcpServer.findMany({
+      where: { botId, enabled: true, connection: { ownerId: bot.ownerId, providerToolkit: { not: null } } },
+      select: { connection: { select: { providerToolkit: true, name: true } } },
+    }),
+    ownGrantsOf(botId, (own) => connectedState(own).connected),
+  ]);
+  // The owner's own copy of an App comes first (lib/app-same.ts): while this Brick has their own Exa switched on, Instant's Exa is neither
+  // offered nor run, so their own account is what is used and nothing is paid for or counted by Universe
+  return new Set(
+    grants
+      .filter((grant) => !ownCopyOf(own, { key: grant.connection?.providerToolkit, name: grant.connection?.name }))
+      .map((grant) => appKeyOf(grant.connection?.providerToolkit ?? ''))
+      .filter(Boolean),
+  );
 }
 
 export async function brickHasApp(botId: string, toolkit: string): Promise<boolean> {

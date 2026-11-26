@@ -27,9 +27,9 @@ const bodySchema = z
  * POST /api/bots/:id/key-apps/:serverId/call { requesterKey? | forOwner?, callId, operation, arguments, definitionHash } - one use of an app
  * with a key (game #2044). Orbit checks the use as it does for every app (own Brick, on, asker is the owner), sends the one operation to
  * the origin the owner confirmed with the key only Orbit holds, and answers with the fields the definition lists. A raw error answer never
- * comes back. Auth: BOT_SERVICE_TOKEN.
+ * comes back. The person's own key is never limited by Universe: there is no hourly allowance. Auth: BOT_SERVICE_TOKEN.
  * 200 { ok, httpStatus, data, truncated } · 403 { allowed: false, reason } · 404 gone / unknown operation · 409 changed (the definition is
- * not the version approved) or already_asked · 400 bad_arguments · 429 limit · 502 key_rejected / unavailable.
+ * not the version approved) or already_asked · 400 bad_arguments · 502 key_rejected / unavailable.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string; serverId: string }> }) {
   return serviceRoute(request, 'using a key app', async () => {
@@ -50,8 +50,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         return json(request, { error: 'This call was already made', code: 'already_asked' }, 409);
       case 'bad_arguments':
         return json(request, { error: outcome.message, code: 'bad_arguments' }, 400);
-      case 'limit':
-        return json(request, { error: 'Too many requests for now', code: 'limit' }, 429);
       case 'key_rejected':
         return json(request, { error: 'The service did not accept the key', code: 'key_rejected', httpStatus: outcome.httpStatus }, 502);
       default:
