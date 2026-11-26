@@ -140,7 +140,7 @@ export function plainThing(value: string): string {
   return value.replace(/\s*\((?:favou?rite)[^)]*\)\s*$/iu, '').trim();
 }
 
-const TASTE_WORDS = "likes?|loves?|loved|enjoys?|enjoyed|prefers?|preferred|adores?|hates?|hated|dislikes?|disliked|despises?|detests?|loathes?|avoids?|favou?rite|can['’]?t stand|cannot stand|can not stand|(?:don['’]?t|do not|doesn['’]?t|does not) (?:like|enjoy|love)|not a fan of|not into|sick of|tired of|fan of|into|go-to"
+const TASTE_WORDS = "likes?|loves?|loved|enjoys?|enjoyed|prefers?|preferred|adores?|hates?|hated|dislikes?|disliked|despises?|detests?|loathes?|avoids?|favou?rite|can['’]?t stand|cannot stand|can not stand|(?:don['’]?t|do not|doesn['’]?t|does not) (?:like|enjoy|love)|not a fan of|not into|sick of|tired of|fan of|(?<=(?:['’]m|['’]re|['’]s|\\bam|\\bare|\\bis|\\bwas|\\bwere) )into|go-to"
 const NOT_PART_OF_A_WORD = '(?<![\\p{L}\\p{N}])';
 const END_OF_A_WORD = '(?![\\p{L}\\p{N}])';
 

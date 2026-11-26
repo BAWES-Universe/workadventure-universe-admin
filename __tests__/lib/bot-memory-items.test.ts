@@ -477,4 +477,18 @@ describe('a reply after a taken line, when several things are forgotten together
     const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('pref', null, 'jam')])).data as typeof data;
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
   });
+
+  it('takes "I\'m into tea" with the rest but keeps "walked into the tea room" (Sentry)', () => {
+    const data = {
+      personalInfo: { preferences: ['tea'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000 } },
+      conversationHistory: chat([
+        ['person', "I'm into tea", 1000],
+        ['person', 'I walked into the tea room', 1100],
+        ['person', 'Did you go into the tea room?', 1200],
+        ['person', 'I was into tea once', 1300],
+      ]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I walked into the tea room', 'Did you go into the tea room?']);
+  });
 });
