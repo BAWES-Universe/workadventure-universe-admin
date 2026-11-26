@@ -158,6 +158,23 @@ run('the honest check before a take over (1B)', () => {
       expect(await machineOf(sara.brickId)).toBe('stopped');
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
     });
+
+    // Opus on #1034: only the LAST try decides "a program is left"; a try that did not run says nothing
+    it('only the last try counts: a program seen in the first try, then a fence that cannot run, is not a block and the machine is stopped', async () => {
+      const { sara } = await waitingForSignIn();
+      let checks = 0;
+      fake.execAnswer = async (command) => {
+        if (!isFenceCheckCommand(command)) return {};
+        // The first look says a program is left; every later look fails to run at all
+        if (++checks === 1) return LEFT;
+        throw new Error('the fence did not run');
+      };
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      expect(checks).toBeGreaterThan(1);
+      expect(await machineOf(sara.brickId)).toBe('stopped');
+      expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+    });
   });
 
   describe('take over anyway', () => {
