@@ -198,6 +198,21 @@ describe('scripts/start.sh decides (stand-in migration tool)', () => {
     }
   });
 
+  it('the docs reach a container that refused to start through a one-off container with the image CLI, never docker exec + npx', () => {
+    const setup = fs.readFileSync(path.join(root, 'docs/COOLIFY-SETUP.md'), 'utf8');
+    const runbook = fs.readFileSync(path.join(root, 'docs/PRISMA-DEPLOYMENT.md'), 'utf8');
+    for (const text of [setup, runbook]) {
+      expect(text).not.toMatch(/docker exec[^\n]*npx prisma/);
+    }
+    expect(setup).toMatch(/docker exec` cannot reach/);
+    for (const command of ['migrate status', 'migrate resolve --applied', 'migrate resolve --rolled-back']) {
+      expect(runbook).toContain(`docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js ${command}`);
+    }
+    // The database link never goes onto the screen: it goes into a private temporary file that is removed.
+    expect(runbook).toContain('ENVF=$(umask 077; mktemp)');
+    expect(runbook).toContain('rm -f "$ENVF"');
+  });
+
   it('has no way to continue after a failed migration', () => {
     const script = fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8');
     const code = script.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');

@@ -146,7 +146,7 @@ anything).
 
 2. **Verify migrations**:
    ```bash
-   docker exec <container-name> npx prisma migrate status
+   docker exec <container-name> node node_modules/prisma/build/index.js migrate status
    ```
 
 3. **Test endpoints**:
@@ -187,15 +187,10 @@ docker logs <container-name>
 
 ### Migration Errors
 
-**Run migrations manually**:
-```bash
-docker exec <container-name> npx prisma migrate deploy
-```
-
-**Check migration status**:
-```bash
-docker exec <container-name> npx prisma migrate status
-```
+The container applies migrations itself every time it starts, so there is nothing to run by hand. If they
+fail, its log ends with `Orbit is NOT starting` and the container stops (or keeps restarting).
+`docker exec` cannot reach a container in that state. Check and resolve from a one-off container of the
+same image instead: the commands are in docs/PRISMA-DEPLOYMENT.md under "Troubleshooting".
 
 ### Redis Connection Failed
 

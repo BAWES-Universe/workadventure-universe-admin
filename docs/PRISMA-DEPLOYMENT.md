@@ -122,7 +122,8 @@ reason above that line (`docker logs <container-name>`). Then:
      a redeploy, OOM, `docker stop`) is usually finished and committed by Postgres anyway, while Prisma
      still records it as failed. One that commits part-way (an explicit `COMMIT`, or
      `CREATE INDEX CONCURRENTLY`) keeps what ran before the failure.
-   - Then resolve it (from any container of this image, or a one-off one):
+   - Then resolve it with the commands below, run in a one-off container (see "Running the Prisma CLI
+     when the container will not start"):
      - all of its changes are there:
        ```bash
        node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
@@ -132,6 +133,35 @@ reason above that line (`docker logs <container-name>`). Then:
      - only some are: undo those by hand, then `--rolled-back`, and deploy the fixed image.
    - Never `--rolled-back` a migration whose changes are in the database: the next start would run it
      again, and it fails again or applies twice.
+
+### Running the Prisma CLI when the container will not start
+
+A container that refused to start has stopped, or Docker keeps restarting it, so `docker exec` cannot
+reach it. Run the Prisma CLI shipped in the same image in a one-off container instead, on the same
+Docker network and with the same `DATABASE_URL`. On the server, with `C` set to the Orbit container's
+name (`docker ps -a`):
+
+```bash
+C=<container-name>
+IMAGE=$(docker inspect "$C" --format '{{.Config.Image}}')
+# The network the database is reached on. If this prints more than one, use the one the database container is on.
+docker inspect "$C" --format '{{range $name, $net := .NetworkSettings.Networks}}{{println $name}}{{end}}'
+NET=<network name from the line above>
+# The database link goes into a private temporary file, never onto the screen.
+ENVF=$(umask 077; mktemp)
+docker inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^DATABASE_URL=' > "$ENVF"
+
+docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate status
+# then, only after checking the database as described above, one of:
+docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
+docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
+
+rm -f "$ENVF"
+```
+
+This uses the image's own Prisma CLI by path, not `npx prisma`, which is not tied to that copy. Once the
+failed migration is resolved, a restarting container picks it up on its next start, and one that stopped
+starts with `docker start "$C"`; after `--rolled-back`, deploy the image with the fixed migration instead.
 
 ### "Prisma Client not found"
 
@@ -155,7 +185,7 @@ This is normal - `prisma migrate deploy` is idempotent. It's safe to run multipl
 Check which migrations have been applied:
 
 ```bash
-docker exec <container-name> npx prisma migrate status
+docker exec <container-name> node node_modules/prisma/build/index.js migrate status
 ```
 
 Output shows:
@@ -184,7 +214,7 @@ ghcr.io/<username>/workadventure-universe-admin:latest
 # 3. Deploy (migrations run automatically if using startup script)
 
 # 4. Verify migrations
-docker exec <container> npx prisma migrate status
+docker exec <container> node node_modules/prisma/build/index.js migrate status
 
 # 5. Check application logs
 docker logs -f <container>
@@ -193,16 +223,14 @@ docker logs -f <container>
 ## Quick Commands Reference
 
 ```bash
-# Run migrations
-docker exec <container> npx prisma migrate deploy
+# Migrations run by themselves at every start; there is no command to run.
 
 # Check status
-docker exec <container> npx prisma migrate status
+docker exec <container> node node_modules/prisma/build/index.js migrate status
 
 # View logs
 docker logs <container>
 
-# Check database connection
-docker exec <container> npx prisma db pull
+# Container will not start: use a one-off container (Troubleshooting above)
 ```
 
