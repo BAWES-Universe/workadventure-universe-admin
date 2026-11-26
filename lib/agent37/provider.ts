@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
+import * as Sentry from '@sentry/nextjs';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
@@ -78,6 +79,13 @@ const creationId = (botId: string) => `brick:${botId}`;
 /** A throwaway computer made to prove a restore carries this in its metadata, so the daily check knows it and a sweep can remove one that was left behind. */
 export const SCRATCH_PREFIX = 'scratch:';
 
+/** The statuses that say the machine is running, or on its way to running (billed as awake). Anything outside this list and `ASLEEP_STATUSES` and `gone` is not known. */
+const AWAKE_STATUSES = ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'];
+/**
+ * The statuses that say the machine is resting or going down. `stopping` counts: this look is also the proof of a stop, and a start on a machine that is still going down waits it out
+ * (`wake`), where a throw would end the person's job. A machine that is not there (404, `deleting`, `deleted`, `failed`) is not running either.
+ */
+const ASLEEP_STATUSES = ['stopped', 'sleeping', 'stopping'];
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
 
 export class Agent37ComputerProvider implements ComputerProvider {
@@ -469,7 +477,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
   private async awakeFrom(look: () => Promise<Instance>): Promise<boolean> {
     try {
       const status = String((await look()).status);
-      return ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'].includes(status);
+      if (AWAKE_STATUSES.includes(status)) return true;
+      if (ASLEEP_STATUSES.includes(status) || gone(status)) return false;
+      // Every status Agent37 documents is classified above, so a word here is one it never documented: it says nothing about whether the machine runs. It is "not known", which
+      // never pauses a billed job, never moves a proof of awake and never proves a stop (the callers treat a throw so). Said out loud, so the list is looked at
+      Sentry.captureMessage('Agent37 said a machine status that is not in the list', { level: 'warning', tags: { area: 'computer', step: 'awake-status' }, extra: { status: status.slice(0, 40) } });
+      throw new Agent37Unreached(`status ${status.slice(0, 40)}`);
     } catch (error) {
       // A machine that is not there is not running; any other answer is not known, and "not known" is never taken for "stopped"
       if (error instanceof Agent37Error && error.status === 404) return false;

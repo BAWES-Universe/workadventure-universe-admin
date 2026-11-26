@@ -2701,6 +2701,25 @@ run('a Brick’s computer, in a real database', () => {
       expect((await windDownStatus()).machinesLeft).toBe(0);
     });
 
+    it('a look that cannot say whether the machine runs (an undocumented status) does not stop the wind-down: the machine is still stopped', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ref = `fake-${sara.brickId}`;
+      const look = provider.awake.bind(provider);
+      provider.awake = async () => {
+        throw new Error('status hibernating');
+      };
+      try {
+        provider.calls.length = 0;
+        await startWindDown('team@example.test', minutes(1));
+        expect(provider.calls.filter((call) => call.name === 'stop' && call.ref === ref).length).toBeGreaterThan(0);
+      } finally {
+        provider.awake = look;
+      }
+    });
+
     it('a Brick whose return from cold storage holds the claim is left to the return: its machine is not saved or stopped under it', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

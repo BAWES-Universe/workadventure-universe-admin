@@ -3714,7 +3714,8 @@ async function windDownBrick(botId: string, now: Date): Promise<void> {
     // Not under a return that holds the Brick (see continueWindDown): neither its files are saved nor its machine stopped until the return is over
     if (row.machine === 'restoring' && row.packStage === 'returning') return;
     const ref = row.providerRef;
-    if (await provider.awake(ref)) await saveCopy(botId, ref, provider);
+    // A look that cannot say (an undocumented status, no answer) saves no copy and the machine is stopped all the same: the disk is kept either way
+    if (await provider.awake(ref).catch(() => false)) await saveCopy(botId, ref, provider);
     // Proven: the provider no longer says it runs. A stop that did not take (or a look that could not be made) leaves the machine "stopping",
     // which the next sweep finds again, whatever state ending its jobs had left it in
     await stopMachine(botId, ref, provider, [...BILLED_MACHINES, 'resting']);
