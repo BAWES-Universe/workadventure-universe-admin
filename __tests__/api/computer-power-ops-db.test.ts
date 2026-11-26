@@ -1692,19 +1692,29 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
       });
 
-      it('a look that does not answer proves nothing: the ending is priced as before, and the job still ends', async () => {
+      it('second GPT audit, O3 (Opus): a look that does not answer is priced like an asleep one, to the last proof (120 s), the job still ends, and a retry sweep settles it exactly once', async () => {
         const sara = await owner('unanswered-silent');
         const { job, began } = await waitingJob(sara);
         await fake.stop(sara.ref);
+        const room = (await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).reservationKey!;
         const look = jest.spyOn(fake, 'awake').mockRejectedValue(new Error('the provider did not answer'));
+        const endAt = new Date(began + 180_000 + wait);
         try {
-          await sweepComputers(new Date(began + 180_000 + wait));
+          await sweepComputers(endAt);
         } finally {
           look.mockRestore();
         }
         const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
-        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
-        expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        const price = costOfSeconds(120, fake.microsPerMinute())!;
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findMany({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toEqual([expect.objectContaining({ quantity: BigInt(120), costMicros: BigInt(price) })]);
+        // A retry sweep (the provider answers now, the machine is asleep): the same one settlement, nothing is priced again
+        await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
+        await sweepComputers(new Date(endAt.getTime() + 60 * 60_000));
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.count({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toBe(1);
       });
     });
 

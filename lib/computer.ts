@@ -3019,7 +3019,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // Post-0.5.0 B, an `unanswered` ending (the sweep's): the machine is read once, as a renewal reads it. Found asleep (a stop that landed late and nothing renewed since), the stretch ends at the last proof of awake and only those
-    // seconds are priced, never the time up to this ending. A look that does not answer proves nothing and the ending is priced as before. Read after the guards above, so a sweep that defers never asks the provider; asked once
+    // seconds are priced, never the time up to this ending. A look that does not answer is priced the same way (second GPT audit, O3, Opus): what a person is charged is only ever what was proved, so an hour of waiting is never billed to them
+    // on a provider that did not answer. The provider's own bill for the rest is not hidden: the daily check of the books against the provider's bill (`unbooked_time`) reports it. Read after the guards above, so a sweep that defers never asks the provider; asked once
     // however many tries the write takes (the write's own WHERE holds the lease version, so a renewal that proved the machine since moves it and the try is read again)
     if (endedBy === 'unanswered' && held) {
       if (look === undefined) {
@@ -3027,7 +3028,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         look = await awakeLookFor(job, machine, providerFor(machine));
       }
       pricedUntil = null;
-      if (look === 'asleep') {
+      if (look === 'asleep' || look === 'unknown') {
         const proved = provedSecondsOf(job, now, seconds);
         if (proved < seconds) {
           seconds = proved;
