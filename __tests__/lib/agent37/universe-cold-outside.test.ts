@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { imageFiles } from '@/lib/agent37/image-files';
+import { checkOutsideManifest } from '@/lib/computer-outside';
 
 /**
  * `universe-cold prepack` and `finish`, run for real (Opus on #1025, the root escalation through the folder the agent owns): prepack refuses links where its folders belong and prints a list of
@@ -148,6 +149,29 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     expect(fs.readFileSync(path.join(w.fsB, 'opt/tool/run.sh'), 'utf8')).toBe('#!/bin/sh\necho hi\n');
     expect(fs.readFileSync(path.join(w.fsB, 'srv/a/b/file.txt'), 'utf8')).toBe('deep');
     for (const folder of ['opt/tool', 'etc', 'srv']) expect(fs.readdirSync(path.join(w.fsB, folder)).filter((name) => name.startsWith('.uc-'))).toEqual([]);
+  });
+
+  it('folders ABOVE the roots (/var, /var/spool, /usr) are never listed, whatever their mode: only folders inside a root are, so the list always passes Orbit\'s check and the computer is packed, not refused (Seer on #1035)', () => {
+    const w = world();
+    // Files whose folders reach up through /var, /var/spool and /usr, with modes that are not the usual 0755
+    fs.mkdirSync(path.join(w.fsA, 'var/www/site/private'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'var/www/site/private/index.html'), 'page');
+    fs.writeFileSync(path.join(w.fsA, 'var/spool/cron/crontabs-root'), '* * * * * true\n');
+    fs.mkdirSync(path.join(w.fsA, 'usr/local/lib/own'), { recursive: true });
+    fs.writeFileSync(path.join(w.fsA, 'usr/local/lib/own/tool.so'), 'lib');
+    // A folder inside a root that is odd still is listed (it is made again as it was)
+    fs.chmodSync(path.join(w.fsA, 'var/www/site/private'), 0o700);
+    fs.chmodSync(path.join(w.fsA, 'usr/local/lib/own'), 0o750);
+    for (const folder of ['var/spool', 'var', 'usr']) fs.chmodSync(path.join(w.fsA, folder), 0o750);
+    const manifest = packed(w);
+    expect(manifest.files.map((entry) => entry[1]).sort()).toEqual(expect.arrayContaining(['/var/www/site/private/index.html', '/var/spool/cron/crontabs-root', '/usr/local/lib/own/tool.so']));
+    const roots = ['/etc', '/opt', '/srv', '/usr/local', '/root', '/var/www', '/var/spool/cron'];
+    const listed = (manifest.dirs ?? []).map((entry) => entry[0]);
+    expect(listed).toEqual(expect.arrayContaining(['/var/www/site/private', '/usr/local/lib/own']));
+    for (const folder of listed) expect(roots.some((root) => folder.startsWith(`${root}/`))).toBe(true);
+    for (const above of ['/var', '/var/spool', '/usr', '/var/www', '/usr/local']) expect(listed).not.toContain(above);
+    // What Orbit does with the list: it is accepted
+    expect(checkOutsideManifest(manifest)).toMatchObject({ ok: true });
   });
 
   it('a clean round trip: files with their mode, the link and the software, from the list Orbit holds', () => {

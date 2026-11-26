@@ -1376,7 +1376,9 @@ def folder_modes(entries):
         parts = entry[1].lstrip("/").split("/")[:-1]
         for at in range(1, len(parts) + 1):
             path = "/" + "/".join(parts[:at])
-            if path in seen or any(path == root for root in ROOTS):
+            # Only the folders INSIDE a root: the root itself and what is above it (/usr, /var, /var/spool) belong to the computer, are never made or given a mode by a restore, and a list that named
+            # one would not pass Orbit's check (a computer that could never be packed)
+            if path in seen or not any(path.startswith(root + "/") for root in ROOTS):
                 continue
             try:
                 info = os.lstat(real(path))
