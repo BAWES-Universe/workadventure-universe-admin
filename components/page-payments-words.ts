@@ -23,6 +23,8 @@ export const PAY_WORDS = {
   notPaid: { title: 'Not paid yet.', sub: 'If you already paid, it can take a while to show. Check it here before paying again.' },
   needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, check it here before paying again.' },
   unavailable: { title: 'Payments unavailable', sub: null },
+  /** The owner set the payment on a newer version than the one this link shows: nothing was charged, and it works again once they publish. Said without telling the visitor that a newer version exists (game #2115). */
+  notPublished: { title: 'Payments unavailable', sub: 'This page isn’t taking payments right now. Try again later.' },
   limit: { title: 'Too many tries for now.', sub: 'Try again in a little while.' },
   boughtBefore: { title: 'Bought this before?', sub: null },
   noneGuest: { title: 'No purchase found in this browser.', sub: 'Open the receipt link you saved when you paid. It brings your purchase back here.' },
@@ -95,6 +97,7 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
   if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false, note: again };
   // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
   if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false, note: again } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
+  if (line.problem === 'not_published') return { ...PAY_WORDS.notPublished, actions: [], closable: false };
   if (line.problem === 'limit') return { ...PAY_WORDS.limit, actions: [], closable: false };
   if (line.needsUpdate) return { ...PAY_WORDS.needsUpdate, actions: line.checking ? [] : [check], closable: false };
   if (line.checking) {

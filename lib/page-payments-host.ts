@@ -30,7 +30,8 @@
 /** The id a page gives its request: short and plain, so it can only be echoed back and never carry anything else. */
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
+/** `not_published`: the owner set the page's payment on a version newer than the one this link shows; nothing was made (the page is told `unavailable`). */
+export type PayProblem = 'unavailable' | 'not_published' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
 
 /** What the host says under the page while a payment is on its way. */
 export interface PayLine {
@@ -583,7 +584,9 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           // Trouble on the way (a 5xx, a refusal that says `unsure`, or a good answer that holds nothing usable) may have left an order behind: Check payment asks about the same
           // wish. A definite answer (the page is gone, the owner stopped it, too many tries) does not
           const unsure = !limit && (answer.status >= 500 || answer.body?.unsure === true || (answer.ok && (!orderId || !url)));
-          return end({ problem: limit ? 'limit' : 'unavailable', canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
+          // The owner changed the payment on a version this link does not show yet: definite, nothing was made, and the line says why
+          const unpublished = !limit && !unsure && answer.body?.code === 'not_published';
+          return end({ problem: limit ? 'limit' : unpublished ? 'not_published' : 'unavailable', canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
         }
         if (popup) popup.location.href = url;
         adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, ticket);

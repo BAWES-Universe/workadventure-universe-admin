@@ -32,6 +32,7 @@ const schema = z
  *  - none of them: { enabled }.
  *  - `start: true` (+ `intentId`): a checkout for the owner's amount (the viewer sends no amount). The same `intentId` from the same buyer
  *    gives the SAME order, never another, even from two windows at once. 200 { orderId, checkoutUrl, amount, currency, app, reused, buyer }.
+ *    409 `not_published` when the viewer is shown an older published version than the one the owner set the terms on: nothing was made.
  *  - `order`: where an order stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer }; `pollAfterMs` is how long to wait before asking again.
  *  - `check: true` + `intentId`: the same, for the order that wish made (found with the buyer, so no one else's). 404 when there is none.
  *  - `restore: true`: { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer's order for the page's offer.
@@ -45,8 +46,8 @@ const schema = z
  * any device; `'guest'` for everyone else, including a signed-in person whose Orbit account is a guest account, who has only the recovery code.
  */
 export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema, async (body, params) => {
-  // The same answer as for an artifact that is not there, for anyone who may not open it
-  await requireMayOpen(params.id, body.viewer);
+  // The same answer as for an artifact that is not there, for anyone who may not open it; and which version this viewer is shown
+  const { seesLatest } = await requireMayOpen(params.id, body.viewer);
   const person = body.viewer.person;
   const account = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
   // Who Orbit uses as the buyer, told with every answer that concerns one: only a real account (never a guest account) is the account
@@ -74,8 +75,10 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   if (!body.start) return { enabled: await pageTakesPayments(params.id) };
   if (body.intentId && !buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
   const visitor = person.signedIn ? `game:${person.identifier}` : `game-guest:${person.name ?? ''}:${body.viewer.chat?.ref ?? ''}`;
-  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys });
+  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys, seesLatest });
   if (outcome.status === 'ok') return { orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer };
   if (outcome.status === 'limit') throw new ArtifactError('limit', 429, 'Too many tries for now.');
+  // This viewer is shown an older published version than the one the owner set these terms on: a definite answer, nothing was made
+  if (outcome.status === 'not_published') throw new ArtifactError('not_published', 409, 'This page isn’t taking payments right now. Try again later.');
   throw new ArtifactError('unavailable', 409, 'Payments are unavailable.', outcome.unsure ? { unsure: true } : undefined);
 });

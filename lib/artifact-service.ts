@@ -182,6 +182,14 @@ async function findShown(artifact: ArtifactRow, shown: Shown) {
   }
 }
 
+/**
+ * When what a person is shown last changed: the publish time for someone shown the published version (a draft's edits are not theirs to
+ * see, not even when they happened), and the artifact's own change time for everyone who sees the latest.
+ */
+function changedAsShown(artifact: Pick<ArtifactRow, 'updatedAt' | 'publishedAt' | 'createdAt'>, pinned: boolean): Date {
+  return pinned ? (artifact.publishedAt ?? artifact.createdAt) : artifact.updatedAt;
+}
+
 function viewOf(artifact: ArtifactRow, shown?: Shown): ArtifactView {
   return {
     id: artifact.id,
@@ -197,7 +205,8 @@ function viewOf(artifact: ArtifactRow, shown?: Shown): ArtifactView {
     chatKind: artifact.chatKind,
     copiedFromId: artifact.copiedFromId,
     createdAt: artifact.createdAt.toISOString(),
-    updatedAt: artifact.updatedAt.toISOString(),
+    // A visitor shown the published version is told when it was published, never when the latest (a draft they cannot see) changed
+    updatedAt: (shown?.pinned ? changedAsShown(artifact, true) : artifact.updatedAt).toISOString(),
     expiresAt: artifact.expiresAt?.toISOString() ?? null,
     published: artifact.publishedVersion !== null && artifact.publishedAt ? { version: artifact.publishedVersion, at: artifact.publishedAt.toISOString() } : null,
   };
@@ -769,8 +778,12 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
   return { artifact: view, version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
 }
 
-/** Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made. */
-export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<void> {
+/**
+ * Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made.
+ * Says whether the viewer is shown the latest version (its owner, the people in its chat, or a link never published) rather than what the
+ * owner published, so a checkout is made only with terms on the version they see.
+ */
+export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ seesLatest: boolean }> {
   const artifact = await loadArtifact(id, ctx.now);
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, ctx.now);
@@ -778,6 +791,7 @@ export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = 
   // A published version that is gone is not there either, so it fails here too, before any checkout is made.
   const shown = shownTo(artifact, who);
   if (shown.pinned) await findShown(artifact, shown);
+  return { seesLatest: !shown.pinned };
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
@@ -1446,11 +1460,33 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, botId?: stri
   const madeByThisBot: Prisma.ArtifactWhereInput[] =
     chat.kind === 'dm' && botId && who.userId ? [{ ownerId: who.userId, makerBotId: botId, chatRef: { not: null }, AND: [notExpiredAt(now)] }] : [];
   const where: Prisma.ArtifactWhereInput = madeByThisBot.length ? { OR: [here, ...madeByThisBot] } : here;
-  return pageOf(where, offset, (artifact) => ({
+  const row = (artifact: ArtifactRow): ChatArtifactView => ({
     // Someone outside the chat reads a shared one by what was published: its title and its version, never the latest
     ...viewOf(artifact, who.inChat || isOwner(artifact, who) ? undefined : shownTo(artifact, who)),
     yours: who.userId !== null && artifact.ownerId === who.userId,
-  }));
+  });
+  // Outside the chat, some are shown as published: they are listed by when they were published, so where one sits never tells that its draft changed
+  return who.inChat ? pageOf(where, offset, row) : pageOfAsShown(where, offset, who, row);
+}
+
+/**
+ * One page of a list for someone outside the chat, most recently changed first by what THEY are shown: an artifact shown as published goes
+ * by its publish time, and one they see the latest of (their own, or a link never published) by its own change time. The order is worked
+ * out on a few columns of every match, then only that page is read whole; the id keeps it fixed between pages, as in `pageOf`.
+ */
+async function pageOfAsShown<View>(where: Prisma.ArtifactWhereInput, offset: number, who: Asker, view: (artifact: ArtifactRow) => View): Promise<ArtifactPage<View>> {
+  const keys = await prisma.artifact.findMany({
+    where,
+    select: { id: true, ownerId: true, chatRef: true, openScope: true, publishedVersion: true, publishedAt: true, createdAt: true, updatedAt: true },
+  });
+  const at = (key: (typeof keys)[number]) => changedAsShown(key, key.publishedVersion !== null && seesPublishedOnly(key, who)).getTime();
+  keys.sort((a, b) => at(b) - at(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  const ids = keys.slice(offset, offset + ARTIFACT_PAGE_SIZE).map((key) => key.id);
+  const rows = ids.length ? await prisma.artifact.findMany({ where: { AND: [where, { id: { in: ids } }] }, include: ARTIFACT_INCLUDE }) : [];
+  const byId = new Map(rows.map((one) => [one.id, one]));
+  const page = ids.flatMap((id) => (byId.has(id) ? [byId.get(id) as ArtifactRow] : []));
+  const end = offset + ids.length;
+  return { artifacts: page.map(view), total: keys.length, next: end < keys.length && ids.length > 0 ? end : null };
 }
 
 /** Every artifact this account owns, from every chat and bot, copies too, a page at a time (Your artifacts in Orbit). */

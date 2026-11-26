@@ -510,6 +510,110 @@ run('payments for pages, in a real database', () => {
     });
   });
 
+  /* ------------------------- terms set on a draft (GPT audit 26 Nov, O2) ------------------------- */
+
+  describe('terms set on a version newer than the one the link shows', () => {
+    /** A page with versions 1..latest, version `published` published (null: never), as the owner's drafts leave it. */
+    async function pageWith(latest: number, published: number | null, openScope = 'link'): Promise<string> {
+      const artifactId = await makeArtifact({ openScope });
+      for (let number = 1; number <= latest; number++) await prisma.artifactVersion.create({ data: { artifactId, number, fileKey: `o2/${artifactId}/${number}.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: latest, publishedVersion: published, publishedAt: published === null ? null : new Date(), publishedTitle: published === null ? null : 'Shop' } });
+      return artifactId;
+    }
+    const publish = (artifactId: string, version: number) => prisma.artifact.update({ where: { id: artifactId }, data: { publishedVersion: version, publishedAt: new Date() } });
+    const gameCall = (artifactId: string, viewer: unknown) => gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer, start: true } }), params({ id: artifactId }));
+    const outsider = { person: { signedIn: true, identifier: `omar-${tag}` }, inChat: false };
+    const owner = { person: { signedIn: true, identifier: `sara-${tag}` }, inChat: false };
+    const word = () => randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+    const wish = () => `i${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+
+    it('refuses a visitor of the published version 1 when the terms were set on draft version 2, charges nothing, and works once the owner publishes again', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 1);
+      const made = await job(serverId, artifactId);
+      expect(made.status).toBe(200);
+      // The Brick is told the terms go live when the owner publishes
+      expect(await made.json()).toMatchObject({ waitsForPublish: true });
+      const sent = gateway();
+      const refused = await start(artifactId);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual({ error: 'This page isn’t taking payments right now. Try again later', code: 'not_published' });
+      // Nothing was made, nothing was sent to the service, nothing was counted
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+      // The same through the game, for someone who sees only what was published
+      const game = await gameCall(artifactId, outsider);
+      expect(game.status).toBe(409);
+      expect(await game.json()).toMatchObject({ error: 'not_published' });
+      expect(sent).toHaveLength(0);
+      // The owner publishes version 2: the same visitor now checks out with the terms version 2 shows
+      await publish(artifactId, 2);
+      const body = await checkout(artifactId);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: body.orderId } })).amountMinor).toBe(4500);
+      expect(sent).toHaveLength(1);
+      // And the job read back no longer waits
+      const read = await readJob(request(`/api/bots/${brick}/key-apps/${serverId}/page-jobs?artifactId=${artifactId}`, { token: SERVICE_TOKEN }), params({ id: brick, serverId }));
+      expect(await read.json()).toMatchObject({ waitsForPublish: false });
+    });
+
+    it('lets the owner check out on the latest version in the game while visitors of the link wait', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 1);
+      await job(serverId, artifactId);
+      gateway();
+      expect((await gameCall(artifactId, owner)).status).toBe(200);
+      expect((await start(artifactId, '203.0.113.20')).status).toBe(409);
+    });
+
+    it('does not wait on a page never published (its link shows the latest), nor on terms set on the published version', async () => {
+      const { serverId } = await connectGateway();
+      const never = await pageWith(2, null);
+      expect(await (await job(serverId, never)).json()).toMatchObject({ waitsForPublish: false });
+      const same = await pageWith(2, 2);
+      expect(await (await job(serverId, same)).json()).toMatchObject({ waitsForPublish: false });
+      gateway();
+      expect((await start(never, '203.0.113.21')).status).toBe(200);
+      expect((await start(same, '203.0.113.22')).status).toBe(200);
+      // A draft made AFTER the terms keeps the terms on the published version: they were set on what visitors see
+      await prisma.artifactVersion.create({ data: { artifactId: same, number: 3, fileKey: `o2/${same}/3.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: same }, data: { latestVersion: 3 } });
+      expect((await start(same, '203.0.113.23')).status).toBe(200);
+    });
+
+    it('refuses when the owner publishes an older version again after setting the terms', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      gateway();
+      expect((await start(artifactId, '203.0.113.24')).status).toBe(200);
+      await publish(artifactId, 1);
+      expect((await start(artifactId, '203.0.113.25')).status).toBe(409);
+    });
+
+    it('still carries on an order made before the terms moved to a draft, at the order’s own amount', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      // The order's start never finished (the server stopped); then the owner made a draft and set the same terms on it
+      const sent = gateway({ createStatus: 503 });
+      const intentId = wish();
+      const code = word();
+      const first = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId, recoveryCode: code }, headers: { 'x-forwarded-for': '203.0.113.26' } }), params({ artifactId }));
+      expect(first.status).toBe(409);
+      expect(await first.json()).toMatchObject({ unsure: true });
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await job(serverId, artifactId);
+      // The same wish again finds its order and carries it on, never a refusal and never a second order
+      gateway();
+      await prisma.appPageOrder.updateMany({ where: { artifactId }, data: { checkedAt: new Date(Date.now() - 3_600_000) } });
+      const again = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId, recoveryCode: code }, headers: { 'x-forwarded-for': '203.0.113.26' } }), params({ artifactId }));
+      expect(again.status).toBe(200);
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+      expect(sent.length).toBeGreaterThan(0);
+    });
+  });
+
   /* ------------------------- is it paid ------------------------- */
 
   describe('deciding that it is paid', () => {

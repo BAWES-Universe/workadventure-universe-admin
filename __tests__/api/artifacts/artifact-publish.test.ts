@@ -331,4 +331,47 @@ describe('artifact Publish', () => {
       expect((await openAs(person('friend'), id, true)).status).toBe(200);
     });
   });
+
+  describe('when it changed, for someone shown what was published (GPT audit 26 Nov, O12)', () => {
+    const T1 = new Date('2026-11-20T10:00:00Z');
+    const T2 = new Date('2026-11-21T10:00:00Z');
+    const T3 = new Date('2026-11-22T10:00:00Z');
+    const rowOf = (id: string) => db.artifacts.find((row) => row.id === id) as { updatedAt: Date; publishedAt: Date | null };
+    const listFor = async (who: Who, inChat: boolean) =>
+      (await call(chatList, { viewer: viewer(who, inChat) })).body as { artifacts: { id: string; updatedAt: string; version: number }[]; total: number };
+
+    it('tells a visitor of the published version when it was published, never when the draft changed; the owner and the chat still see the change time', async () => {
+      const id = await makePage();
+      await shareAs(id, 'link');
+      await publishAs(person('owner'), id, true);
+      await ask(id, PAGE_2);
+      Object.assign(rowOf(id), { publishedAt: T1, updatedAt: T3 });
+      const stranger = await openAs(person('stranger'), id, false);
+      expect(stranger.body.artifact).toMatchObject({ version: 1, updatedAt: T1.toISOString() });
+      expect((await openAs(person('friend'), id, true)).body.artifact).toMatchObject({ version: 2, updatedAt: T3.toISOString() });
+      expect((await openAs(person('owner'), id, false)).body.artifact).toMatchObject({ version: 2, updatedAt: T3.toISOString() });
+    });
+
+    it('lists link-only artifacts by when what the person sees changed, so a draft never moves one up the list', async () => {
+      const drafted = await makePage('Drafted');
+      const other = await makePage('Other');
+      const never = await makePage('Never published');
+      for (const id of [drafted, other, never]) await shareAs(id, 'link');
+      await publishAs(person('owner'), drafted, true);
+      await publishAs(person('owner'), other, true);
+      await ask(drafted, PAGE_2);
+      // Drafted was published first, then changed last; Other was published after it; Never published shows its latest, changed in between
+      Object.assign(rowOf(drafted), { publishedAt: T1, updatedAt: T3 });
+      Object.assign(rowOf(other), { publishedAt: T2, updatedAt: T2 });
+      Object.assign(rowOf(never), { publishedAt: null, updatedAt: new Date('2026-11-21T12:00:00Z') });
+      const outside = await listFor(person('stranger'), false);
+      expect(outside.artifacts.map((a) => a.id)).toEqual([never, other, drafted]);
+      expect(outside.total).toBe(3);
+      expect(outside.artifacts.find((a) => a.id === drafted)).toMatchObject({ version: 1, updatedAt: T1.toISOString() });
+      // In the chat everyone sees the latest, by its change time
+      const inside = await listFor(person('friend'), true);
+      expect(inside.artifacts.map((a) => a.id)).toEqual([drafted, never, other]);
+      expect(inside.artifacts[0].updatedAt).toBe(T3.toISOString());
+    });
+  });
 });

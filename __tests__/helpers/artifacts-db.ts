@@ -151,7 +151,9 @@ const client: Row = {
       if (skip) rows = rows.slice(skip);
       if (take) rows = rows.slice(0, take);
       return rows.map((row) => {
-        if (select) return { id: row.id, versions: db.versions.filter((v) => v.artifactId === row.id).map((v) => ({ fileKey: v.fileKey, media: v.media })) };
+        if (select?.versions) return { id: row.id, versions: db.versions.filter((v) => v.artifactId === row.id).map((v) => ({ fileKey: v.fileKey, media: v.media })) };
+        // Only the columns asked for, as the database gives them
+        if (select) return Object.fromEntries(Object.keys(select).filter((key) => select[key]).map((key) => [key, row[key]]));
         return withOwner(row, include);
       });
     },

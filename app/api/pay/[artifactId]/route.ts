@@ -51,7 +51,7 @@ const bodySchema = z.object({
  * POST /api/pay/:artifactId - start a checkout for the amount the owner set for this page, or get back to a purchase. The body carries no
  * amount on purpose: the amount, the currency and the service are the owner's, never the page's or the visitor's.
  *  - `{}` or `{ intentId, recoveryCode }`: start. The same `intentId` from the same buyer gives the SAME order (even from two tabs at once).
- *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working; with `unsure: true` an order may have been made, so ask with Check payment) · 429 too many.
+ *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working; with `unsure: true` an order may have been made, so ask with Check payment) · 409 not_published (the owner set these terms on a version newer than the one the link shows; nothing was made) · 429 too many.
  *  - `{ check: true, intentId, recoveryCode }`: Check payment, where the order that wish made stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer } · 404.
  *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer.
  *    `via` is `own` (found by their account or recovery code) or `receipt` (found only through a `receiptCode`, which finds and never starts).
@@ -95,5 +95,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys: buyerKeys.slice(1) });
   if (outcome.status === 'ok') return respond({ orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer });
   if (outcome.status === 'limit') return respond({ error: 'Too many tries for now', code: 'limit' }, 429);
+  // The link shows an older published version than the one the owner set these terms on: a definite answer, nothing was made. The words
+  // never say a newer version exists (game #2115): only the owner is told why (their Brick, when they set the terms)
+  if (outcome.status === 'not_published') return respond({ error: 'This page isn’t taking payments right now. Try again later', code: 'not_published' }, 409);
   return respond({ error: 'Payments are unavailable', code: 'unavailable', ...(outcome.unsure ? { unsure: true } : {}) }, 409);
 }

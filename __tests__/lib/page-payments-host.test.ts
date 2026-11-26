@@ -904,6 +904,13 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(unsure.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
     unsure.host.destroy();
+    // The owner changed the payment on a version this link does not show yet (O2): definite, the line says why, the page hears only unavailable
+    const unpublished = setup(() => ({ status: 409, body: { code: 'not_published' } }));
+    unpublished.tap({ request: 'a' });
+    await flush();
+    expect(unpublished.lines.at(-1)).toMatchObject({ problem: 'not_published', canCheck: false });
+    expect(unpublished.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' }]);
+    unpublished.host.destroy();
   });
 
   it('keeps asking Restore, not the order, while the buyer’s own unfinished start cannot be carried on yet, and takes its link when it comes', async () => {

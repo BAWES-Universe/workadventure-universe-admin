@@ -156,7 +156,12 @@ const jobView = (job: { id: string; artifactId: string; connectionId: string; am
 });
 
 export type CreateJobOutcome =
-  | { status: 'ok'; job: JobView; replaced: boolean }
+  /**
+   * `waitsForPublish`: the page's link still shows an older published version, so nobody who opens it by its link can pay with these terms
+   * until the owner publishes this version (or a later one). The owner is told so: checkouts on the older version are refused, never made with
+   * terms its visitors were not shown.
+   */
+  | { status: 'ok'; job: JobView; replaced: boolean; waitsForPublish: boolean }
   | { status: 'refused'; reason: 'gone' | 'off' | 'not_owner' | 'incomplete' }
   | { status: 'not_found' }
   | { status: 'no_payments' }
@@ -211,7 +216,7 @@ export async function createPageJob(input: CreateJob): Promise<CreateJobOutcome>
   if (!row || !connection || !connection.ownerId) return { status: 'refused', reason: 'gone' };
   const definition = connection.kind === 'direct' ? definitionOf(connection) : null;
   if (!definition?.payment) return { status: 'no_payments' };
-  const artifact = await prisma.artifact.findUnique({ where: { id: input.artifactId }, select: { id: true, ownerId: true, kind: true, expiresAt: true, latestVersion: true } });
+  const artifact = await prisma.artifact.findUnique({ where: { id: input.artifactId }, select: { id: true, ownerId: true, kind: true, expiresAt: true, latestVersion: true, publishedVersion: true } });
   // Someone else's page, or one that is not there, is the same answer: the owner only ever changes their own
   if (!artifact || artifact.ownerId !== connection.ownerId || (artifact.expiresAt && artifact.expiresAt.getTime() <= Date.now())) return { status: 'not_found' };
   if (artifact.kind !== 'app' && artifact.kind !== 'page') return { status: 'bad_terms', message: 'Only a page that runs can take a payment' };
@@ -232,7 +237,23 @@ export async function createPageJob(input: CreateJob): Promise<CreateJobOutcome>
   const data = { ownerId: connection.ownerId, connectionId: connection.id, definitionHash: connection.definitionHash as string, artifactVersion: artifact.latestVersion, amountMinor, currency, description, madeByBot: row.bot.name.slice(0, 255), status: 'active', stoppedAt: null };
   const existing = await prisma.appPageJob.findUnique({ where: { artifactId: artifact.id }, select: { id: true } });
   const job = await prisma.appPageJob.upsert({ where: { artifactId: artifact.id }, create: { artifactId: artifact.id, ...data }, update: data });
-  return { status: 'ok', job: jobView(job, connection.name), replaced: !!existing };
+  return { status: 'ok', job: jobView(job, connection.name), replaced: !!existing, waitsForPublish: waitsForPublish(job.artifactVersion, artifact.publishedVersion) };
+}
+
+/**
+ * The terms were set on a version newer than the one the page's link shows (a draft after a publish): people who open it by its link are shown
+ * the older version, so they cannot pay until the owner publishes again. A page never published shows its latest, so it never waits.
+ */
+export function waitsForPublish(termsVersion: number, publishedVersion: number | null): boolean {
+  return publishedVersion !== null && publishedVersion < termsVersion;
+}
+
+/**
+ * The version a checkout's buyer is shown: the latest for its owner and the people in its chat (`seesLatest`), and for everyone else what the
+ * owner published, or the latest while nothing was ever published (game #2115).
+ */
+export function shownVersionFor(artifact: { latestVersion: number; publishedVersion: number | null }, seesLatest: boolean): number {
+  return seesLatest || artifact.publishedVersion === null ? artifact.latestVersion : artifact.publishedVersion;
 }
 
 /**
@@ -240,13 +261,13 @@ export async function createPageJob(input: CreateJob): Promise<CreateJobOutcome>
  * to find out. Only for the Brick's own app and the owner's own page: a job of another app, another owner or another page is "not found".
  * Counts no use of the app and writes nothing.
  */
-export async function readPageJob(input: { botId: string; serverId: string; artifactId: string }): Promise<{ status: 'ok'; job: JobView } | { status: 'not_found' }> {
+export async function readPageJob(input: { botId: string; serverId: string; artifactId: string }): Promise<{ status: 'ok'; job: JobView; waitsForPublish: boolean } | { status: 'not_found' }> {
   const row = await prisma.botMcpServer.findFirst({ where: { id: input.serverId, botId: input.botId }, include: { connection: { select: { id: true, name: true, ownerId: true } } } });
   const connection = row?.connection;
   if (!row || !connection?.ownerId) return { status: 'not_found' };
-  const job = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId } });
+  const job = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { artifact: { select: { publishedVersion: true } } } });
   if (!job || job.connectionId !== connection.id || job.ownerId !== connection.ownerId) return { status: 'not_found' };
-  return { status: 'ok', job: jobView(job, connection.name) };
+  return { status: 'ok', job: jobView(job, connection.name), waitsForPublish: waitsForPublish(job.artifactVersion, job.artifact.publishedVersion) };
 }
 
 /** Stops a page taking payments: the owner's, and at once. A checkout already open can still finish, and is still checked. */
@@ -282,6 +303,8 @@ export type CheckoutOutcome =
   | { status: 'ok'; orderId: string; checkoutUrl: string; amount: string; currency: string; app: string; reused: boolean }
   /** `unsure`: an order may exist for this wish (the answer was lost, cut or late), so the host offers Check payment; without it nothing was made. */
   | { status: 'unavailable'; unsure?: true }
+  /** The buyer is shown an older version of the page than the one the owner set these terms on: nothing was made or charged, the owner must publish again. */
+  | { status: 'not_published' }
   | { status: 'limit' };
 
 export interface StartCheckout {
@@ -297,6 +320,11 @@ export interface StartCheckout {
   buyerKey?: string | null;
   /** Other keys the same buyer's earlier orders may be under (see `buyerKeysOf`): the wish is looked up under all of them. */
   alsoBuyerKeys?: string[];
+  /**
+   * The buyer is shown the page's latest version: its owner, or someone in its chat in the game. Left out, the buyer is shown what the owner
+   * published (anyone who opens it by its link), so a checkout is only made with terms set on that version or an older one.
+   */
+  seesLatest?: boolean;
 }
 
 const HOUR = 3_600_000;
@@ -308,13 +336,14 @@ const START_GRACE_MS = 2_000;
 const UNSURE_RETRY_MS = 5_000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-type CheckoutJob = Prisma.AppPageJobGetPayload<{ include: { connection: true; artifact: { select: { expiresAt: true } } } }>;
+const CHECKOUT_JOB = { connection: true, artifact: { select: { expiresAt: true, latestVersion: true, publishedVersion: true } } } as const;
+type CheckoutJob = Prisma.AppPageJobGetPayload<{ include: typeof CHECKOUT_JOB }>;
 
 /**
  * Whether a checkout may start on this job right now, and with what: the definition it would use. The same test runs twice, once to
  * find the owner and once under the lock on the job and the app, so a change that committed in between is never missed.
  */
-function checkoutTerms(job: CheckoutJob | null) {
+function checkoutTerms(job: CheckoutJob | null, seesLatest: boolean) {
   const connection = job?.connection;
   if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct') return null;
   // A key marked as stopped is not a reason to refuse here: the call itself finds out, and a good call is what clears the mark
@@ -324,6 +353,9 @@ function checkoutTerms(job: CheckoutJob | null) {
   if (definition?.modes && !connection.keyMode) return null;
   // A definition that changed since the owner asked for this is not the one they agreed to: payments wait for them to ask again
   if (!definition?.payment || job.definitionHash !== connection.definitionHash) return null;
+  // Terms set on a version newer than the one this buyer is shown (a draft, while the link still shows what was published before) are not
+  // the terms that page showed them: nothing is made until the owner publishes again
+  if (shownVersionFor(job.artifact, seesLatest) < job.artifactVersion) return 'not_published' as const;
   return { job, connection, definition, payment: definition.payment };
 }
 
@@ -367,8 +399,10 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     const made = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
     if (made) return carryOn(made.id, limits, { resume: true, wait: true }, deps);
   }
-  const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
+  const seesLatest = input.seesLatest === true;
+  const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: CHECKOUT_JOB }), seesLatest);
   if (!first) return { status: 'unavailable' };
+  if (first === 'not_published') return { status: 'not_published' };
   const origin = ownOrigin();
   if (!origin) return { status: 'unavailable' };
   const hash = visitorHash(input.visitor);
@@ -390,8 +424,9 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     // The app to hold is the one the locked job names now: the owner may have pointed the page at another app since the first read
     const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${held[0].connectionId} FOR SHARE`;
     if (app.length === 0) return 'gone' as const;
-    const terms = checkoutTerms(await tx.appPageJob.findUnique({ where: { id: first.job.id }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
+    const terms = checkoutTerms(await tx.appPageJob.findUnique({ where: { id: first.job.id }, include: CHECKOUT_JOB }), seesLatest);
     if (!terms) return 'gone' as const;
+    if (terms === 'not_published') return 'not_published' as const;
     const since = new Date(Date.now() - HOUR);
     // Checkouts are counted on their own: a Brick's use of its owner's own key is never limited and never shares this total (Khalid, 26 Nov 2026),
     // so however busy Bricks are, they can never use up what checkouts may do, and checkouts never use up what Bricks may do. Asks about payments
@@ -425,6 +460,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     return { order: made, ...terms };
   });
   if (started === 'gone') return { status: 'unavailable' };
+  if (started === 'not_published') return { status: 'not_published' };
   if (started === 'limit') return { status: 'limit' };
   if (!('order' in started)) return carryOn(started.again, limits, { resume: true, wait: true }, deps);
   const { order, connection, definition, payment } = started;
@@ -551,7 +587,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
   // earlier, so the next ask may carry on soon). It is not the later of the two: a start that failed quickly has a recent `createdAt` and must not hold it.
   const lastTried = (order: { createdAt: Date; checkedAt: Date | null }) => (order.checkedAt ?? order.createdAt).getTime();
   for (let round = 0; round < 2; round += 1) {
-    const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { include: { connection: true, artifact: { select: { expiresAt: true } } } } } });
+    const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { include: CHECKOUT_JOB } } });
     if (!order) return unavailable;
     if (order.status === 'pending' || order.status === 'paid') {
       if (!order.checkoutUrl) return maybeMade;
@@ -583,7 +619,10 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     const origin = ownOrigin();
     // What the page was set up with when the wish was made must still hold: a stopped page, an app that is gone, a changed definition or a key
     // of another kind is not a payment to start now (the order is closed, and a new tap makes a new one)
-    const terms = checkoutTerms(order.job);
+    // The order already holds the terms its buyer was shown when it was made (its own amount, currency and words are what is sent), so the
+    // version check is not made again here: a change of amount or currency since then still closes it, below
+    const found = checkoutTerms(order.job, true);
+    const terms = found === 'not_published' ? null : found;
     const fail = async (reason: string) => {
       await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason, lease: { checkedAt: tookAt }, data: { closedAt: new Date() } }).catch(() => undefined);
       return maybeMade;
