@@ -327,7 +327,7 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   const load = () =>
     prisma.botMcpServer.findUnique({
       where: { id: grant.id },
-      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
+      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true, settingByPerson: true } } },
     });
   let server = await load();
   if (!server) return null;
@@ -352,7 +352,9 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     const heading = tool.heading as Heading;
     // A row with no choice of its own: an action Universe starts on its own choice (Run a workflow asks first) is judged by it here too,
     // so a heading moved since the rows were last brought up to date never makes it looser for a moment
-    const own = (tool.setting as Setting | null) ?? startingChoice(toolkit, tool.name, settings[heading]);
+    // Universe's starting choice is worked out from the heading read with it (never the one saved before the heading last moved); a
+    // person's choice is theirs as saved
+    const own = startsOn(toolkit, tool.name) && !tool.settingByPerson ? startingChoice(toolkit, tool.name, settings[heading]) : (tool.setting as Setting | null);
     const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(own, heading, settings) };
     const key = slugKey(tool.name);
     const before = rows.get(key);

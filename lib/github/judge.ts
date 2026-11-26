@@ -16,9 +16,18 @@ export async function gitHubJudgeFor(botId: string, connectionId: string): Promi
   if (judge) return judge;
   const grant = await prisma.botMcpServer.findFirst({
     where: { botId, connectionId },
-    select: { lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true, tools: { select: { name: true, heading: true, suggestedHeading: true } } },
+    select: {
+      appActionsVersion: true,
+      lookUpSetting: true,
+      makeSetting: true,
+      changeSetting: true,
+      deleteSendSetting: true,
+      tools: { select: { name: true, heading: true, suggestedHeading: true, setting: true } },
+    },
   });
   if (!grant) return null;
+  // Brought over between the two reads: judged by its rows (and any choice a person has made since), never by what it was before
+  if (grant.appActionsVersion !== null) return actionJudgeFor(botId, connectionId);
   const settings = settingsOf(grant);
   const byKey = new Map(GITHUB_ACTIONS.map((action) => [slugKey(action.slug), action]));
   // What the grant's own rows judged each tool by before (the bot server's list, under the heading a person or the bot server put it):
@@ -26,9 +35,9 @@ export async function gitHubJudgeFor(botId: string, connectionId: string): Promi
   const before = new Map<string, Setting>();
   for (const tool of grant.tools) {
     const heading = (tool.heading ?? tool.suggestedHeading) as Heading | null;
-    if (!heading) continue;
     const key = slugKey(tool.name);
-    before.set(key, stricterSetting(before.get(key) ?? null, settings[heading])!);
+    const judged = stricterSetting(heading ? settings[heading] : null, tool.setting as Setting | null);
+    if (judged) before.set(key, stricterSetting(before.get(key) ?? null, judged)!);
   }
   return {
     toolkit: GITHUB_ACTIONS_KEY,

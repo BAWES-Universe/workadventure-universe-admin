@@ -210,6 +210,19 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     expect(await row()).toBe('off');
   });
 
+  it('never judges by a starting choice saved before the heading moved, and a grant not brought over keeps any Off its rows hold', async () => {
+    const sara = await withGitHub('sara');
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    // Universe's saved start (Asks first under Right away), then the heading set Off with nothing read since
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'off' } });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+
+    const omar = await withGitHub('omar');
+    await syncCatalog(omar.brickId, omar.serverId, { tools: [{ name: 'github_merge_pull_request', fingerprint: 'f-merge', suggestedHeading: 'changesThings', suggestionSource: 'server' }] });
+    await prisma.botMcpTool.updateMany({ where: { serverId: omar.serverId, name: 'github_merge_pull_request' }, data: { setting: 'off' } });
+    expect((await gitHubJudgeFor(omar.brickId, omar.connectionId))!.judge('github_merge_pull_request').setting).toBe('off');
+  });
+
   it('judges an action of Universe’s list that the grant has no row for by Universe’s list, not as Right away', async () => {
     const sara = await withGitHub('sara');
     await readServerTools(sara.brickId, sara.serverId, { appActions: true });
