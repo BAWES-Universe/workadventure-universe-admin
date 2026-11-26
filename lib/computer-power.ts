@@ -104,7 +104,8 @@ const ROW_TRIES = 3;
 export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock: () => Date) => Promise<T>): Promise<T> {
   const began = Date.now();
   // Read by the pause once it holds every lock it needs (`decidePauseIn`), so a wait for the job's lock counts too, not only the wait for the row
-  const clock = () => new Date(now.getTime() + (Date.now() - began));
+  // Moved on in whole seconds only (the books count whole seconds, and the few milliseconds of an ordinary pause that waited for nothing are not a wait: a pause that did not wait keeps the caller's time exactly)
+  const clock = () => new Date(now.getTime() + Math.floor((Date.now() - began) / 1000) * 1000);
   for (let attempt = 1; ; attempt++) {
     try {
       return await run(clock);
