@@ -11,6 +11,7 @@
  */
 
 import { prisma } from '@/lib/db';
+import type { OutsideManifest } from '@/lib/computer-outside';
 import { Agent37Client } from '@/lib/agent37/client';
 import { Agent37ComputerProvider } from '@/lib/agent37/provider';
 import { dbImageStore } from '@/lib/agent37/image';
@@ -91,6 +92,8 @@ export interface PackInventory {
   packages: string[];
   /** Why this computer cannot be packed away yet (more outside the home folder than can be carried, or the image's own list is missing); null when it can. */
   blocked: string | null;
+  /** What `prepack` copied outside the home folder, as the script saw it (see `OutsideManifest`); null or absent when nothing was verified. Kept on the copy's row, never taken from the home folder. */
+  outside?: OutsideManifest | null;
 }
 
 /** Where a computer fetches a copy from when it is restored: Orbit's own address, a key that lasts a short while and only for this copy, and the SHA-256 the bytes must have. */
@@ -98,6 +101,8 @@ export interface RestoreSource {
   url: string;
   token: string;
   sha256: string;
+  /** What `prepack` printed for this copy (kept on its row): handed to `finish`, which puts back only what matches it. Null (or absent) for a copy made before it was kept: nothing outside the home folder is put back. */
+  outside?: OutsideManifest | null;
 }
 
 export interface RestoreResult {
@@ -106,6 +111,8 @@ export interface RestoreResult {
   reason: string | null;
   /** How long the restore took on the computer, in milliseconds. */
   ms: number;
+  /** `unverified`: the copy has no list of what was outside the home folder (it was made before the list was kept), so nothing outside the home folder was put back. */
+  outside?: 'unverified';
 }
 
 export interface ComputerProvider {
