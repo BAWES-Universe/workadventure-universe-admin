@@ -4292,18 +4292,33 @@ async function wakeForReturn(botId: string): Promise<'up' | 'pending'> {
   return woke;
 }
 
-/** The running jobs' stretch so far goes into `secondsRun` and the stretch pauses. Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease version moves, as every change of a job's billed basis does. */
+/**
+ * The running jobs' stretch so far goes into `secondsRun` and the stretch pauses, up to the last moment the machine is known to have been awake and no further (Opus on #1040, N2 and N3): the later of the job's last awake proof
+ * (`provedAtOf`) and the moment a stop or sleep of ours was sent to this machine after the stretch began (`computer_power_ops`: the machine was awake until we sent it), and never later than `now`. So the time a stopped machine sat
+ * asleep (the person holding it, a Restart first's own stop, a late stop found by another job's turn) is never banked, however long after the stop this runs. A banked job carries its cap in `awakeProvedAt` (a job with no stretch and
+ * no mark has not started yet: see `restartBankedStretches`). Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease version moves, as every change of a job's billed basis does.
+ */
 async function bankStretches(botId: string, now: Date): Promise<void> {
-  const running = await prisma.computerJob.findMany({ where: { botId, status: 'running', NOT: { stretchStarted: null } }, select: { id: true, secondsRun: true, stretchStarted: true } });
+  const running = await prisma.computerJob.findMany({ where: { botId, status: 'running', NOT: { stretchStarted: null } }, select: { id: true, secondsRun: true, stretchStarted: true, awakeProvedAt: true } });
+  if (running.length === 0) return;
+  const stop = await prisma.computerPowerOp.findFirst({ where: { botId }, orderBy: { sentAt: 'desc' }, select: { sentAt: true } });
   for (const job of running) {
     if (!job.stretchStarted) continue;
-    const stretch = Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND));
-    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', stretchStarted: job.stretchStarted }, data: { secondsRun: job.secondsRun + stretch, stretchStarted: null, leaseVersion: { increment: 1 } } });
+    const proof = provedAtOf(job, now)?.getTime() ?? job.stretchStarted.getTime();
+    const stopped = stop && stop.sentAt.getTime() > job.stretchStarted.getTime() ? stop.sentAt.getTime() : 0;
+    const cap = Math.min(now.getTime(), Math.max(proof, stopped));
+    const stretch = Math.max(0, Math.round((cap - job.stretchStarted.getTime()) / SECOND));
+    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', stretchStarted: job.stretchStarted }, data: { secondsRun: job.secondsRun + stretch, stretchStarted: null, awakeProvedAt: new Date(cap), leaseVersion: { increment: 1 } } });
   }
 }
 
+/**
+ * The stretches `bankStretches` banked start again at readiness, and only those: a job that is banked has no stretch and carries its last awake proof, whereas a fresh job whose own start has not marked it ready, and a job whose
+ * browser is still being brought back (`prepState`), have no stretch and no proof and are never started here, since their time is booked by their own ready write (Opus and Sentry on #1040, N1). The machine answered at `now`, which is
+ * also the proof the stretch carries from here.
+ */
 async function restartBankedStretches(botId: string, now: Date): Promise<void> {
-  await prisma.computerJob.updateMany({ where: { botId, status: 'running', stretchStarted: null }, data: { stretchStarted: now, leaseVersion: { increment: 1 } } });
+  await prisma.computerJob.updateMany({ where: { botId, status: 'running', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } }, data: { stretchStarted: now, awakeProvedAt: now, leaseVersion: { increment: 1 } } });
 }
 
 /**

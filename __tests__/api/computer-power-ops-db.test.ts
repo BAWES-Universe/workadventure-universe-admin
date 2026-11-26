@@ -30,7 +30,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals } from '@/lib/computer';
-import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
+import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, takeWakeTicketForTests, wakeIfStopped } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
 import { endPowerOp, openPowerOpOf, powerTiming, underPowerOp, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
@@ -596,15 +596,78 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       if (!a.ok) throw new Error('no job');
       expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      // The stretch ran for 100 s before the fence stopped the machine (the stop op it sent is the last moment the machine was awake)
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { stretchStarted: new Date(Date.now() - 100_000) } });
+      await prisma.$executeRaw`INSERT INTO "computer_power_ops" ("id", "bot_id", "provider_ref", "kind", "sent_at", "beat_at", "done_at") SELECT ${randomUUID()}, ${sara.brickId}, ${sara.ref}, 'stop', t.at, t.at, t.at FROM (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS at) t`;
       const before = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
       expect(before.stretchStarted).not.toBeNull();
       expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
       const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
-      // Banked up to the moment the machine was found stopped, and the stretch starts again when it answers (now), not at the take-over
-      expect(after.secondsRun).toBeGreaterThan(before.secondsRun);
+      // Banked up to the moment the machine was stopped, and the stretch starts again when it answers (now), not at the take-over
+      expect(after.secondsRun).toBeGreaterThanOrEqual(99);
       expect(after.stretchStarted).not.toBeNull();
       expect(after.stretchStarted!.getTime()).toBeGreaterThan(Date.now() - 60_000);
       expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+    }, 30_000);
+
+    it('Sentry on #1040: a hand back that finds the machine awake does not start the stretch of a job whose browser is still being brought back', async () => {
+      const sara = await owner('handback-prep-unbilled');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      // The job is running but not ready: its browser is restoring, so no time is booked yet
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { prepState: 'restoring', stretchStarted: null } });
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', prepState: 'restoring', stretchStarted: null });
+    }, 30_000);
+
+    it('Opus on #1040, N1: only the stretches the wake banked start again: a job whose own start has not marked it ready, and one whose browser is being brought back, stay without a stretch', async () => {
+      const sara = await owner('wake-banks-only-its-own');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      // Two jobs beside it that have no stretch and were not banked: one mid-start (its own ready write is still to land) and one restoring its browser
+      const midStart = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'mid-start', status: 'running', writes: false, startedAt: NOW } });
+      const restoring = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'restoring', status: 'running', writes: false, startedAt: NOW, prepState: 'restoring' } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      expect(await wakeIfStopped(sara.brickId)).toBe('up');
+      const [aAfter, midAfter, restoringAfter] = await Promise.all([a.job.id, midStart.id, restoring.id].map((id) => prisma.computerJob.findUniqueOrThrow({ where: { id } })));
+      expect(aAfter.stretchStarted).not.toBeNull();
+      expect(aAfter.stretchStarted!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+      expect(midAfter).toMatchObject({ stretchStarted: null, awakeProvedAt: null });
+      expect(restoringAfter).toMatchObject({ stretchStarted: null, awakeProvedAt: null, prepState: 'restoring' });
+      // The job whose start was in flight can still be marked ready by its own start
+      expect(await prisma.$executeRaw`UPDATE "computer_jobs" SET "stretch_started" = NOW() WHERE "id" = ${midStart.id} AND "stretch_started" IS NULL`).toBe(1);
+    }, 30_000);
+
+    it('Opus on #1040, N2: a job found beside one the machine was lost under is banked only to its last awake proof, never to now', async () => {
+      const sara = await owner('wake-banks-to-proof');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      // Its stretch began ten minutes ago, the machine was last proved awake a minute into it, and it was found stopped (nobody sent that stop)
+      const began = new Date(Date.now() - 600_000);
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { stretchStarted: began, awakeProvedAt: new Date(began.getTime() + 60_000) } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      expect(await wakeIfStopped(sara.brickId)).toBe('up');
+      const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
+      expect(after.secondsRun).toBe(60);
+      expect(after.stretchStarted!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    }, 30_000);
+
+    it('Opus on #1040, N3: a hand back long after the fence stopped the machine banks the stretch only to the moment the stop was sent, not to the hand back', async () => {
+      const sara = await owner('handback-long-after-stop');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      // The stretch began 1000 s ago; our stop was sent 400 s ago; the person held the computer since, and hands it back now
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { stretchStarted: new Date(Date.now() - 1_000_000), awakeProvedAt: null } });
+      await prisma.$executeRaw`INSERT INTO "computer_power_ops" ("id", "bot_id", "provider_ref", "kind", "sent_at", "beat_at", "done_at") VALUES (${randomUUID()}, ${sara.brickId}, ${sara.ref}, 'stop', (clock_timestamp() AT TIME ZONE 'UTC') - interval '400 seconds', (clock_timestamp() AT TIME ZONE 'UTC') - interval '400 seconds', (clock_timestamp() AT TIME ZONE 'UTC') - interval '399 seconds')`;
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+      const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
+      // 1000 s - 400 s = 600 s of the stretch ran before the stop (a second either way for the clocks), not the 1000 s a bank at the hand back would give
+      expect(after.secondsRun).toBeGreaterThanOrEqual(598);
+      expect(after.secondsRun).toBeLessThanOrEqual(603);
+      expect(after.stretchStarted).not.toBeNull();
     }, 30_000);
 
     it('Opus on #1040, F3: a hand back whose transition was left by a dead leader and whose wake stays pending answers in progress at once; it does not resume again and again past the deadline', async () => {
