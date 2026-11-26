@@ -36,6 +36,7 @@ export async function POST(request: NextRequest) {
       error = false,
       timestamp = new Date(),
       greeting = false,
+      imageRead = false,
       eventId: clientEventId = null,
       runId: sentRunId = null,
     } = body;
@@ -74,6 +75,9 @@ export async function POST(request: NextRequest) {
     const talked = typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null;
     const named = await resolveUsagePerson(talked, isGuest);
     const task = readUsageChannel(channel) === 'task';
+    // A look Universe AI's vision took at an image for this bot (game: the describe call): that person's Universe AI use, never a reply.
+    // A bot server also marks it a greeting, so an Orbit from before this still keeps it out of every reply count; this one stores what it is
+    const image = imageRead === true;
 
     // This report's own id, made here and never taken from the request: every write of this report carries it, so a write that meets the row an
     // earlier write of the same report left (its commit went through and only the answer was lost) is told so by the database, exactly
@@ -124,15 +128,17 @@ export async function POST(request: NextRequest) {
         talkedPersonId: person.personId,
         talkedGuest: person.guest,
         // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
-        greeting: greeting === true,
+        greeting: greeting === true && !image,
+        // A look at an image (see above): Universe pays for it and it is the person's use, but it is never counted as a reply anywhere
+        imageRead: image,
         // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
         brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
         reportKey,
       };
-      // A row that counts as a reply (not an error, not a greeting) is written under the lock every voice note reservation counts under
+      // A row that counts as a reply (not an error, not a greeting, not a look at an image) is written under the lock every voice note reservation counts under
       // (lib/voice-note-turns.ts): a reservation reads the notes on their way and then the replies used inside one hold of it, so a row is never
       // written between those two reads and a note that was answered is never missed by one of them. Other rows are written as before
-      if (error !== true && greeting !== true) {
+      if (error !== true && !data.greeting && !data.imageRead) {
         try {
           return await prisma.$transaction(async (tx) => {
             await lockSpeech(tx);
@@ -166,6 +172,7 @@ export async function POST(request: NextRequest) {
           apiCalls: row.apiCalls,
           error: row.error,
           greeting: row.greeting,
+          imageRead: row.imageRead,
           costBasis: row.costBasis,
           costMicros: row.costMicros,
           tokens: { input: row.inputTokens, cached: row.cachedTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens, reasoning: row.reasoningTokens },

@@ -32,7 +32,7 @@ const db = prisma as unknown as {
 const mishari = { id: 'mishari', uuid: 'u', email: 'm@example.com', name: 'Mishari', tags: [], isSuperAdmin: false };
 const sandbox = { world: { universe: { id: 'sandbox', name: 'Sandbox Universe' } } };
 const get = (query: string, headers: Record<string, string> = {}) => GET(new NextRequest(`http://localhost:3333/api/me/bot-ai?${query}`, { headers }));
-const myKey = { providerId: 'key-1', name: 'My DeepSeek', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] as { models: unknown }[] };
+const myKey = { providerId: 'key-1', name: 'My DeepSeek', endpoint: 'https://api.deepseek.com', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] as { models: unknown }[] };
 /** What the provider lists for the key; facts come from DeepSeek's docs (knownFacts). */
 const DEEPSEEK_MODELS = [{ id: 'deepseek-v4-flash', vision: false }, { id: 'deepseek-v4-flash-vision-exp', vision: true }, { id: 'deepseek-v4-pro', vision: false }];
 
@@ -69,7 +69,7 @@ describe('GET /api/me/bot-ai', () => {
       universeAi: { available: true, model: 'deepseek-v4-flash', supportsVision: null, limits: { reply: 32000, steps: 30 } },
       maker: { id: 'mishari', name: 'Mishari' },
       viewerIsMaker: true,
-      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false, limits: { reply: 32000, steps: 30 } }],
+      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', addressTyped: false, universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false, limits: { reply: 32000, steps: 30 } }],
       currentKey: null,
       vision: { saved: null, savedKey: null },
       providers: null,
@@ -81,6 +81,26 @@ describe('GET /api/me/bot-ai', () => {
     db.botsAiProvider.findMany.mockResolvedValueOnce([{ ...myKey, settings: { kind: 'deepseek', modelFacts: { 'deepseek-v4-pro': { tools: false } } } }]);
     const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
     expect(body.keys[0].models.map((model: { id: string }) => model.id)).toEqual(['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']);
+  });
+
+  it('says when the person typed a key’s address, so the Vision row defaults to This model there: their own computer, or their own NIM', async () => {
+    db.botsAiProvider.findMany.mockResolvedValueOnce([
+      myKey,
+      { ...myKey, providerId: 'key-2', endpoint: 'http://192.168.1.20:1234', settings: { kind: 'lmstudio' } },
+      { ...myKey, providerId: 'key-3', endpoint: 'https://integrate.api.nvidia.com/v1', settings: { kind: 'nim' } },
+      { ...myKey, providerId: 'key-4', endpoint: 'https://nim.my-gpu.example/v1', settings: { kind: 'nim' } },
+    ]);
+    const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
+    expect(body.keys.map((key: { id: string; group: string; addressTyped: boolean }) => [key.id, key.group, key.addressTyped])).toEqual([
+      ['key-1', 'hosted', false],
+      ['key-2', 'own-computer', true],
+      ['key-3', 'hosted', false],
+      ['key-4', 'hosted', true],
+    ]);
+    // The key the bot is on says the same
+    db.bot.findUnique.mockResolvedValue({ id: 'sam', roomId: 'room-1', aiProviderRef: 'key-4', createdBy: { id: 'mishari', name: 'Mishari' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-4', name: 'My NIM', ownerId: 'mishari', owner: { name: 'Mishari' }, endpoint: 'https://nim.my-gpu.example/v1', settings: { kind: 'nim' }, model: 'm', supportsVision: false, lends: [] });
+    expect((await (await get('botId=sam')).json()).currentKey).toMatchObject({ group: 'hosted', addressTyped: true });
   });
 
   it('resolves a play address to the room', async () => {
@@ -140,10 +160,10 @@ describe('GET /api/me/bot-ai', () => {
 
   it('says the key is the viewer’s when it is, for the maker’s own bot', async () => {
     db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', createdBy: { id: 'mishari', name: 'Mishari' } });
-    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', owner: { name: 'Mishari' }, settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', owner: { name: 'Mishari' }, endpoint: 'https://api.deepseek.com', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
-    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
+    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', addressTyped: false, model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
     expect(body.viewerIsMaker).toBe(true);
   });
 

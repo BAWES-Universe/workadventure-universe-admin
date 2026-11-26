@@ -192,8 +192,9 @@ export async function visionPlan(bot: BotForCredentials, main: ServedProvider, o
       ? autoVision({
           ownKeyId: main.providerId,
           sees: mainSees,
-          // A key on the person's own computer never sends images to Universe AI unless they pick it: they would leave that computer
-          ownComputer: main.keyGroup === 'own-computer',
+          // A key at an address the person typed (their own computer, or their own server for a hosted kind such as their own NIM)
+          // never sends images to Universe AI unless they pick it: they would leave that computer or server
+          ownComputer: main.keyGroup === 'own-computer' || main.keyAddressTyped === true,
           sameKeyModel:
             keyVisionModels({ model: key.model, supportsVision: key.supportsVision, settings: key.settings }).find(
               (model) => model !== main.model && (!lend || lend.includes(model)),

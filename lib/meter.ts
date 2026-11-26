@@ -162,6 +162,8 @@ export interface ModelCallFacts {
   apiCalls: number;
   error: boolean;
   greeting: boolean;
+  /** A look Universe AI's vision took at an image: the person's use and Universe's cost, never a reply. Missing means no. */
+  imageRead?: boolean;
   costBasis: string | null;
   costMicros: number | null;
   tokens?: { input?: number | null; cached?: number | null; cacheWrite?: number | null; output?: number | null; reasoning?: number | null };
@@ -238,6 +240,7 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
           channel: facts.channel,
           error: facts.error,
           greeting: facts.greeting,
+          imageRead: facts.imageRead === true,
           ...(facts.runId ? { runId: facts.runId } : {}),
           // Attributed to a Brick's owner because nobody talked to it: today's reply counts have no person for these, so shadow checks leave them out
           byOwner: !facts.talkedPersonId && personId !== null,

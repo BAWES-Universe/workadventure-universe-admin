@@ -80,7 +80,7 @@ export async function compareReplyWindow(personId: string, now: Date = new Date(
   const since = window.startedAt;
   // Both counts from one snapshot, so a reply that is counted on one side the moment before the other is never a difference
   const [today, books] = await prisma.$transaction(async (tx) => [
-    await tx.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } } }),
+    await tx.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, imageRead: false, timestamp: { gte: since } } }),
     await tx.meterEvent.count({
       where: {
         personKey: `person:${personId}`,
@@ -88,6 +88,8 @@ export async function compareReplyWindow(personId: string, now: Date = new Date(
         payerKind: 'universe',
         // Work a Brick did on its own is put to its owner in the books; today's count has no person for it, so it is left out of this comparison
         AND: [{ detail: { path: ['error'], equals: false } }, { detail: { path: ['greeting'], equals: false } }, { detail: { path: ['byOwner'], equals: false } }],
+        // A look Universe AI's vision took at an image is not a reply on either side (events from before it have no such mark, and are not one)
+        NOT: { detail: { path: ['imageRead'], equals: true } },
         occurredAt: { gte: since },
       },
     }),

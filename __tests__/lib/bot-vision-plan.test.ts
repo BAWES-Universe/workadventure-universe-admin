@@ -34,6 +34,7 @@ const ownKey = (extra: Record<string, unknown> = {}) =>
     supportsVision: false,
     keyOwnerId: "owner",
     keyGroup: "hosted",
+    keyAddressTyped: false,
     ...extra,
   }) as never;
 
@@ -84,6 +85,24 @@ describe("the default Vision plan for a Brick on a person’s own key with nothi
     expect(
       await visionPlan(brick(), ownKey({ keyGroup: "own-computer" })),
     ).toBeUndefined();
+  });
+
+  it("says nothing (This model) for a hosted kind at an address the person typed (their own NIM, say): its images never leave that server for Universe AI", async () => {
+    expect(
+      await visionPlan(
+        brick(),
+        ownKey({ keyGroup: "hosted", keyAddressTyped: true }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("still goes to Universe AI when the owner picked it on a hosted kind at a typed address", async () => {
+    expect(
+      await visionPlan(
+        brick({ choice: "universe-ai" }),
+        ownKey({ keyGroup: "hosted", keyAddressTyped: true }),
+      ),
+    ).toEqual({ choice: "universe-ai" });
   });
 
   it("still goes to Universe AI when the owner picked it on a key on their own computer", async () => {

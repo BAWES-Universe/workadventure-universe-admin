@@ -51,7 +51,8 @@ export function keyVisionModels(key: { model: string | null; supportsVision: boo
 /**
  * Where images go when the owner picked nothing. A model that sees looks at them itself. One that can't, on a person's own
  * key, uses a Vision model on that same key when the provider has one, so the images stay on the key; otherwise Universe AI
- * looks at them, except for a key on the person's own computer or self-hosted server: its images never leave that computer
+ * looks at them, except for a key on the person's own computer or at an address they typed (self-hosted, or their own server
+ * for a hosted kind such as their own NIM): its images never leave that computer
  * unless they pick Universe AI, so the default there is "This model". The page shows this as the picked choice and the owner can
  * change it. Only a person's own key is ever given a different default: Universe AI and server providers keep behaving exactly as they did.
  */
