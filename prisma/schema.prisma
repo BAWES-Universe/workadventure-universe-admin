@@ -1892,6 +1892,9 @@ model BotMcpTool {
   movedById       String?   @map("moved_by_id")
   confirmedById   String?   @map("confirmed_by_id")
   confirmedAt     DateTime? @map("confirmed_at")
+  // An App action's own choice over its heading's (rightAway | asksFirst | off). Null follows the heading. Only on a ready-made App's
+  // grant, whose rows are the App's actions (lib/app-actions): a bot's own server never has one.
+  setting         String?   @db.VarChar(20)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
@@ -1901,6 +1904,45 @@ model BotMcpTool {
 
   @@unique([serverId, name])
   @@map("bot_mcp_tools")
+}
+
+// What a ready-made App can do (lib/app-actions): its actions as the provider lists them, each sorted by Universe once under one of the four
+// headings, shared by every person and Brick. A Brick's grant of the App holds one tool row per action (BotMcpTool), made from this list.
+model AppAction {
+  id          String   @id @default(uuid())
+  toolkit     String   @db.VarChar(60)
+  slug        String   @db.VarChar(255)
+  // Plain words for people, made from the slug ("Fetch emails"), and the provider's own description with its name taken out
+  title       String   @db.VarChar(255)
+  description String?  @db.Text
+  // looksUp | makesNew | changesThings | deletesOrSends
+  heading     String   @db.VarChar(20)
+  // What decided the heading: name (a send, delete, pay... in the slug) | tag (the provider's own tag) | sorter (the small model) |
+  // fallback (nothing yet: the strictest heading until the sorter answers)
+  source      String   @db.VarChar(20)
+  // The provider's version of the action when it was last read
+  catalogVersion String? @map("catalog_version") @db.VarChar(60)
+  // Where it is in the provider's list: a grant keeps the first 500 by this order
+  position    Int
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([toolkit, slug])
+  @@index([toolkit, position])
+  @@index([source])
+  @@map("app_actions")
+}
+
+// When each App's list of actions was last read from the provider, and who is reading it now (one reader at a time, across Orbit's processes)
+model AppActionCatalog {
+  toolkit      String    @id @db.VarChar(60)
+  refreshedAt  DateTime? @map("refreshed_at")
+  // A refresh in progress holds this until it ends or the time passes
+  claimedUntil DateTime? @map("claimed_until")
+  actionCount  Int       @default(0) @map("action_count")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("app_action_catalogs")
 }
 
 // AI Providers

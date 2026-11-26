@@ -233,6 +233,7 @@ describe('a server’s state', () => {
     expect(DEFAULT_SETTINGS).toEqual({ looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' });
     expect(await readServerTools('bot-1', 'srv-1')).toEqual({
       serverId: 'srv-1',
+      kind: 'tools',
       state: 'notConfirmedYet',
       policyRevision: 1,
       settings: DEFAULT_SETTINGS,
