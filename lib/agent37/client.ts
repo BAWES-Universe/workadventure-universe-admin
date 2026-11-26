@@ -142,6 +142,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
 const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
+/** Which answers a stop or a sleep is asked again after: `any` (a gateway's too, for a restart under a wake's own ticket) or `refused` (only an answer that says it was NOT taken: a power operation of ours, whose earlier attempt must not be hidden). */
+export type Retry = 'any' | 'refused';
 /**
  * The longest one asked-again account call can take from its first request to its last answer: every attempt runs to its timeout and every wait between them is taken. A power operation (stop, sleep) whose sender died
  * (post-0.5.0 B) is counted as still able to land for this long after its last beat, on top of a margin for the provider's own processing (lib/computer-power.ts).
@@ -291,13 +293,15 @@ export class Agent37Client {
   }
 
   /** Sleeps a running instance now: memory and processes are kept, the disk is kept, only the disk is billed. */
-  sleepInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.againPower(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account()));
+  sleepInstance(id: string, retry: Retry = 'any'): Promise<{ id: string; status: string }> {
+    const run = () => this.call<{ id: string; status: string }>('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account());
+    return retry === 'refused' ? this.againPower(run) : this.again(run);
   }
 
   /** Halts the container: memory is lost, the disk is kept, and it stays down until started. */
-  stopInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.againPower(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account()));
+  stopInstance(id: string, retry: Retry = 'any'): Promise<{ id: string; status: string }> {
+    const run = () => this.call<{ id: string; status: string }>('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account());
+    return retry === 'refused' ? this.againPower(run) : this.again(run);
   }
 
   /** Deletes for good, disk included. */

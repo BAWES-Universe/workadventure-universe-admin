@@ -4240,8 +4240,9 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
         const done = await leadFence(botId, resumed, now, anyway || (await anywayChosen(botId)));
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
         if (done === 'blocked') return { ok: false, reason: 'still_running' };
-      } else {
-        await finishReturnOf(botId, resumed);
+      } else if ((await finishReturnOf(botId, resumed)) === 'pending') {
+        // A return that could not wake the machine yet stays pending (its lease is let go for the sweep): answered as on its way, never resumed again here past the deadline (Opus on #1040)
+        return { ok: false, reason: 'in_progress' };
       }
       continue;
     }
@@ -4255,13 +4256,16 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-export async function wakeIfStopped(botId: string): Promise<'up' | 'pending'> {
+export async function wakeIfStopped(botId: string, /** How long to wait for a stop of ours that can still land. The hand back waits out a dead sender's whole life; a request that can be asked again (a runner's turn) waits only for a live one, as a start does. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true }): Promise<'up' | 'pending'> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return 'up';
+  // The jobs of this Brick that are running are not billed for the time the machine sits stopped and is woken (Opus on #1040, F1): their stretch so far is banked, and starts again at readiness
+  await bankStretches(botId, new Date());
   try {
     // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included
-    await bringUp(botId, provider, new Date(), undefined, { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true });
+    await bringUp(botId, provider, new Date(), undefined, stopWait);
+    await restartBankedStretches(botId, new Date());
     return 'up';
   } catch (error) {
     // A stop of ours that outlasted even the extended wait is not a machine that will not come back (CodeRabbit on #1040): no wake was tried, so no job ends and nothing is marked broken. The caller keeps the return pending
@@ -4276,6 +4280,30 @@ export async function wakeIfStopped(botId: string): Promise<'up' | 'pending'> {
     await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] } }, data: { machine: 'broken' } });
     return 'up';
   }
+}
+
+/**
+ * The wake of a hand back (and of a Restart first): `wakeIfStopped` banks the running jobs' stretch while the stopped machine is woken (see there), and a return that finds the machine already awake (another request woke it after a pending return) starts the
+ * stretches that were banked again here. A job running with its stretch paused is one a return banked; a running job with a stretch is left as it is.
+ */
+async function wakeForReturn(botId: string): Promise<'up' | 'pending'> {
+  const woke = await wakeIfStopped(botId);
+  if (woke === 'up') await restartBankedStretches(botId, new Date());
+  return woke;
+}
+
+/** The running jobs' stretch so far goes into `secondsRun` and the stretch pauses. Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease version moves, as every change of a job's billed basis does. */
+async function bankStretches(botId: string, now: Date): Promise<void> {
+  const running = await prisma.computerJob.findMany({ where: { botId, status: 'running', NOT: { stretchStarted: null } }, select: { id: true, secondsRun: true, stretchStarted: true } });
+  for (const job of running) {
+    if (!job.stretchStarted) continue;
+    const stretch = Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND));
+    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', stretchStarted: job.stretchStarted }, data: { secondsRun: job.secondsRun + stretch, stretchStarted: null, leaseVersion: { increment: 1 } } });
+  }
+}
+
+async function restartBankedStretches(botId: string, now: Date): Promise<void> {
+  await prisma.computerJob.updateMany({ where: { botId, status: 'running', stretchStarted: null }, data: { stretchStarted: now, leaseVersion: { increment: 1 } } });
 }
 
 /**
@@ -4301,7 +4329,7 @@ async function finishReturn(botId: string, epoch: number | null, restart = false
   await noteHands(botId, 'brick');
   // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
   await fenceControl(botId);
-  if ((await wakeIfStopped(botId)) === 'pending') {
+  if ((await wakeForReturn(botId)) === 'pending') {
     // The machine could not be woken yet (a stop of ours may still land): control does not go back to Brick's with its jobs on a stopped machine. The lease is let go, so the sweep (or the next request) finishes the return
     if (epoch !== null) await releaseLease(botId, 'returning', epoch);
     return 'pending';
@@ -4401,7 +4429,7 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
     if (row.state === 'returning' && check === 'restarting') {
       if (leaseLapsed(row, t)) {
         const resumed = await resumeTransition(botId, row);
-        if (resumed !== null) await restartSteps(botId, resumed);
+        if (resumed !== null && (await restartSteps(botId, resumed)) === 'pending') return { ok: false, reason: 'in_progress' };
         continue;
       }
       if (t >= deadline) return { ok: false, reason: 'in_progress' };
@@ -4451,7 +4479,7 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
     if (row.state === 'agent') break;
     if (row.state === 'returning' && leaseLapsed(row, t)) {
       const resumed = await resumeTransition(botId, row);
-      if (resumed !== null) await finishReturnOf(botId, resumed);
+      if (resumed !== null && (await finishReturnOf(botId, resumed)) === 'pending') return { ok: false, reason: 'in_progress' };
       continue;
     }
     if (t >= deadline) return { ok: false, reason: 'in_progress' };

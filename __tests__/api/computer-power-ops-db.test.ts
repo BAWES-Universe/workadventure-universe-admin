@@ -31,7 +31,8 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals } from '@/lib/computer';
 import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
-import { readControl } from '@/lib/computer-control';
+import { beginTransition, readControl } from '@/lib/computer-control';
+import { startTurn } from '@/lib/computer-broker';
 import { endPowerOp, openPowerOpOf, powerTiming, underPowerOp, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { costOfSeconds } from '@/lib/computer-values';
@@ -568,7 +569,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
         expect(await handBack(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'in_progress' });
         // Nothing was tried, so nothing failed: the job is Brick's again and running, the machine is as it was, and the return waits
-        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick', stretchStarted: null });
         expect(await machineOf(sara)).toMatchObject({ machine: 'stopped' });
         expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
         expect(await readControl(sara.brickId)).toMatchObject({ state: 'returning' });
@@ -582,7 +583,81 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await recoverControl(NOW)).toBeGreaterThanOrEqual(1);
       expect(await readControl(sara.brickId)).toMatchObject({ state: 'agent' });
       expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+      // Opus on #1040, F1: the stopped time of the pending window was never billed: the stretch was banked when the return went pending and starts again now that the machine is back
+      const resumed = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
+      expect(resumed).toMatchObject({ status: 'running', control: 'brick' });
+      expect(resumed.stretchStarted).not.toBeNull();
+      expect(resumed.stretchStarted!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    }, 30_000);
+
+    it('Opus on #1040, F1: a hand back that wakes a stopped machine does not bill the wait or the wake: the stretch so far is banked and starts again at readiness', async () => {
+      const sara = await owner('handback-wake-unbilled');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const before = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
+      expect(before.stretchStarted).not.toBeNull();
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+      const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } });
+      // Banked up to the moment the machine was found stopped, and the stretch starts again when it answers (now), not at the take-over
+      expect(after.secondsRun).toBeGreaterThan(before.secondsRun);
+      expect(after.stretchStarted).not.toBeNull();
+      expect(after.stretchStarted!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+    }, 30_000);
+
+    it('Opus on #1040, F3: a hand back whose transition was left by a dead leader and whose wake stays pending answers in progress at once; it does not resume again and again past the deadline', async () => {
+      const sara = await owner('handback-resume-pending');
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 300, waitMs: 300, pollMs: 20 });
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      let release: () => void = () => undefined;
+      const inFlight = underPowerOp(op, () => new Promise<void>((resolve) => (release = resolve)));
+      // A hand back whose leader died after beginning it: the lease is gone, so the next request resumes it
+      const row = await readControl(sara.brickId);
+      expect(await beginTransition(sara.brickId, 'human_ready', row?.epoch ?? 0, 'returning')).not.toBeNull();
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlLeaseUntil: new Date(Date.now() - 1000) } });
+      try {
+        const began = Date.now();
+        expect(await handBack(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'in_progress' });
+        // One wait (about 0.6 s), not one wait after another until the 45 s deadline
+        expect(Date.now() - began).toBeLessThan(5_000);
+      } finally {
+        release();
+        await inFlight;
+        await endPowerOp(op).catch(() => undefined);
+      }
+    }, 30_000);
+
+    it('Opus on #1040, F2: a runner\'s turn start on a job that is Brick\'s and running on a stopped machine wakes it (waiting only for a live stop), answers "starting" while a stop can still land, and never answers no_machine for good', async () => {
+      const sara = await owner('turn-wakes');
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 300, waitMs: 300, pollMs: 20 });
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      // A hand back left pending: the machine is stopped, the job is Brick's and running, a stop of ours can still land
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      let release: () => void = () => undefined;
+      const inFlight = underPowerOp(op, () => new Promise<void>((resolve) => (release = resolve)));
+      const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+      try {
+        expect(await startTurn(a.job.id, 'carry on')).toEqual({ ok: false, reason: 'starting' });
+        expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+      } finally {
+        release();
+        await inFlight;
+        await endPowerOp(op).catch(() => undefined);
+      }
+      // The stop is done: the runner asks again, the machine is woken, and the answer is no longer "no machine"
+      const again = await startTurn(a.job.id, 'carry on');
+      expect(again).not.toMatchObject({ ok: false, reason: 'no_machine' });
+      expect(fake.calls.filter((call) => call.name === 'wake').length).toBeGreaterThan(wakesBefore);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
     }, 30_000);
 
     it('Sentry on #1040: a hand back that finds no control row to lead and cannot wake the machine yet (a stop of ours still open) answers in progress, never as done', async () => {

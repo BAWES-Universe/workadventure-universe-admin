@@ -461,7 +461,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (status === 'sleeping' || status === 'stopped' || status === 'stopping') return;
     if (gone(status)) return;
     try {
-      await this.client.sleepInstance(ref);
+      await this.client.sleepInstance(ref, 'refused');
     } catch (error) {
       // A 400 means it was not running after all: if it is resting now, that is what was asked for
       if (error instanceof Agent37Error && error.status === 400) {
@@ -475,7 +475,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async stop(ref: string): Promise<void> {
     const instance = await this.client.getInstance(ref);
     if (instance.status === 'stopped' || instance.status === 'stopping' || gone(String(instance.status))) return;
-    await this.client.stopInstance(ref);
+    // A power operation of ours: not repeated after a gateway answer that may have reached the machine (the readiness restarts above keep the retry: they run under a wake's own ticket)
+    await this.client.stopInstance(ref, 'refused');
   }
 
   async remove(ref: string): Promise<void> {

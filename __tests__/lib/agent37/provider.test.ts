@@ -16,6 +16,8 @@ const labelled = (command: string) => (isMarkCommand(command) ? 'mark' : command
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const instances = new Map<string, Instance>();
   const calls: string[] = [];
+  /** How each stop and sleep asked to be repeated (the second argument the provider gave). */
+  const retries: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
   let execOut: (command: string) => string = () => 'ok';
@@ -60,14 +62,16 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       instances.get(id)!.status = 'running';
       return { id, status: 'running' };
     },
-    async sleepInstance(id: string) {
+    async sleepInstance(id: string, retry?: string) {
       calls.push(`sleep:${id}`);
+      retries.push(`sleep:${retry ?? 'any'}`);
       instances.get(id)!.status = 'sleeping';
       instances.get(id)!.slept_at = Math.floor(Date.now() / 1000);
       return { id, status: 'sleeping' };
     },
-    async stopInstance(id: string) {
+    async stopInstance(id: string, retry?: string) {
       calls.push(`stop:${id}`);
+      retries.push(`stop:${retry ?? 'any'}`);
       instances.get(id)!.status = 'stopped';
       return { id, status: 'stopped' };
     },
@@ -148,7 +152,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, retries, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -765,6 +769,22 @@ describe('getting a machine ready for a job', () => {
       await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
       expect(w.execs.some((entry) => entry.command === 'cat /proc/sys/kernel/random/boot_id')).toBe(false);
     });
+  });
+
+  it('CodeRabbit on #1040, Opus F4: a stop or a sleep that is a power operation of ours asks not to be repeated after a gateway answer, and the readiness restarts (under a wake\'s own ticket) keep the retry', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.rest('m1');
+    w.instances.get('m1')!.status = 'running';
+    await p.stop('m1');
+    expect(w.retries).toEqual(['sleep:refused', 'stop:refused']);
+    // The fresh-boot restart and the restart a part asked for are readiness steps: the default retry
+    w.retries.length = 0;
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await p.ready('m1');
+    expect(w.retries).toEqual(['stop:any']);
   });
 
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
