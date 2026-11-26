@@ -1052,8 +1052,24 @@ run('the bounded Instant executor, in a real database', () => {
 
   describe('research Apps are on for every Brick’s owner by default, and their own App of the same service wins', () => {
     let meterBefore: Prisma.JsonValue | null = null;
-    /** The Instant Apps default in force before this suite saved the $2.00 one, to put back at the end (null: it was already that). */
-    let defaultBefore: { programId: string | null; ruleId: string | null; savedProgramId?: string } | null = null;
+    /** The Instant Apps default as it was before this suite saved the $2.00 one, to put back at the end (null: it was already that). */
+    let defaultBefore: DefaultSnapshot | null = null;
+    type DefaultSnapshot = { programId: string | null; rules: { id: string; state: string; supersededAt: Date | null }[]; savedProgramId?: string };
+    /** Every version of the Instant Apps default program as it stands: which is current, and when each one stops (a scheduled one included). */
+    const snapshotDefault = async (programId: string | null): Promise<DefaultSnapshot> => ({
+      programId,
+      rules: programId ? await prisma.grantRule.findMany({ where: { programId }, select: { id: true, state: true, supersededAt: true } }) : [],
+    });
+    /** Puts every version back as the snapshot had it; a version saved since never takes over (it stops at once), and a program made since ends. */
+    const restoreDefault = async (snap: DefaultSnapshot, savedProgramId: string) => {
+      if (!snap.programId) {
+        const { endProgram } = await import('@/lib/credit-rules');
+        await endProgram(savedProgramId, { userId: sara, superAdmin: true });
+        return;
+      }
+      await prisma.grantRule.updateMany({ where: { programId: snap.programId, id: { notIn: snap.rules.map((rule) => rule.id) } }, data: { state: 'superseded', supersededAt: new Date() } });
+      for (const rule of snap.rules) await prisma.grantRule.update({ where: { id: rule.id }, data: { state: rule.state, supersededAt: rule.supersededAt } });
+    };
     /** This month's rollout budget, the cap on all default credit issued (the seeded $20 lets about 8 people a month have the $2). */
     const setBudget = async (micros: number) => {
       const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
@@ -1069,21 +1085,13 @@ run('the bounded Instant executor, in a real database', () => {
       const program = await prisma.grantProgram.findFirst({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' }, select: { id: true } });
       const rule = program ? await prisma.grantRule.findFirst({ where: { programId: program.id, state: 'current' }, select: { id: true, amount: true, schedule: true, recipientType: true } }) : null;
       if (rule && Number(rule.amount) === 2_000_000 && rule.schedule === 'monthly' && rule.recipientType === 'all') return;
-      defaultBefore = { programId: program?.id ?? null, ruleId: rule?.id ?? null };
+      defaultBefore = await snapshotDefault(program?.id ?? null);
       const { saveDefault } = await import('@/lib/credit-rules');
       defaultBefore.savedProgramId = (await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true })).programId;
     });
     afterAll(async () => {
       // The Instant Apps default goes back to what it was: the version in force before this suite, or no default at all
-      if (defaultBefore?.savedProgramId) {
-        if (defaultBefore.ruleId) {
-          await prisma.grantRule.updateMany({ where: { programId: defaultBefore.savedProgramId, state: 'current', id: { not: defaultBefore.ruleId } }, data: { state: 'superseded', supersededAt: new Date() } });
-          await prisma.grantRule.update({ where: { id: defaultBefore.ruleId }, data: { state: 'current', supersededAt: null } });
-        } else {
-          const { endProgram } = await import('@/lib/credit-rules');
-          await endProgram(defaultBefore.savedProgramId, { userId: sara, superAdmin: true });
-        }
-      }
+      if (defaultBefore?.savedProgramId) await restoreDefault(defaultBefore, defaultBefore.savedProgramId);
       // Listing research issues the owner's monthly credit: theirs goes with them
       await prisma.creditAllocation.deleteMany({ where: { hold: { personId: { in: [sara, omar] } } } });
       await prisma.creditHold.deleteMany({ where: { personId: { in: [sara, omar] } } });
@@ -1091,6 +1099,28 @@ run('the bounded Instant executor, in a real database', () => {
       if (meterBefore === null) await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
       else await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: meterBefore as never } });
     });
+    it('the suite puts the default back exactly, a version scheduled to start later included (its wait is not cut short)', async () => {
+      const { saveDefault } = await import('@/lib/credit-rules');
+      const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
+      const asIs = await snapshotDefault(program);
+      // A default that waits to take over tomorrow: the $2 one goes on until then
+      const tomorrow = new Date(Date.now() + 24 * 60 * MIN);
+      await saveDefault({ categoryId: 'instant_apps', amount: 1_000_000, schedule: 'monthly', recipients: { kind: 'all' }, claimStartsAt: tomorrow }, { userId: sara, superAdmin: true });
+      const scheduled = await snapshotDefault(program);
+      expect(scheduled.rules.filter((rule) => rule.state === 'superseded' && rule.supersededAt?.getTime() === tomorrow.getTime())).toHaveLength(1);
+      // Another save now cuts that wait to now; putting the scheduled state back gives it its whole wait again
+      await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true });
+      await restoreDefault(scheduled, program);
+      const back = await snapshotDefault(program);
+      for (const rule of scheduled.rules) expect(back.rules.find((r) => r.id === rule.id)).toEqual(rule);
+      expect(back.rules.filter((rule) => !scheduled.rules.some((r) => r.id === rule.id)).every((rule) => rule.state === 'superseded')).toBe(true);
+      // And the suite's own default is in force again, as it was
+      await restoreDefault(asIs, program);
+      const again = await snapshotDefault(program);
+      for (const rule of asIs.rules) expect(again.rules.find((r) => r.id === rule.id)).toEqual(rule);
+      expect(again.rules.filter((rule) => rule.state === 'current')).toHaveLength(1);
+    });
+
     const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name);
     const liveTools = (p: ReturnType<typeof fakeProvider>) => p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
     /** An App of the owner's own, by its link (a sign-in or a key in the link), granted to a Brick. */
