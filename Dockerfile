@@ -74,6 +74,10 @@ COPY --from=builder /app/package.json ./package.json
 # Copy seed file and prisma.config.ts for seeding
 COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+# The start script applies migrations with this CLI. prisma is a devDependency, copied in from the builder
+# and kept through the tsx install above: fail the BUILD here if it (or its config) cannot load, rather
+# than shipping an image that refuses to start. No database is reached: --version only loads the config.
+RUN DATABASE_URL="postgresql://build:check@localhost:5432/none" node node_modules/prisma/build/index.js --version
 # Copy lib directory (needed for seed script imports)
 COPY --from=builder /app/lib ./lib
 # Copy config directory (needed for woka.json and companions.json validation)
@@ -81,16 +85,14 @@ COPY --from=builder /app/config ./config
 # Copy built application
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-# Copy startup script (optional - for automatic migrations)
+# The start script: applies the database migrations, then starts the app (see CMD below)
 COPY scripts/start.sh ./scripts/start.sh
 RUN chmod +x ./scripts/start.sh
 
 EXPOSE 3333
 
-# Default: start directly (migrations must be run manually or via post-deploy command)
-# Use npm start to use local next from node_modules (not npx which downloads)
-CMD ["npm", "start"]
-
-# Alternative: Use startup script to run migrations automatically before starting
-# Uncomment the line below and comment out the line above to enable automatic migrations
-# CMD ["sh", "scripts/start.sh"]
+# Apply every pending database migration, then start the app (npm start, which runs the local next).
+# If the migrations do not all apply, the script exits non-zero and the app never starts, so this
+# image never serves on a database it was not written for. Whether the old container keeps serving
+# meanwhile depends on the host's health check (on: yes; off: no, Orbit is down). See scripts/start.sh.
+CMD ["sh", "scripts/start.sh"]

@@ -1,0 +1,37 @@
+/* The Brick reports inbox and one problem (mock "Brick reports inbox", screens 1 and 2): phone first, Orbit's own tokens. */
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.sub { margin: 2px 0 14px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.tabs { display: flex; gap: 6px; margin: 0 0 12px; overflow-x: auto; scrollbar-width: none; }
+.tab { flex: none; min-height: 36px; padding: 0 12px; border: 1px solid hsl(var(--border)); border-radius: 999px; background: transparent; font: inherit; font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); white-space: nowrap; cursor: pointer; }
+.tab[aria-pressed='true'] { border-color: hsl(var(--foreground)); background: hsl(var(--foreground)); color: hsl(var(--background)); }
+.tab:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+@media (pointer: coarse) { .tab { min-height: 44px; } }
+
+.list { display: grid; gap: 8px; }
+.row { position: relative; display: grid; gap: 4px; padding: 11px 13px; border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); color: inherit; text-decoration: none; transition: border-color 160ms; }
+.row:hover { border-color: hsl(var(--foreground) / 0.22); }
+.row:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.row strong { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+
+.chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border: 1px solid hsl(var(--border)); border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: hsl(var(--foreground) / 0.85); }
+.chip[data-tone='high'] { border-color: transparent; background: color-mix(in srgb, var(--brand-purple) 14%, transparent); color: #6a1fd0; }
+.chip[data-tone='fixed'] { border-color: transparent; background: rgb(22 163 74 / 0.15); color: #11743a; }
+.chip[data-tone='back'] { border-color: transparent; background: rgb(217 119 6 / 0.16); color: #9a5200; }
+:global(.dark) .chip[data-tone='high'] { color: #cdb2ff; }
+:global(.dark) .chip[data-tone='fixed'] { color: #6ee7a0; }
+:global(.dark) .chip[data-tone='back'] { color: #fbbf24; }
+
+.empty { padding: 18px 14px; border: 1px dashed hsl(var(--border)); border-radius: 14px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+
+.title { margin: 8px 0 10px; font-family: var(--font-display); font-size: 22px; font-weight: 700; line-height: 1.15; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0 0 10px; }
+.stats div { padding: 8px 9px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
+.stats b { display: block; font-family: var(--font-display); font-size: 18px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.stats span { font-size: 11px; color: hsl(var(--muted-foreground)); }
+.block { display: grid; gap: 6px; margin: 0 0 8px; padding: 11px 13px; border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); font-size: 13.5px; line-height: 1.45; }
+.why { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; font-size: 13px; }
+.why i { font-style: normal; text-align: end; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.quote { margin: 0; padding-inline-start: 9px; border-inline-start: 2px solid hsl(var(--border)); font-size: 13px; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
+.note { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; }
