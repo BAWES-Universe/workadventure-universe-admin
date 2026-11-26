@@ -56,6 +56,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { checkAppUse, disconnect, removeGrant, grantToBrick } from '@/lib/app-connections';
 import { GuardError } from '@/lib/app-direct/guard';
+import { KEY_NO_ANSWER_HOLDS_MS } from '@/lib/app-same';
 import { openKeyForm, submitKey, readKeyForm } from '@/lib/app-direct/connect';
 import { runKeyApp, keyAppsOf } from '@/lib/app-direct/use';
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
@@ -542,8 +543,22 @@ run('using a key app, in a real database', () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     mockThrow.current = new GuardError('timeout', 'No answer in time');
     expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
-    expect(await noAnswerAt()).not.toBeNull();
+    const first = await noAnswerAt();
+    expect(first).not.toBeNull();
     expect(await ownCopy()).toBeNull();
+    // Another failure inside the while keeps when it started
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    expect(await noAnswerAt()).toEqual(first);
+
+    // The while is over: nothing but a call can tell it answers again, so the own copy is the way again and is tried
+    await prisma.appConnection.update({ where: { id }, data: { noAnswerAt: new Date(Date.now() - KEY_NO_ANSWER_HOLDS_MS - 60_000), lastWorkedAt: new Date(Date.now() - KEY_NO_ANSWER_HOLDS_MS - 120_000) } });
+    expect(await ownCopy()).toBe(app.serverId);
+    expect(await readyUse()).toMatchObject({ allowed: false, reason: 'off' });
+    // Still down: written again, and the ready-made copy is the way for another while
+    expect((await (await call(saraBrick, app.serverId, app.definitionHash)).json()).code).toBe('unavailable');
+    expect(Date.now() - (await noAnswerAt())!.getTime()).toBeLessThan(60_000);
+    expect(await ownCopy()).toBeNull();
+    expect(await readyUse()).toMatchObject({ allowed: true });
   });
 
   it('cuts a long answer and gives back nothing from it, rather than half of it', async () => {

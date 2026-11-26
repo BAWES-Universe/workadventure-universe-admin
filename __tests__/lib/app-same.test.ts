@@ -1,4 +1,4 @@
-import { addressWords, isOwnApp, looseName, sameApp } from '@/lib/app-same';
+import { addressWords, isOwnApp, KEY_NO_ANSWER_HOLDS_MS, looseName, ownCopyWorks, sameApp } from '@/lib/app-same';
 import { sortOwnTool } from '@/lib/app-own-tools';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
@@ -67,5 +67,20 @@ describe('sorting a tool of the person\'s own App (the rules of #1042)', () => {
     expect(sortOwnTool('create_page', 'changesThings')).toBe('changesThings');
     expect(sortOwnTool('make_image', 'makesNew')).toBe('changesThings');
     expect(sortOwnTool('web_search_exa', null)).toBe('deletesOrSends');
+  });
+});
+
+describe('an own copy that works (ownCopyWorks)', () => {
+  const ago = (ms: number) => new Date(Date.now() - ms);
+  it('never counts a copy that is not connected, or one whose sign-in or key was refused, however long ago', () => {
+    expect(ownCopyWorks(false, { kind: 'mcp' })).toBe(false);
+    expect(ownCopyWorks(true, { kind: 'direct', signInLostAt: ago(10 * KEY_NO_ANSWER_HOLDS_MS) })).toBe(false);
+    expect(ownCopyWorks(true, { kind: 'mcp' }, { signInLostAt: ago(1) })).toBe(false);
+  });
+  it('lets a key App that did not answer give way only for a while, then tries it again; a link App the bot server saw not answer gives way until it answers', () => {
+    expect(ownCopyWorks(true, { kind: 'direct', noAnswerAt: ago(60_000) })).toBe(false);
+    expect(ownCopyWorks(true, { kind: 'direct', noAnswerAt: ago(KEY_NO_ANSWER_HOLDS_MS + 1_000) })).toBe(true);
+    expect(ownCopyWorks(true, { kind: 'mcp', noAnswerAt: ago(10 * KEY_NO_ANSWER_HOLDS_MS) })).toBe(false);
+    expect(ownCopyWorks(true, { kind: 'direct' }, { noAnswerAt: ago(10 * KEY_NO_ANSWER_HOLDS_MS) })).toBe(false);
   });
 });

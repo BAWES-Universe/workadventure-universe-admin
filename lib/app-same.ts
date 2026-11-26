@@ -98,18 +98,34 @@ export interface OwnGrant {
 }
 
 interface SeenByBotServer {
+  /** `direct` for a key App: its "did not answer" is Orbit's own, from its last call, and only holds for a while (KEY_NO_ANSWER_HOLDS_MS). */
+  kind?: string | null;
   signInLostAt?: Date | null;
   noAnswerAt?: Date | null;
 }
 
 /**
+ * How long a key App that did not answer gives way to the ready-made copy of the same App. Nothing but a call to it can tell it answers again
+ * (the bot server does not look at a key App between calls), so after this the person's own copy is the way again: if it is still down, that
+ * call fails, is written again (lib/tool-signin.ts reportKeyNoAnswer), and the ready-made copy takes over for another while. The Brick is never
+ * moved to a copy Universe pays for for good because of one bad moment.
+ */
+export const KEY_NO_ANSWER_HOLDS_MS = 15 * 60_000;
+
+const stillNoAnswer = (one: SeenByBotServer, now: number): boolean =>
+  !!one.noAnswerAt && (one.kind !== 'direct' || now - one.noAnswerAt.getTime() < KEY_NO_ANSWER_HOLDS_MS);
+
+/**
  * The ONE rule for "the person's own copy works", used by every place that lets a ready-made copy give way to it: it is connected
  * (`connectedState(...).connected`, lib/app-connections.ts, passed in so this file needs nothing of it) and the bot server has not seen it
- * fail since (a refused sign-in or key, or a server that did not answer), on the App or on its grant on the Brick. A link App with a key
+ * fail since (a refused sign-in or key, or a server that did not answer), on the App or on its grant on the Brick. A key App's "did not
+ * answer" holds for KEY_NO_ANSWER_HOLDS_MS, then its next call tries it again. A link App with a key
  * counts as connected whatever its key does, so what the bot server saw is what tells a broken one: the Brick is never left with neither.
  */
-export const ownCopyWorks = (connected: boolean, ...seen: (SeenByBotServer | null | undefined)[]): boolean =>
-  connected && seen.every((one) => !one?.signInLostAt && !one?.noAnswerAt);
+export const ownCopyWorks = (connected: boolean, ...seen: (SeenByBotServer | null | undefined)[]): boolean => {
+  const now = Date.now();
+  return connected && seen.every((one) => !one || (!one.signInLostAt && !stillNoAnswer(one, now)));
+};
 
 /**
  * The Brick owner's own Apps that are switched on for their Brick and work (ownCopyWorks): what a ready-made copy of the same App gives

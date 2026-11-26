@@ -3,7 +3,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { checkAppUse, type AppUseVerdict } from '@/lib/app-connections';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
-import { reportConnectionSignIn, reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyNoAnswer, reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { operationViews, headingOf, type KeyAppOperationView } from '@/lib/app-direct/describe';
 import { guardedRequest, GuardError, serviceDidNotAnswer, type GuardDeps } from '@/lib/app-direct/guard';
@@ -136,8 +136,9 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
   } catch (error) {
     await finish(input, 'unreachable', null);
     // A service that did not answer is written on the App (cleared by the next good call, reportKeyWorked): a down own copy then no longer counts
-    // as working (lib/app-same.ts ownCopyWorks), so the ready-made copy of the same App is the Brick's way meanwhile, never neither
-    if (serviceDidNotAnswer(error)) await reportConnectionSignIn(connection.id, { state: 'no-answer' }, startedAt).catch(() => undefined);
+    // as working for a while (lib/app-same.ts ownCopyWorks, KEY_NO_ANSWER_HOLDS_MS), so the ready-made copy of the same App is the Brick's way
+    // meanwhile, never neither; after that while the own copy is tried again
+    if (serviceDidNotAnswer(error)) await reportKeyNoAnswer(connection.id, startedAt);
     if (error instanceof GuardError) return { status: 'unavailable' };
     throw error;
   }
