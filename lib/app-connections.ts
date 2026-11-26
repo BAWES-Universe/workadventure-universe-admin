@@ -21,6 +21,7 @@ import { checkSharedUse, isAppShareable, type OwnerNote } from '@/lib/app-share'
 import { revokeGitHub } from '@/lib/github/connection';
 import { ensureAppActions } from '@/lib/app-actions/catalog';
 import { appCallIsPaused } from '@/lib/capability-pause';
+import { ownCopyOf, ownGrantsOf } from '@/lib/app-same';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -179,6 +180,9 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
 
   if (!connection.ownerId || !ownsBrick(row.bot, connection.ownerId)) return refuse('gone');
   if (!row.enabled) return refuse('off');
+  // The person's own copy of this App works and is on for this Brick (lib/app-same.ts): it comes first, so the ready-made copy is as good as
+  // off here and nothing is sent to it or paid for, whatever a bot server that does not read `ownCopyServerId` asks
+  if (connection.source === 'ready_made' && ownCopyOf(await ownGrantsOf(botId, (own) => connectedState(own).connected), { key: connection.providerToolkit, name: connection.name })) return refuse('off');
   const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' || connection.source === 'github' ? { readyMade: true } : {}) };
   if (input.forOwner === true) return allowed;
   const asker = input.requesterKey ? await findUserByIdentifier(input.requesterKey) : null;

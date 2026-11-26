@@ -1,6 +1,7 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { ensureAppActionTools, holdsAppActions } from '@/lib/app-actions/grant';
-import { settleOwnAppTools, universeSortsTools } from '@/lib/app-own-tools';
+import { settleOwnAppTools, sortOwnTool, universeSortsTools } from '@/lib/app-own-tools';
+import { stricterHeading } from '@/lib/app-actions/sort';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -300,6 +301,8 @@ export interface CatalogResult extends ServerToolsJson {
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
+    // One writer of a grant's tools at a time: Universe settling a person's own App on a read (lib/app-own-tools.ts) takes the same lock
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp-tools:${serverId}`}, 0))`;
     const server = await loadServer(tx, botId, serverId);
     // A ready-made App's rows are its actions, made by Orbit from the App's list: what the bot server read on the App's link (the
     // provider's meta tools) never replaces them. Answered as saved, with nothing changed.
@@ -327,6 +330,14 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       if (!before) {
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
+      } else if (before.fingerprint !== tool.fingerprint && universeSorts && before.movedById && before.heading) {
+        // On a person's own App a tool they moved keeps their heading when it changes, never looser than Universe's rule for the new version,
+        // and is confirmed by Universe (lib/app-own-tools.ts): what they decided is never overwritten by a re-sort
+        await tx.botMcpTool.update({
+          where: { id: before.id },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: stricterHeading(before.heading as Heading, sortOwnTool(tool.name, suggestion.suggestedHeading as Heading | null)), confirmedById: null, confirmedAt: new Date() },
+        });
+        reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
         await tx.botMcpTool.update({
           where: { id: before.id },
@@ -350,7 +361,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     // person confirmed or moved stays. A leftover nobody decided on goes, so it can't block confirming the real list.
     const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const decided = (tool: (typeof existing)[number]) => !!tool.confirmedAt || !!tool.heading || !!tool.movedById;
+    // On a person's own App, Universe's own confirmation is not a decision: only what a person confirmed or moved is kept
+    const decided = (tool: (typeof existing)[number]) => (universeSorts ? !!tool.movedById || (!!tool.confirmedAt && !!tool.confirmedById) : !!tool.confirmedAt || !!tool.heading || !!tool.movedById);
     const removed = existing.filter((tool) => !offered.has(tool.name) && !(cut && decided(tool)));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 

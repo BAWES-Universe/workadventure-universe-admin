@@ -325,6 +325,9 @@ export function readServerLimits(saved: unknown): ServerLimits {
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/** Limits that no longer exist. `bricks.keyCallsPerPerson`: a person's own key is never limited by Universe (26 Nov 2026). */
+const RETIRED_LIMITS = new Set(['bricks.keyCallsPerPerson']);
+
 /** A change to one group: only known names, each inside its range. Says which one is wrong. */
 function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Range>, group: string): Checked<Partial<T>> {
   if (!isRecord(input)) return { ok: false, error: `${group} must be an object` };
@@ -332,6 +335,8 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
   for (const [key, value] of Object.entries(input)) {
     // Only the limits' own names: `constructor` and `toString` are on every object and are not limits
     const range = Object.prototype.hasOwnProperty.call(ranges, key) ? (ranges as Record<string, Range | undefined>)[key] : undefined;
+    // A limit that was taken away (a page opened before it went may still send it) is let go quietly, never saved
+    if (!range && RETIRED_LIMITS.has(`${group}.${key}`)) continue;
     if (!range) return { ok: false, error: `Unknown limit: ${group}.${key}` };
     if (!fits(value, range)) {
       return { ok: false, error: `${group}.${key} must be ${range.whole ? 'a whole number ' : ''}from ${range.min.toLocaleString('en')} to ${range.max.toLocaleString('en')}` };

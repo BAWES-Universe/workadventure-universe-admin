@@ -64,6 +64,8 @@ describe('the values', () => {
     for (const bad of [0, 366, 2.5]) expect(checkServerLimits({ bricks: { undoDays: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.undoDays') });
     for (const bad of [1, 101, 3.5]) expect(checkServerLimits({ bricks: { offerAfter: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.offerAfter') });
     expect(checkServerLimits({ bricks: { colour: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: bricks.colour' });
+    // A limit that was taken away is let go quietly, so a page opened before it went can still save
+    expect(checkServerLimits({ bricks: { keyCallsPerPerson: 300, undoDays: 14 } })).toEqual({ ok: true, value: { bricks: { undoDays: 14 } } });
   });
 
   it('starts "Reads from an earlier file" at "Reads from a page or file" when that one was saved lower (#1508)', () => {

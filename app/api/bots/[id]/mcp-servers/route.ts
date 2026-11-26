@@ -10,7 +10,7 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
-import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
+import { WITH_CONNECTION, connectedState, effectiveServer } from '@/lib/app-connections';
 import { sharedJobsOf } from '@/lib/app-share';
 import { isReadyMade, ownCopyOf, ownGrantsOf } from '@/lib/app-same';
 
@@ -107,7 +107,7 @@ export async function GET(
     const seesWay = (s: (typeof servers)[number]) => isAdminToken || !s.connection || (s.connection.ownerId === userId && s.connection.source !== 'ready_made');
     const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
     // A ready-made App this bot also has its own copy of (switched on) gives way to it (lib/app-same.ts): only read when there is one to ask about
-    const ownGrants = servers.some((row) => isReadyMade(row.connection)) ? await ownGrantsOf(botId) : [];
+    const ownGrants = servers.some((row) => isReadyMade(row.connection)) ? await ownGrantsOf(botId, (own) => connectedState(own).connected) : [];
     const transformed = await Promise.all(
       servers.map(async (s) => {
         let oauthConnected = false;

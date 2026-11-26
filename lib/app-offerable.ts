@@ -122,7 +122,8 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
   for (const app of readyMade) {
     if (!app.enabled) continue;
     if (listedKeys.has(app.key) || listedNames.has(nameKey(app.name))) continue;
-    if (alreadyAdded(app)) continue;
+    // One they already connected is still shown as it is; one they only have by their own link or key is not suggested
+    if (!byToolkit.get(app.key) && alreadyAdded(app)) continue;
     out.push({ key: app.key, name: app.name, blurb: '', kind: 'readyMade', ...view(byToolkit.get(app.key)) });
   }
   return out;

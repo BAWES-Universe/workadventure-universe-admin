@@ -124,6 +124,8 @@ jest.mock('@/lib/db', () => {
     },
   };
   db.$transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+  // The lock one writer of a grant's tools takes: nothing to hold in memory
+  db.$executeRaw = jest.fn(async () => 0);
   return { prisma: db };
 });
 

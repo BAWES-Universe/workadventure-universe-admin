@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { ownCopyOf, ownGrantsOf } from '@/lib/app-same';
+import { connectedState } from '@/lib/app-connections';
 
 /**
  * Who an Instant run is for. Instant runs only on a person's own Brick (no room), for the Brick's OWNER's own request, and is paid
@@ -33,7 +34,7 @@ export async function brickApps(botId: string): Promise<Set<string>> {
       where: { botId, enabled: true, connection: { ownerId: bot.ownerId, providerToolkit: { not: null } } },
       select: { connection: { select: { providerToolkit: true, name: true } } },
     }),
-    ownGrantsOf(botId),
+    ownGrantsOf(botId, (own) => connectedState(own).connected),
   ]);
   // The owner's own copy of an App comes first (lib/app-same.ts): while this Brick has their own Exa switched on, Instant's Exa is neither
   // offered nor run, so their own account is what is used and nothing is paid for or counted by Universe

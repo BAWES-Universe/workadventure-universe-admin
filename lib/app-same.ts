@@ -15,7 +15,11 @@ import { prisma } from '@/lib/db';
  *  - the other App's key or name is the name the own App's address is registered under ("https://mcp.exa.ai/mcp" is Exa, "api.tavily.com" is
  *    Tavily). Only that one whole name counts: never a part of the host before it ("slack.mycorp.com" is mycorp, not Slack), never a part of
  *    a name with a hyphen ("linear-algebra.example.com" is example), never the address's ending, a word every address has ("mcp", "api") or a
- *    name shorter than 3 letters.
+ *    name shorter than 3 letters. An address on a hosting service ("my-tool.vercel.app", "user.github.io", "x.supabase.co") is registered
+ *    under the name before the service's, never the service's own ("mytool", not Vercel).
+ *
+ * Only an own copy that works counts (connected, switched on for this Brick, the Brick owner's own): a broken own copy never hides the
+ * ready-made one, so the Brick is never left with neither.
  */
 
 /** A name read loosely: lower case, letters and digits only. */
@@ -26,6 +30,14 @@ const SHORTEST_WORD = 3;
 
 /** Endings of two parts (".co.uk", ".com.kw"): the name an address is registered under is the part before both. */
 const SECOND_LEVEL = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go']);
+
+/** Hosting services: an address under one of these is registered under the name before it, never the service's own. */
+const HOSTED = [
+  'vercel.app', 'netlify.app', 'netlify.com', 'github.io', 'gitlab.io', 'supabase.co', 'supabase.in', 'herokuapp.com', 'onrender.com', 'up.railway.app', 'railway.app',
+  'fly.dev', 'workers.dev', 'pages.dev', 'trycloudflare.com', 'glitch.me', 'repl.co', 'replit.app', 'replit.dev', 'ngrok.app', 'ngrok.io', 'ngrok-free.app', 'ngrok.dev',
+  'azurewebsites.net', 'cloudfunctions.net', 'appspot.com', 'run.app', 'amazonaws.com', 'on.aws', 'deno.dev', 'modal.run', 'smithery.ai', 'web.app', 'firebaseapp.com',
+  'pipedream.net', 'val.run', 'vercel.sh', 'render.com', 'koyeb.app', 'northflank.app', 'azurecontainerapps.io', 'cloudrun.dev', 'hf.space',
+];
 
 /** The name an address is registered under, read loosely, as the only word of it that can name an App ([] when it names nothing). */
 export function addressWords(address: string | null | undefined): string[] {
@@ -38,7 +50,14 @@ export function addressWords(address: string | null | undefined): string[] {
   // A bare address (an IP, localhost) names nothing
   if (!host.includes('.') || /^[0-9.]+$/.test(host) || host.startsWith('[')) return [];
   const labels = host.split('.');
-  const ending = labels.length >= 3 && labels[labels.length - 1].length === 2 && SECOND_LEVEL.has(labels[labels.length - 2]) ? 2 : 1;
+  // On a hosting service the person's own name is the part right before the service's (and the deeper parts of a cloud's address say nothing)
+  const hosted = HOSTED.find((suffix) => host.endsWith(`.${suffix}`));
+  const ending = hosted
+    ? hosted.split('.').length
+    : labels.length >= 3 && labels[labels.length - 1].length === 2 && SECOND_LEVEL.has(labels[labels.length - 2])
+      ? 2
+      : 1;
+  if (labels.length <= ending) return [];
   const registered = looseName(labels[labels.length - 1 - ending]);
   return registered.length >= SHORTEST_WORD && !SAYS_NOTHING.has(registered) ? [registered] : [];
 }
@@ -78,14 +97,22 @@ export interface OwnGrant {
   serverUrl: string | null;
 }
 
-/** This bot's own Apps that are switched on for it: what a ready-made copy of the same App gives way to. */
-export async function ownGrantsOf(botId: string): Promise<OwnGrant[]> {
+/**
+ * The Brick owner's own Apps that are switched on for their Brick and work: what a ready-made copy of the same App gives way to. None for a
+ * room bot (an App lent to a universe, or a universe's own, is not a person's own copy there) and none for an own App whose sign-in or key
+ * stopped working. `works` is the caller's `connectedState(...).connected` (lib/app-connections.ts), passed in so this file needs nothing of it.
+ */
+export async function ownGrantsOf(botId: string, works: (connection: AppConnection) => boolean): Promise<OwnGrant[]> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
+  if (!bot?.ownerId || bot.roomId !== null || bot.deletedAt !== null) return [];
   const rows = await prisma.botMcpServer.findMany({
-    where: { botId, enabled: true, NOT: { connectionId: null } },
-    select: { id: true, name: true, connection: { select: { name: true, serverUrl: true, source: true, kind: true } } },
+    where: { botId, enabled: true, connection: { ownerId: bot.ownerId } },
+    include: { connection: true },
     orderBy: { createdAt: 'asc' },
   });
-  return rows.flatMap((row) => (row.connection && isOwnApp(row.connection) ? [{ serverId: row.id, name: row.connection.name || row.name, serverUrl: row.connection.serverUrl }] : []));
+  return rows.flatMap((row) =>
+    row.connection && isOwnApp(row.connection) && works(row.connection) ? [{ serverId: row.id, name: row.connection.name || row.name, serverUrl: row.connection.serverUrl }] : [],
+  );
 }
 
 /** The first own grant that is the same App as this one, or null. */

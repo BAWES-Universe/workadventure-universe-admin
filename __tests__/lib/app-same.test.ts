@@ -20,6 +20,13 @@ describe('the same App (lib/app-same.ts)', () => {
     expect(sameApp({ name: 'Bot', serverUrl: 'https://slack.mycorp.com/mcp' }, { key: 'slack', name: 'Slack' })).toBe(false);
     expect(sameApp({ name: 'Bot', serverUrl: 'https://slack-bot.corp.internal' }, { key: 'slack', name: 'Slack' })).toBe(false);
     expect(sameApp({ name: 'Maths', serverUrl: 'https://linear-algebra.example.com' }, { key: 'linear', name: 'Linear' })).toBe(false);
+    // An address on a hosting service is the person's own name, never the service's (Opus read of #1043)
+    expect(addressWords('https://my-tool.vercel.app/mcp')).toEqual(['mytool']);
+    expect(addressWords('https://user.github.io')).toEqual(['user']);
+    expect(addressWords('https://abc.supabase.co/functions/v1/mcp')).toEqual(['abc']);
+    expect(addressWords('https://mcp.vercel.app')).toEqual([]);
+    expect(sameApp({ name: 'Tool', serverUrl: 'https://my-tool.vercel.app/mcp' }, { key: 'vercel', name: 'Vercel' })).toBe(false);
+    expect(sameApp({ name: 'Site', serverUrl: 'https://user.github.io' }, { key: 'github', name: 'GitHub' })).toBe(false);
     expect(sameApp({ name: 'Search', serverUrl: 'https://mcp.search.ai/mcp' }, { key: 'mcp', name: 'MCP' })).toBe(false);
     expect(sameApp({ name: 'Search', serverUrl: 'https://search.ai' }, { key: 'ai', name: 'AI' })).toBe(false);
   });
@@ -45,6 +52,10 @@ describe('sorting a tool of the person\'s own App (the rules of #1042)', () => {
   it('puts a name that sends, deletes or pays under Deletes or sends out, whatever was suggested', () => {
     expect(sortOwnTool('send_email', 'looksUp')).toBe('deletesOrSends');
     expect(sortOwnTool('delete-page', 'changesThings')).toBe('deletesOrSends');
+    expect(sortOwnTool('sendMessage', 'looksUp')).toBe('deletesOrSends');
+    expect(sortOwnTool('deleteFile', 'looksUp')).toBe('deletesOrSends');
+    expect(sortOwnTool('HTTPSendRequest', 'looksUp')).toBe('deletesOrSends');
+    expect(sortOwnTool('searchDocuments', 'looksUp')).toBe('looksUp');
   });
 
   it('takes the suggestion otherwise, with Makes new things read as Changes things, and nothing suggested yet as Deletes or sends out', () => {

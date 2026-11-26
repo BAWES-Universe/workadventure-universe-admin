@@ -185,6 +185,9 @@ describe('offerableForBrick', () => {
       state.readyMade = [{ key: 'exa', name: 'Exa', enabled: true }, { key: 'tavily', name: 'Tavily', enabled: true }, { key: 'gmail', name: 'Gmail', enabled: true }];
       state.added = [{ name: 'My search', serverUrl: 'https://mcp.exa.ai/mcp' }, { name: 'Tavily', serverUrl: 'https://example.org/sse' }];
       expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['gmail']);
+      // A ready-made copy they already connected is still shown as it is
+      state.rows = [row({ providerToolkit: 'exa', connected: true, source: 'ready_made', providerConfirmedAt: new Date() })];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['exa', 'gmail']);
     });
 
     it('never suggests a listed App they only have by their own link or key, and still shows one they connected from the list', async () => {

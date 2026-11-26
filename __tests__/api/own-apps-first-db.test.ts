@@ -9,7 +9,7 @@ import { NextRequest } from 'next/server';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { createConnection, grantToBrick } from '@/lib/app-connections';
+import { checkAppUse, createConnection, grantToBrick } from '@/lib/app-connections';
 import { createBrick } from '@/lib/brick-create';
 import { moveTool, readServerTools, syncCatalog } from '@/lib/mcp-tool-policy';
 import { brickApps } from '@/lib/instant/asker';
@@ -98,12 +98,40 @@ run('a person’s own copy of an App comes first, in a real database', () => {
     it('brings a grant whose tools were waiting before this up to date when it is read', async () => {
       const serverId = await ownApp();
       await prisma.botMcpTool.create({ data: { serverId, name: 'web_search_exa', fingerprint: 'f1', suggestedHeading: 'looksUp', suggestionSource: 'server' } });
-      await prisma.botMcpServer.update({ where: { id: serverId }, data: { legacyText: true } });
       const read = await readServerTools(saraBrick, serverId);
       expect(read.state).toBe('confirmed');
       expect(read.tools[0]).toMatchObject({ heading: 'looksUp', state: 'confirmed' });
       // Read again with nothing new: nothing is written
       expect((await readServerTools(saraBrick, serverId)).policyRevision).toBe(read.policyRevision);
+    });
+
+    it('leaves a server that still works in text as it was: nothing is confirmed under the person', async () => {
+      const serverId = await ownApp();
+      await prisma.botMcpTool.create({ data: { serverId, name: 'send_report', fingerprint: 'f1', suggestedHeading: 'looksUp', suggestionSource: 'server' } });
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { legacyText: true } });
+      const read = await readServerTools(saraBrick, serverId);
+      expect(read.state).toBe('notCheckedYet');
+      expect(read.tools[0].state).toBe('notConfirmedYet');
+    });
+
+    it('keeps a moved tool’s heading when the tool changes, never looser than the rule for its new version', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp'), tool('notes', 'g1', 'looksUp')] });
+      const byName = Object.fromEntries(synced.tools.map((entry) => [entry.name, entry.id]));
+      await moveTool(saraBrick, serverId, byName.query, 'deletesOrSends', sara);
+      await moveTool(saraBrick, serverId, byName.notes, 'makesNew', sara);
+      const changed = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'looksUp'), tool('notes', 'g2', 'changesThings')] });
+      const after = Object.fromEntries(changed.tools.map((entry) => [entry.name, entry]));
+      expect(after.query).toMatchObject({ heading: 'deletesOrSends', state: 'confirmed', movedBy: { name: 'sara' } });
+      expect(after.notes).toMatchObject({ heading: 'changesThings', state: 'confirmed', movedBy: { name: 'sara' } });
+    });
+
+    it('removes a tool the server dropped from a cut list unless a person decided on it', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('a', 'f1', 'looksUp'), tool('b', 'f2', 'looksUp'), tool('c', 'f3', 'looksUp')] });
+      await moveTool(saraBrick, serverId, synced.tools.find((entry) => entry.name === 'b')!.id, 'changesThings', sara);
+      const cut = await syncCatalog(saraBrick, serverId, { tools: [tool('c', 'f3', 'looksUp')], truncated: true });
+      expect(cut.tools.map((entry) => entry.name).sort()).toEqual(['b', 'c']);
     });
 
     it('leaves a ready-made App’s tools as they were: only the person’s own App is confirmed by Universe', async () => {
@@ -130,6 +158,24 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       expect(rows.find((row) => row.id === own)?.ownCopyServerId).toBeNull();
       await prisma.botMcpServer.update({ where: { id: own }, data: { enabled: false } });
       expect((await list()).find((row) => row.id === ready)?.ownCopyServerId).toBeNull();
+    });
+
+    it('never names an own copy that does not work: the ready-made App stays usable', async () => {
+      const ready = await readyMade('exa', 'Exa');
+      // An own Exa that signs in on the App's site and is not signed in
+      const connection = await createConnection(sara, { name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'oauth', authConfig: undefined, source: 'link' });
+      await grantToBrick(sara, connection.id, saraBrick);
+      expect((await list()).find((row) => row.id === ready)?.ownCopyServerId).toBeNull();
+      expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-1` })).toMatchObject({ allowed: true });
+    });
+
+    it('refuses a use of the ready-made copy while the own copy is on, whatever the bot server asks', async () => {
+      const ready = await readyMade('exa', 'Exa');
+      expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-2` })).toMatchObject({ allowed: true });
+      const own = await ownApp('My search', 'https://mcp.exa.ai/mcp');
+      expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-3` })).toMatchObject({ allowed: false, reason: 'off' });
+      await prisma.botMcpServer.update({ where: { id: own }, data: { enabled: false } });
+      expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-4` })).toMatchObject({ allowed: true });
     });
   });
 

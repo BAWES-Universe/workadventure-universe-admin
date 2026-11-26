@@ -27,7 +27,9 @@ import type { Heading } from '@/lib/mcp-tool-policy';
 
 /** Where one tool of an own App goes. */
 export function sortOwnTool(name: string, suggested: Heading | null | undefined): Heading {
-  return suggested ? acceptSorterPick('', name, suggested) : 'deletesOrSends';
+  // A tool of a link App may be named in camelCase ("sendMessage"): its words are split before the name is read, so a send is still a send
+  const words = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
+  return suggested ? acceptSorterPick('', words, suggested) : 'deletesOrSends';
 }
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -48,21 +50,33 @@ export async function universeSortsTools(serverId: string, db: Db = prisma): Pro
  * written (the policy revision went up with it, so a card or a remembered approval made before can be told apart).
  */
 export async function settleOwnAppTools(serverId: string, db?: Db): Promise<boolean> {
-  const run = async (tx: Db): Promise<boolean> => {
-    if (!(await universeSortsTools(serverId, tx))) return false;
+  const work = async (tx: Db) => {
+    if (!(await universeSortsTools(serverId, tx))) return null;
     const server = await tx.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: { legacyText: true } });
+    // A server that existed before tools were checked keeps working in text as it did: it is not changed under the person
+    if (server.legacyText) return null;
     const tools = await tx.botMcpTool.findMany({
       where: { serverId },
       select: { id: true, name: true, fingerprint: true, heading: true, suggestedHeading: true, confirmedAt: true, confirmedById: true, movedById: true },
+      orderBy: { id: 'asc' },
     });
+    // A person confirmed or moved it: theirs stays. The rest is written only where the sorted heading or the confirmation is missing
+    return tools.flatMap((tool) => {
+      if (tool.movedById || (tool.confirmedAt && tool.confirmedById)) return [];
+      const heading = sortOwnTool(tool.name, tool.suggestedHeading as Heading | null);
+      return tool.confirmedAt && tool.heading === heading ? [] : [{ tool, heading }];
+    });
+  };
+  const run = async (tx: Db): Promise<boolean> => {
+    // One writer of a grant's tools at a time (the same lock the bot server's save of the list takes), so a read that settles and a save never
+    // lock the same rows in two orders
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp-tools:${serverId}`}, 0))`;
+    const todo = await work(tx);
+    if (!todo || todo.length === 0) return false;
     const now = new Date();
     let written = 0;
-    for (const tool of tools) {
-      // A person confirmed or moved it: theirs stays
-      if (tool.movedById || (tool.confirmedAt && tool.confirmedById)) continue;
-      const heading = sortOwnTool(tool.name, tool.suggestedHeading as Heading | null);
-      if (tool.confirmedAt && tool.heading === heading) continue;
-      // Only the tool as it was read: a read of the tools or a person's choice that landed in between wins, and this is left to the next look
+    for (const { tool, heading } of todo) {
+      // Only the tool as it was read: a person's choice that landed in between wins, and this is left to the next look
       const done = await tx.botMcpTool.updateMany({
         where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, suggestedHeading: tool.suggestedHeading, confirmedAt: tool.confirmedAt, confirmedById: null, movedById: null },
         data: { heading, confirmedAt: now, confirmedById: null },
@@ -70,10 +84,12 @@ export async function settleOwnAppTools(serverId: string, db?: Db): Promise<bool
       written += done.count;
     }
     if (written === 0) return false;
-    // A server that existed before tools were checked is checked once every tool is confirmed (as Confirm all does)
-    const allConfirmed = (await tx.botMcpTool.count({ where: { serverId, confirmedAt: null } })) === 0;
-    await tx.botMcpServer.update({ where: { id: serverId }, data: { policyRevision: { increment: 1 }, ...(server.legacyText && allConfirmed ? { legacyText: false } : {}) } });
+    await tx.botMcpServer.update({ where: { id: serverId }, data: { policyRevision: { increment: 1 } } });
     return true;
   };
-  return db ? run(db) : prisma.$transaction(run);
+  if (db) return run(db);
+  // A read with nothing to do writes nothing and takes no lock
+  const todo = await work(prisma);
+  if (!todo || todo.length === 0) return false;
+  return prisma.$transaction(run);
 }
