@@ -562,6 +562,23 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(await rowsOf(`${U}_FETCH_EMAILS`)).toEqual([{ name: `${U}_FETCH_EMAILS`, setting: 'asksFirst' }]);
     });
 
+    it('judges two rows for one action by the stricter choice even when they cannot be made one yet', async () => {
+      const { serverId, connectionId } = await granted();
+      await patch(serverId, await toolId(serverId, 'DELETE_MESSAGE'), { setting: 'off' });
+      // A laxer second row for the same action, read after the person's Off
+      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_delete-message`, fingerprint: 'x', heading: 'looksUp', confirmedAt: new Date(), setting: 'rightAway' } });
+      // The sync that would make them one row cannot run now (its transaction gives up): the judge still holds the Off
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async () => false) as never);
+      try {
+        const judge = await actionJudgeFor(saraBrick, connectionId);
+        expect(spy).toHaveBeenCalledTimes(1);
+        for (const spelling of [`${U}_DELETE_MESSAGE`, `${U}_delete-message`]) expect(judge!.judge(spelling)).toMatchObject({ setting: 'off', heading: 'deletesOrSends' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.botMcpTool.findMany({ where: { serverId } })).filter((tool) => tool.name.toUpperCase().replace(/-/g, '_') === `${U}_DELETE_MESSAGE`)).toHaveLength(2);
+    });
+
     it('never moves an App’s action to another heading, and has nothing to confirm', async () => {
       const { serverId } = await granted();
       const send = await toolId(serverId, 'SEND_EMAIL');
