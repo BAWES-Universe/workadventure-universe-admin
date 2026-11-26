@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => null)) as { again?: unknown } | null;
   // The app and its id come from one read of the store: the app it sets out to replace is the one it saw, never one saved by another setup after it
   const { app: existing, appId: keptId } = await readGitHubApp();
-  if (existing && body?.again !== true) return NextResponse.json({ existing: { slug: existing.slug, url: existing.htmlUrl } }, { headers });
+  if (existing && body?.again !== true) return NextResponse.json({ existing: { slug: existing.slug, url: existing.htmlUrl, appId: existing.appId } }, { headers });
   // Who asked, until when, and which app it replaces (none for the first): the return is refused after an hour (GitHub's own limit for
   // the code), once they are no longer a super admin, or when the app kept is no longer the one it set out to replace
   // The app kept is read from the store itself when its secrets cannot be read (no app comes back then, but a row with an id is there):
@@ -34,7 +34,8 @@ export async function POST(request: NextRequest) {
   const replaces = existing?.appId ?? keptId;
   const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, replaces, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
   return NextResponse.json(
-    { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)) },
+    // `replaces` is the app this very form replaces (none for the first): the page waits for another app than that one
+    { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)), replaces },
     { headers: { ...headers, 'Cache-Control': 'no-store' } },
   );
 }

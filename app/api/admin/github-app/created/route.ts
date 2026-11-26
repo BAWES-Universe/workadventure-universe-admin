@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { gitHubRequest } from '@/lib/github/api';
 import { keptGitHubAppId, saveGitHubApp, type ManifestConversion } from '@/lib/github/app';
-import { setupPage } from '@/lib/github/page';
+import { escapeHtml, setupPage } from '@/lib/github/page';
 import { isSuperAdmin } from '@/lib/super-admin';
 
 export const runtime = 'nodejs';
@@ -25,25 +25,43 @@ export async function GET(request: NextRequest) {
   } catch {
     state = null;
   }
-  if (!code || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return setupPage('Something was missing', ['GitHub did not send the app back. Open the setup page again.'], 400);
+  if (!code || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return setupPage('Something was missing', ['GitHub did not send the app back. Open the setup page again.'], 400, wayBack(false));
   if (!state || state.kind !== 'github-app-create' || typeof state.userId !== 'string' || typeof state.exp !== 'number' || state.exp < Date.now() / 1000) {
-    return setupPage('This setup ran out', ['Open the setup page in Orbit again and press Create once more.'], 400);
+    return setupPage('This setup ran out', ['Open the setup page in Orbit again and press Create once more.'], 400, wayBack(true));
   }
   const asker = await prisma.user.findUnique({ where: { id: state.userId }, select: { email: true } });
-  if (!asker || !isSuperAdmin(asker.email)) return setupPage('Not available', ['Only a super admin can set up GitHub for Universe.'], 403);
+  if (!asker || !isSuperAdmin(asker.email)) return setupPage('Not available', ['Only a super admin can set up GitHub for Universe.'], 403, wayBack(true));
   const replaces = typeof state.replaces === 'number' ? state.replaces : null;
   // Another setup page finished first: this one would replace the app everyone signs in through, which it never set out to do
   if ((await keptGitHubAppId()) !== replaces) return alreadySetUp();
   const answer = await gitHubRequest<ManifestConversion>(null, `/app-manifests/${code}/conversions`, { method: 'POST' }).catch(() => null);
   if (!answer?.ok || !answer.data?.id || !answer.data.pem || !answer.data.client_secret) {
     console.error('[GitHubApp] Conversion failed:', answer?.status ?? 'no answer');
-    return setupPage('GitHub did not finish', ['Orbit could not keep the app GitHub made. Open the setup page in Orbit again.'], 502);
+    return setupPage('GitHub did not finish', ['Orbit could not keep the app GitHub made. Open the setup page in Orbit again.'], 502, wayBack(true));
   }
   const app = await saveGitHubApp(answer.data, state.userId, replaces);
   if (!app) return alreadySetUp();
   console.log(`[GitHubApp] Made ${app.slug} (${app.appId})`);
-  return setupPage('GitHub is set up', ['Everyone can now connect GitHub in Apps, and their Bricks work on GitHub as them.', 'You can close this page.']);
+  return setupPage('GitHub is set up', ['Everyone can now connect GitHub in Apps, and their Bricks work on GitHub as them.', 'Orbit shows it as set up. You can close this window.'], 200, wayBack(true));
+}
+
+/**
+ * The way on from this page. GitHub's Create page opens in a window of its own (the setup page in Orbit waits for it and shows
+ * "Set up" by itself), so a finished window can close itself. Opened in a tab instead (a browser that blocked the window), the link
+ * goes back to the game, since Orbit alone only says it runs inside Universe.
+ */
+function wayBack(closes: boolean): string {
+  let game = '';
+  try {
+    const first = process.env.CORS_ALLOWED_ORIGINS?.split(',')[0]?.trim();
+    if (first) game = new URL(first).origin;
+  } catch {
+    game = '';
+  }
+  const close = closes ? '<p><button type="button" onclick="window.close()">Close this window</button></p>' : '';
+  const link = game ? `<p><a href="${escapeHtml(game)}">Back to Universe</a></p>` : '';
+  return close + link;
 }
 
 const alreadySetUp = () =>
-  setupPage('GitHub was already set up', ['Another setup finished first, so this one changed nothing. GitHub works as it is.', 'You can close this page.'], 409);
+  setupPage('GitHub was already set up', ['Another setup finished first, so this one changed nothing. GitHub works as it is.', 'You can close this window.'], 409, wayBack(true));

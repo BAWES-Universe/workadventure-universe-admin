@@ -173,7 +173,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const res = await shareAs(person('owner'), id, { openScope: 'everyone' });
       expect(res.status).toBe(422);
-      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat or link.' });
+      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat, link or public.' });
     });
 
     it('does nothing when it is "Just you" already: the files stay where they are', async () => {

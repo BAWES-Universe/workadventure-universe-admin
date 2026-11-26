@@ -15,6 +15,7 @@ import {
   DoorOpen,
   KeyRound,
   Sparkles,
+  Github,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 import { Planet } from '@/app/admin/components/ds/planet-icon';
@@ -67,6 +68,8 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/ai-providers/usage', label: 'AI usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots/database', label: 'Bot database', icon: Database, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots/mcp-servers', label: 'Apps', icon: Server, requiresSuperAdmin: true, group: 'admin' },
+  // The one-time setup of Universe's GitHub App (game #2041): done once and forgotten, so it is only in the menu, never on home
+  { href: '/admin/github-app', label: 'GitHub for Universe', icon: Github, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export const NAV_GROUP_LABELS: Record<NavGroup, string> = {
