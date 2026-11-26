@@ -1031,6 +1031,9 @@ run('the bounded Instant executor, in a real database', () => {
     beforeAll(async () => {
       meterBefore = (await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value ?? null;
       await setBudget(1_000_000_000_000);
+      // The default this release seeds ($2.00 a month for everyone), whatever other suites left of the grants
+      const { saveDefault } = await import('@/lib/credit-rules');
+      await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true });
     });
     afterAll(async () => {
       // Listing research issues the owner's monthly credit: theirs goes with them
@@ -1288,7 +1291,7 @@ run('the bounded Instant executor, in a real database', () => {
         expect(await readyToUseFor(person)).toBe(404);
         // The Limits screen counts them among the people the budget left out this month: once, however often they ask
         const { rolloutThisMonth } = await import('@/lib/credit-funding');
-        expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget' } })).toBe(2);
+        expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget', programId: (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id } })).toBe(1);
         expect((await rolloutThisMonth()).notGivenPeople).toBeGreaterThanOrEqual(1);
         // Raised: the same person is given their $2 on the next look and is offered research again
         await setBudget(1_000_000_000_000);
