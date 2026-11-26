@@ -237,6 +237,9 @@ function jobView(row: JobRow): JobView {
   };
 }
 
+/** A job that has NOT started: in line, not paused, never run (no pause behind it) and no step done. The same test the game tells the person by (`hasStarted` in the bots' computer control tools). */
+export const notStartedYet = (job: { status: string; queuedFor: string | null; pauses: number | null; stepDone: number }): boolean => job.status === 'queued' && job.queuedFor !== 'paused' && (job.pauses ?? 0) === 0 && job.stepDone === 0;
+
 const JOB_INCLUDE = { effects: { select: { effectKey: true, kind: true, state: true, evidence: true } } } as const;
 
 export async function brickOf(botId: string, ownerId: string) {
@@ -2840,6 +2843,8 @@ interface EndGuard {
   startNextAt?: Date;
   /** One start's own room key: an ending decided while bringing the machine up lands only while that try's room is still the job's (GPT round 6, finding 3b). A pause and resume in between gave the job another room, so the old try's outcome lands on nothing and the job that runs now is left alone. */
   reservation?: string;
+  /** The person was told this job had NOT started (a Cancel that carries `expected: 'not_started'`): the ending is written only while the job is still in line, never paused, never run and with no step done, in the very write that lands it. A job that started since is left alone and the report says `started`. */
+  notStarted?: boolean;
 }
 
 /** What an ending found: it wrote the end (`ended`), found the generation moved (`stale`), found the person in control (`notBrick`), or found a finish intent kept first (`intent`: the caller ends it with the intent's own words). */
@@ -2851,6 +2856,8 @@ interface EndReport {
   /** An intent or a cutoff owns the ending (its finalizer ends the job), or the call's key was no longer good: nothing was written. */
   deferred?: boolean;
   notBrick?: boolean;
+  /** The ending was for a job that had not started, and it has (see `EndGuard.notStarted`): nothing was written. */
+  started?: boolean;
   intent?: Prisma.ComputerFinishIntentGetPayload<Record<string, never>> | null;
 }
 
@@ -2900,6 +2907,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
     if (only !== undefined && job.status !== only) return;
     // The caller's generation and Brick's control are looked at on every try, and they are part of the write below: a take-over between this read and that write moves them, the write lands on nothing, and the next try says so
+    if (guard.notStarted && !notStartedYet(job)) {
+      report.started = true;
+      return;
+    }
     if (guard.generation !== undefined && guard.generation !== null && job.controlGeneration !== guard.generation) {
       report.stale = true;
       return;
@@ -2975,7 +2986,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // An ending Orbit saw itself is always given back; it is kept in the same record
     const orbitSeen = runner === null && (endedBy === 'error' || endedBy === 'pool') && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
-    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.reservation ? { reservationKey: guard.reservation } : {}), ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}), ...(guard.owner ? { ownerEpoch: guard.owner.epoch ?? 0 } : {}), ...(guard.observed ? { control: guard.observed.control, controlGeneration: guard.observed.controlGeneration, ownerEpoch: guard.observed.ownerEpoch, leaseVersion: guard.observed.leaseVersion, handoverSeq: guard.observed.handoverSeq } : {}), agentResponseId: job.agentResponseId };
+    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.notStarted ? { queuedFor: job.queuedFor, pauses: job.pauses, stepDone: job.stepDone } : {}), ...(guard.reservation ? { reservationKey: guard.reservation } : {}), ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}), ...(guard.owner ? { ownerEpoch: guard.owner.epoch ?? 0 } : {}), ...(guard.observed ? { control: guard.observed.control, controlGeneration: guard.observed.controlGeneration, ownerEpoch: guard.observed.ownerEpoch, leaseVersion: guard.observed.leaseVersion, handoverSeq: guard.observed.handoverSeq } : {}), agentResponseId: job.agentResponseId };
     // Written under the cutoff lock: a finish (it honors a decided cutoff and a kept intent), a refusal (the finalizer owns the ending once an intent is kept or a cutoff is decided) and the finalizer of a decided cutoff (only while the decision stands)
     const locked = finish || !!guard.refusal || !!guard.cutoffRequired || personStop;
     // What is read under the cutoff lock, before anything is written: null = go on and write; else why nothing is written (an intent is kept first, a cutoff decided for a finish, or an intent, a cutoff, a key that ended or a finalizer's missing decision for the others)
@@ -4807,5 +4818,6 @@ export const controlInternals = {
   /** Test seam: called the first time a start's claim finds the Brick's line held (it then keeps trying); a no-op in production. A test sets it to know the start has reached its claim, never to guess it by a delay. */
   onLineBusy: ((): void => undefined) as (botId: string) => void,
   /** The person's own ending of ONE job (Cancel): exactly what Stop does for each job, for this one only. */
-  endByPerson: (jobId: string, now: Date, options: { advance: boolean; only?: string; /** The job holds the machine: an ending already committed (a kept intent, a decided cutoff) governs instead of the person's stop. */ held?: boolean }) => endJob(jobId, 'stopped', 'person', now, options.advance, options.only, true, null, false, options.held ? { personStop: true } : {}),
+  endByPerson: (jobId: string, now: Date, options: { advance: boolean; only?: string; /** The job holds the machine: an ending already committed (a kept intent, a decided cutoff) governs instead of the person's stop. */ held?: boolean; /** The person was told the job had not started: it is ended only while that is still true, in the very write (`report.started` when it is not). */ notStarted?: boolean; report?: { started?: boolean } }) =>
+    endJob(jobId, 'stopped', 'person', now, options.advance, options.only, true, null, false, { ...(options.held ? { personStop: true } : {}), ...(options.notStarted ? { notStarted: true } : {}) }, options.report ?? {}),
 };
