@@ -51,17 +51,19 @@ export function keyVisionModels(key: { model: string | null; supportsVision: boo
 /**
  * Where images go when the owner picked nothing. A model that sees looks at them itself. One that can't, on a person's own
  * key, uses a Vision model on that same key when the provider has one, so the images stay on the key; otherwise Universe AI
- * looks at them. The page shows this as the picked choice and the owner can change it. Only a person's own key is ever
- * given a different default: Universe AI and server providers keep behaving exactly as they did.
+ * looks at them, except for a key on the person's own computer or self-hosted server: its images never leave that computer
+ * unless they pick Universe AI, so the default there is "This model". The page shows this as the picked choice and the owner can
+ * change it. Only a person's own key is ever given a different default: Universe AI and server providers keep behaving exactly as they did.
  */
 export type AutoVision =
   | { choice: 'this' }
   | { choice: 'universe-ai' }
   | { choice: 'another'; keyId: string; model: string };
 
-export function autoVision(main: { ownKeyId: string | null; sees: boolean; sameKeyModel: string | null }): AutoVision {
+export function autoVision(main: { ownKeyId: string | null; sees: boolean; sameKeyModel: string | null; ownComputer?: boolean }): AutoVision {
   if (main.sees) return { choice: 'this' };
   if (main.ownKeyId && main.sameKeyModel) return { choice: 'another', keyId: main.ownKeyId, model: main.sameKeyModel };
+  if (main.ownKeyId && main.ownComputer) return { choice: 'this' };
   return { choice: 'universe-ai' };
 }
 
