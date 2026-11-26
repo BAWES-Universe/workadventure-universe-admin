@@ -104,9 +104,11 @@ export interface BrickLimits {
   keyCallSeconds: number;
   /** Kilobytes of an app's answer that are read; a longer answer is cut. */
   keyAnswerKb: number;
-  /** Requests to apps with a key that one person's Bricks may send in an hour, all together. */
-  keyCallsPerPerson: number;
-  /** Requests to apps with a key that every Brick may send in an hour, all together. */
+  /**
+   * Checkouts every page may start in an hour, all together, and asks about payments in an hour (each counted on its own). Bricks using
+   * their owner's own key are never counted here or anywhere: a person's own keys are never limited by Universe (Khalid, 26 Nov 2026).
+   * The saved name is kept so a value saved before stays.
+   */
   keyCallsPlatform: number;
   /** Checkouts one visitor may start on one page in an hour (game #2044). */
   checkoutsPerVisitor: number;
@@ -165,7 +167,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, metExpiresDays: 30, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10, computerFiles: 5, computerFileMb: 25, coldStorageDays: 14, pausedSignInsHours: 24, computerSteps: 200, newPerHour: 30 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, metExpiresDays: 30, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10, computerFiles: 5, computerFileMb: 25, coldStorageDays: 14, pausedSignInsHours: 24, computerSteps: 200, newPerHour: 30 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -244,7 +246,6 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   keyTries: { min: 1, max: 100, whole: true },
   keyCallSeconds: { min: 1, max: 300, whole: true },
   keyAnswerKb: { min: 1, max: 10_240, whole: true },
-  keyCallsPerPerson: { min: 1, max: 10_000_000, whole: true },
   keyCallsPlatform: { min: 1, max: 100_000_000, whole: true },
   checkoutsPerVisitor: { min: 1, max: 100_000, whole: true },
   checkoutsPerPage: { min: 1, max: 10_000_000, whole: true },
@@ -324,6 +325,9 @@ export function readServerLimits(saved: unknown): ServerLimits {
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/** Limits that no longer exist. `bricks.keyCallsPerPerson`: a person's own key is never limited by Universe (26 Nov 2026). */
+const RETIRED_LIMITS = new Set(['bricks.keyCallsPerPerson']);
+
 /** A change to one group: only known names, each inside its range. Says which one is wrong. */
 function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Range>, group: string): Checked<Partial<T>> {
   if (!isRecord(input)) return { ok: false, error: `${group} must be an object` };
@@ -331,6 +335,8 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
   for (const [key, value] of Object.entries(input)) {
     // Only the limits' own names: `constructor` and `toString` are on every object and are not limits
     const range = Object.prototype.hasOwnProperty.call(ranges, key) ? (ranges as Record<string, Range | undefined>)[key] : undefined;
+    // A limit that was taken away (a page opened before it went may still send it) is let go quietly, never saved
+    if (!range && RETIRED_LIMITS.has(`${group}.${key}`)) continue;
     if (!range) return { ok: false, error: `Unknown limit: ${group}.${key}` };
     if (!fits(value, range)) {
       return { ok: false, error: `${group}.${key} must be ${range.whole ? 'a whole number ' : ''}from ${range.min.toLocaleString('en')} to ${range.max.toLocaleString('en')}` };

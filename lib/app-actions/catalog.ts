@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getAdapter, type ProviderAction } from '@/lib/app-adapter';
 import type { Heading } from '@/lib/mcp-tool-policy';
 import { acceptSorterPick, actionTitle, sortAction, withoutProvider } from '@/lib/app-actions/sort';
+import { ownActionList, type OwnAction } from '@/lib/github/actions';
 
 /**
  * Each ready-made App's list of actions, kept once for everyone (table `app_actions`), sorted by Universe (lib/app-actions/sort.ts).
@@ -37,6 +38,18 @@ const DESCRIPTION_MAX = 2000;
 
 const running = new Map<string, Promise<boolean>>();
 
+/**
+ * Universe's own lists (lib/github/actions.ts: GitHub) live in the code, not at a provider: they are saved from the code once per process
+ * (a new release brings its list at the first read) and never wait for the adapter, which they do not use.
+ */
+const ownListsSaved = new Set<string>();
+
+/** One action as it is saved: a provider's (sorted here) or one of Universe's own list (already sorted, with its own words). */
+type ListedAction = ProviderAction & { own?: OwnAction };
+
+const fromOwnList = (list: readonly OwnAction[]): ListedAction[] =>
+  list.map((action) => ({ slug: action.slug, description: action.description, tags: [], version: null, own: action }));
+
 /** The reader's claim ran out and another reader took the App's list: what this one read is not written. */
 class ClaimLost extends Error {}
 
@@ -51,8 +64,9 @@ export function refreshAppActions(toolkit: string): Promise<boolean> {
 }
 
 async function readAndSave(toolkit: string): Promise<boolean> {
+  const own = ownActionList(toolkit);
   const adapter = getAdapter();
-  if (!adapter?.actions) return false;
+  if (!own && !adapter?.actions) return false;
   const now = new Date();
   // Two readers making the App's row at the same moment: the one that loses finds it made
   await prisma.appActionCatalog.createMany({ data: [{ toolkit }], skipDuplicates: true });
@@ -69,15 +83,16 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   // After a failed read the provider is not asked again for a while (retry_after), so the next polls do not each ask it
   const backOff = () =>
     prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
-  let listed: ProviderAction[];
+  let listed: ListedAction[];
   try {
-    listed = await adapter.actions(toolkit);
+    listed = own ? fromOwnList(own) : await adapter!.actions!(toolkit);
   } catch (error) {
     console.error('[AppActions] Could not read the actions of an App:', error instanceof Error ? error.message : 'unknown');
     await backOff();
     return false;
   }
-  const kept = await prisma.appAction.count({ where: { toolkit } });
+  // Universe's own list is the list: it is never held back as a short answer
+  const kept = own ? 0 : await prisma.appAction.count({ where: { toolkit } });
   if (kept > 0 && (listed.length === 0 || (kept >= SHRINK_CHECK_FROM && listed.length < kept * SHRINK_LIMIT))) {
     // This read counts as one more in a row that gave the shorter list (the first one starts the clock)
     const bumped = await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { shrunkReads: { increment: 1 } } }).catch(() => null);
@@ -95,6 +110,7 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   }
   try {
     await save(toolkit, listed, claim);
+    if (own) ownListsSaved.add(toolkit);
     return true;
   } catch (error) {
     if (error instanceof ClaimLost) {
@@ -108,7 +124,7 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   }
 }
 
-async function save(toolkit: string, listed: readonly ProviderAction[], claim: Date): Promise<void> {
+async function save(toolkit: string, listed: readonly ListedAction[], claim: Date): Promise<void> {
   await prisma.$transaction(
     async (tx) => {
       // Only while this reader still holds the list: the row stays locked to the end, so no other reader can take it in between
@@ -122,13 +138,14 @@ async function save(toolkit: string, listed: readonly ProviderAction[], claim: D
       const ordered = [...listed.filter((action) => !action.deprecated), ...listed.filter((action) => action.deprecated)];
       for (const [position, action] of ordered.entries()) {
         const old = bySlug.get(action.slug);
-        let sorted: { heading: Heading; source: string } = sortAction(toolkit, action.slug, action.tags);
+        // Universe's own list comes sorted, with its own words ('universe': never handed to the sorter)
+        let sorted: { heading: Heading; source: string } = action.own ? { heading: action.own.heading, source: 'universe' } : sortAction(toolkit, action.slug, action.tags);
         // The sorter's answer stands while the provider still says nothing more than it did when the sorter read it
         if (sorted.source === 'fallback' && old?.source === 'sorter') sorted = { heading: old.heading as Heading, source: 'sorter' };
         const row = {
           toolkit,
           slug: action.slug.slice(0, 255),
-          title: actionTitle(toolkit, action.slug),
+          title: action.own ? action.own.title.slice(0, 255) : actionTitle(toolkit, action.slug),
           description: action.description ? withoutProvider(action.description).slice(0, DESCRIPTION_MAX) || null : null,
           heading: sorted.heading,
           source: sorted.source,
@@ -169,6 +186,13 @@ export async function ensureAppActions(toolkit: string, waitMs = 0): Promise<Cat
   const key = toolkit.toLowerCase();
   const read = () => prisma.appActionCatalog.findUnique({ where: { toolkit: key }, select: { refreshedAt: true, version: true, claimedUntil: true, retryAfter: true } });
   try {
+    // Universe's own list is saved from the code before its first use in this process (quick: no provider is asked), so a release's
+    // new action is there at once; a save that could not run (another process holds the list) leaves what is there
+    if (ownActionList(key) && !ownListsSaved.has(key)) {
+      await refreshAppActions(key).catch(() => false);
+      const saved = await read();
+      if (saved?.refreshedAt) return saved;
+    }
     const catalog = await read();
     if (catalog?.refreshedAt && Date.now() - catalog.refreshedAt.getTime() < CATALOG_MAX_AGE_MS) return catalog;
     // A failed read is waited out: nothing to start, and nothing would come to wait for

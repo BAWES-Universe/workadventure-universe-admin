@@ -168,20 +168,19 @@ const TABLE: Record<string, InstantTool> = {
  * The research Apps Universe runs on its own account (spec "Research Apps on by default", 26 Nov 2026). Every tool of the table belongs to one of
  * these, and each is ON for every Brick's owner with nothing to connect and no switch: a Brick searches the web from its first message, paid
  * from its owner's Instant Apps credit. Its name is what people see and connect by (the provider that runs it for Universe never is), and its
- * strength is the one line the Brick picks an App by and the Apps page shows under the name. `hosts` say which of a person's own Apps are
- * the same service (their own link, key or sign-in), so their own one wins and this one is not offered next to it.
+ * strength is the one line the Brick picks an App by and the Apps page shows under the name. Which of a person's own Apps is the same App (so
+ * their own one wins and this one is not offered next to it) is decided by the one rule of lib/app-same.ts, from the key and the name.
  */
 export interface InstantAppInfo {
   name: string;
   /** What kind of App it is, said to the Brick with each tool: only a `research` one gets the "search right away" instructions. */
   kind: 'research';
   strength: string;
-  hosts: string[];
 }
 
 export const INSTANT_APPS: Record<string, InstantAppInfo> = {
-  exa: { name: 'Exa', kind: 'research', strength: 'Papers, companies and people', hosts: ['exa.ai'] },
-  tavily: { name: 'Tavily', kind: 'research', strength: 'Fresh news and quick facts', hosts: ['tavily.com'] },
+  exa: { name: 'Exa', kind: 'research', strength: 'Papers, companies and people' },
+  tavily: { name: 'Tavily', kind: 'research', strength: 'Fresh news and quick facts' },
 };
 
 /** The App a toolkit of the table belongs to, or null when it has none (a row without an App is never offered). */

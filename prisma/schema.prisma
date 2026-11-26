@@ -1892,12 +1892,18 @@ model BotMcpTool {
   suggestionSource String?  @map("suggestion_source") @db.VarChar(20)
   // The heading a person chose (or accepted from the suggestion), set when confirmed or moved.
   heading         String?   @db.VarChar(20)
+  // The heading a person moved the tool to, as they chose it. On their own App a tool that changed sits under the stricter of this and
+  // what Universe knows of the new version (lib/app-own-tools.ts), so their choice comes back once Universe knows more.
+  personHeading   String?   @map("person_heading") @db.VarChar(20)
   movedById       String?   @map("moved_by_id")
   confirmedById   String?   @map("confirmed_by_id")
   confirmedAt     DateTime? @map("confirmed_at")
   // An App action's own choice over its heading's (rightAway | asksFirst | off). Null follows the heading. Only on a ready-made App's
   // grant, whose rows are the App's actions (lib/app-actions): a bot's own server never has one.
   setting         String?   @db.VarChar(20)
+  // Whether `setting` is a person's choice (setToolSetting), or the one Universe started the action on (lib/github/actions.ts: Run a
+  // workflow asks first), which follows the heading as the person changes it. A person's choice never moves.
+  settingByPerson Boolean   @default(false) @map("setting_by_person")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 

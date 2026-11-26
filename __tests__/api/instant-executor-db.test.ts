@@ -1132,11 +1132,7 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
       await ownLink(brick, sara, 'https://api.exa.ai', { kind: 'direct', source: 'direct', keyCipher: 'sealed', definition: {}, definitionHash: 'h' });
       expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
-      // An App set up on the Brick itself before Apps were connected once counts as the owner's own too
       await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
-      await prisma.botMcpServer.create({ data: { botId: brick, name: 'my exa', serverUrl: 'https://mcp.exa.ai/mcp', enabled: true } as never });
-      expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
-      await prisma.botMcpServer.deleteMany({ where: { botId: brick } });
     });
 
     it('their own App only wins where it can work: switched off for this Brick, only on another Brick, a sign-in not finished or refused all leave the Universe-paid one on', async () => {
@@ -1155,8 +1151,11 @@ run('the bounded Instant executor, in a real database', () => {
         await giveApp(brick, sara, 'exa');
         await ownLink(brick, sara, 'https://mcp.exa.ai/mcp?login', { signInLostAt: new Date() });
         expect(await toolNames()).toEqual(all);
-        // The ready-made one finishes its sign-in: now Exa is theirs on this Brick (the App's name matched loosely, any case)
+        // A ready-made one that finishes its sign-in is not their own copy (Universe pays for it too, lib/app-same.ts): nothing changes
         await prisma.appConnection.updateMany({ where: { ownerId: sara, source: 'ready_made' }, data: { providerConfirmedAt: new Date(), providerToolkit: 'EXA' } });
+        expect(await toolNames()).toEqual(all);
+        // Their own Exa that works, on this Brick: now Exa is theirs here, and the Universe-paid one is not offered
+        await ownLink(brick, sara, 'https://mcp.exa.ai/mcp');
         expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
       } finally {
         await prisma.bot.delete({ where: { id: other } });

@@ -48,7 +48,10 @@ function Frame({ children, footer }: { children: React.ReactNode; footer: React.
   );
 }
 
-/** The artifact itself in its locked frame, view only: a document drawn from its text, anything else from its own address. */
+/**
+ * The artifact itself in its locked frame, view only: a document drawn from its text, anything else from its own address.
+ * A link in either opens in a new tab when tapped, as the other site itself (it never takes this page away).
+ */
 function ArtifactFrame({ view, className }: { view: PublicView; className: string }) {
   return view.content !== null ? (
     <iframe
@@ -59,7 +62,7 @@ function ArtifactFrame({ view, className }: { view: PublicView; className: strin
       className={className}
     />
   ) : (
-    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url ?? undefined} referrerPolicy="no-referrer" data-artifact-frame className={className} />
+    <iframe title={view.title} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" src={view.url ?? undefined} referrerPolicy="no-referrer" data-artifact-frame className={className} />
   );
 }
 
