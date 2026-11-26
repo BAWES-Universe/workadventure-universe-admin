@@ -171,6 +171,33 @@ describe('scripts/start.sh decides (stand-in migration tool)', () => {
     }
   });
 
+  it('recovery says to check the database first: --applied when a killed migration committed, --rolled-back only when nothing is there', () => {
+    const script = fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8');
+    const runbook = fs.readFileSync(path.join(root, 'docs/PRISMA-DEPLOYMENT.md'), 'utf8');
+    for (const text of [script, runbook]) {
+      expect(text).toMatch(/killed/i);
+      expect(text).toContain('--applied');
+      expect(text).toContain('--rolled-back');
+      expect(text).toMatch(/Never\s+`?--rolled-back`?\s+a\s+migration\s+whose\s+changes/i);
+    }
+    // The message printed on a refused start names both resolutions, not only --rolled-back
+    const refusal = script.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    expect(refusal).toContain("migrate resolve --applied <name>");
+    expect(refusal).toContain("migrate resolve --rolled-back <name>");
+  });
+
+  it('the docs give the health check settings and say what a health check ON relies on', () => {
+    const setup = fs.readFileSync(path.join(root, 'docs/COOLIFY-SETUP.md'), 'utf8');
+    expect(setup).toContain('`GET /admin`');
+    expect(setup).toContain('`127.0.0.1` / `3333`');
+    expect(setup).toMatch(/`120` s/);
+    expect(setup).toMatch(/Expected code \| `200`/);
+    for (const text of [setup, fs.readFileSync(path.join(root, 'docs/PRISMA-DEPLOYMENT.md'), 'utf8'), fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8')]) {
+      expect(text).toMatch(/only\s+add\s+things/i);
+      expect(text).toMatch(/never\s+rename\s+or\s+drop/i);
+    }
+  });
+
   it('has no way to continue after a failed migration', () => {
     const script = fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8');
     const code = script.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');

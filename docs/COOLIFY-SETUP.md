@@ -96,18 +96,40 @@ container exits non-zero and Orbit does not start; see docs/PRISMA-DEPLOYMENT.md
 What happens when a migration fails depends on Coolify's health check:
 
 - **Health check ON**: the new container never becomes healthy, so Coolify keeps the old container
-  serving and marks the deploy failed. Nothing goes down.
+  serving and marks the deploy failed. Nothing goes down. The old version then runs on a database where
+  the release's earlier migrations did apply, so migrations must only add things (new tables, nullable
+  or defaulted columns) and never rename or drop what the old code uses. (This relies on Coolify's
+  rolling update: no fixed host port mapping and no custom container name.)
 - **Health check OFF**: Coolify waits a fixed few seconds and removes the old container anyway, so a
   failed migration means Orbit is **down** until a fixed image is deployed. The new container exits
   and Docker restarts it in a loop (each attempt refuses again; it changes nothing).
 
 The app does not listen until the migrations have finished, so the health check's start period must be
-longer than the longest migration (with the check off, a long migration is a gap with nothing serving).
-`GET /` answers with a redirect to `/admin`, and `/admin` answers 200 without touching the database.
+longer than the longest migration. If Coolify gives up first, it removes the new container in the middle
+of a migration, which is then usually committed by Postgres but recorded as failed by Prisma (see
+docs/PRISMA-DEPLOYMENT.md, "Troubleshooting"). With the check off, a long migration is a gap with
+nothing serving.
+
+Health check settings (turn the check ON before deploying an image that migrates at start):
+
+| Setting | Value |
+| --- | --- |
+| Method / path | `GET /admin` (not `/`: `/` answers 307 to `/admin`; `/admin` answers 200 without the database) |
+| Expected code | `200` |
+| Host / port | `127.0.0.1` / `3333` |
+| Start period | `120` s (60 s at the very least) |
+| Interval / retries | 5 to 10 s / 3 or more |
+
+`next start` is given no `-H`, so Node listens on every address (`::`, which also accepts IPv4, or
+`0.0.0.0` where the host has no IPv6): `127.0.0.1` always reaches it, while `localhost` can resolve to
+`::1` on some hosts. The image has busybox `wget` and no `curl`, which Coolify's check falls back to.
 
 Do not configure a post-deploy migration command (`npx prisma migrate deploy`): the container
 already applies migrations at startup, a post-deploy hook only runs after the new code is serving, and
-`npx` is not pinned to the Prisma CLI bundled in the image (it could run another version, or fail).
+`npx` is not a pinned path to the Prisma CLI bundled in the image. If one is set today, drop it after the
+first good deploy of an image that migrates at start; until then it finds nothing pending (if it ever
+overlapped a running migration, it would wait on Prisma's database lock and fail without changing
+anything).
 
 ## Step 7: Deploy
 

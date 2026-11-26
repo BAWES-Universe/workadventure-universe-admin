@@ -11,13 +11,16 @@ Whether users then still reach the previous version depends on the host: with Co
 ON the old container keeps serving and the deploy is marked failed; with it OFF the old container is
 removed anyway, so Orbit is down until a fixed image is deployed, and the new container retries in a
 loop (restart policy). Each retry refuses again without changing anything (Prisma P3009, and a database
-lock while applying). The app does not listen until the migrations finish, so the health check start
-period must be longer than the longest migration. See docs/COOLIFY-SETUP.md.
+lock while applying). With the check ON, the old version runs on a database where the release's earlier
+migrations did apply, so migrations must only add things (new tables, nullable or defaulted columns)
+and never rename or drop what the old code uses. The app does not listen until the migrations finish,
+so the health check start period must be longer than the longest migration: if Coolify gives up first,
+it kills the new container mid-migration (see "Troubleshooting"). Settings: docs/COOLIFY-SETUP.md.
 
 Do not configure a Coolify post-deploy migration command (`npx prisma migrate deploy`): the container
 already applies migrations at startup, and a post-deploy hook runs only after the new code is serving.
-`npx` is also not pinned to the Prisma CLI bundled in the image, so it could run another version, or
-fail. Remove such a hook if one is set.
+`npx` is also not a pinned path to the Prisma CLI bundled in the image. Drop such a hook after the first
+good deploy of an image that migrates at start.
 
 To check by hand:
 ```bash
@@ -113,16 +116,22 @@ reason above that line (`docker logs <container-name>`). Then:
 1. If the database could not be reached, fix the connection and start the container again.
 2. If a migration failed, it is recorded as failed and every later start refuses (Prisma error P3009)
    until it is resolved. Migrations that applied before the failing one stay applied.
-   - Check what the failed migration left behind. A migration that runs as one transaction (the usual
-     case: plain DDL and data statements, no explicit `COMMIT`) leaves nothing: Postgres rolls all of it
-     back. One that commits part-way (an explicit `COMMIT`, or statements that cannot run in a
-     transaction such as `CREATE INDEX CONCURRENTLY`) keeps what ran before the failure. Undo those
-     changes by hand first, so the fixed migration starts from the state it expects.
-   - Then mark it as rolled back (from any container of this image, or a one-off one):
-     ```bash
-     node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
-     ```
-     and deploy an image with the fixed migration.
+   - **First check whether the failed migration's changes are in the database.** A migration that
+     errored as one transaction (the usual case: plain DDL and data statements, no explicit `COMMIT`)
+     left nothing. A migration that was **killed** while it ran (Coolify giving up on the health check,
+     a redeploy, OOM, `docker stop`) is usually finished and committed by Postgres anyway, while Prisma
+     still records it as failed. One that commits part-way (an explicit `COMMIT`, or
+     `CREATE INDEX CONCURRENTLY`) keeps what ran before the failure.
+   - Then resolve it (from any container of this image, or a one-off one):
+     - all of its changes are there:
+       ```bash
+       node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
+       ```
+     - none of them are: `migrate resolve --rolled-back <migration name>`, and deploy an image with the
+       fixed migration;
+     - only some are: undo those by hand, then `--rolled-back`, and deploy the fixed image.
+   - Never `--rolled-back` a migration whose changes are in the database: the next start would run it
+     again, and it fails again or applies twice.
 
 ### "Prisma Client not found"
 
