@@ -1,5 +1,7 @@
 import type { AppConnection } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { decryptApiKey } from '@/lib/encryption';
+import { parseOAuthConfig } from '@/lib/mcp/oauth-token';
 
 /**
  * A person's own copy of an App comes first (Khalid, 26 Nov 2026): when a Brick has the person's own Exa (added by its link, or with their
@@ -159,7 +161,22 @@ export async function brickOwnRowsOf(botId: string): Promise<OwnGrant[]> {
     select: { id: true, name: true, serverUrl: true, authType: true, authConfig: true, signInLostAt: true, noAnswerAt: true },
     orderBy: { createdAt: 'asc' },
   });
-  return rows.flatMap((row) => (ownCopyWorks(row.authType !== 'oauth' || !!row.authConfig, row) ? [{ serverId: row.id, name: row.name, serverUrl: row.serverUrl }] : []));
+  return rows.flatMap((row) => (ownCopyWorks(rowSignedIn(row), row) ? [{ serverId: row.id, name: row.name, serverUrl: row.serverUrl }] : []));
+}
+
+/**
+ * Whether a row added straight on a Brick can sign in: always for a key or no sign-in, and for a sign-in on the App's site only when its stored
+ * sign-in holds an access token (the same test the Brick's call makes before it reaches the App). Settings saved with no token, or that cannot be
+ * read, are not a working copy, so the ready-made one is not held back for them.
+ */
+function rowSignedIn(row: { authType: string; authConfig: string | null }): boolean {
+  if (row.authType !== 'oauth') return true;
+  if (!row.authConfig) return false;
+  try {
+    return !!parseOAuthConfig(decryptApiKey(row.authConfig))?.accessToken;
+  } catch {
+    return false;
+  }
 }
 
 /** The first own grant that is the same App as this one, or null. */

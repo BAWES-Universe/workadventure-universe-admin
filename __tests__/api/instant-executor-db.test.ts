@@ -1021,6 +1021,8 @@ run('the bounded Instant executor, in a real database', () => {
 
   describe('research Apps are on for every Brick’s owner by default, and their own App of the same service wins', () => {
     let meterBefore: Prisma.JsonValue | null = null;
+    /** The Instant Apps default in force before this suite saved the $2.00 one, to put back at the end (null: it was already that). */
+    let defaultBefore: { programId: string | null; ruleId: string | null; savedProgramId?: string } | null = null;
     /** This month's rollout budget, the cap on all default credit issued (the seeded $20 lets about 8 people a month have the $2). */
     const setBudget = async (micros: number) => {
       const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
@@ -1031,11 +1033,26 @@ run('the bounded Instant executor, in a real database', () => {
     beforeAll(async () => {
       meterBefore = (await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value ?? null;
       await setBudget(1_000_000_000_000);
-      // The default this release seeds ($2.00 a month for everyone), whatever other suites left of the grants
+      // The default this release seeds ($2.00 a month for everyone), whatever other suites left of the grants. What was in force before is kept,
+      // so the suite can put it back when it ends
+      const program = await prisma.grantProgram.findFirst({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' }, select: { id: true } });
+      const rule = program ? await prisma.grantRule.findFirst({ where: { programId: program.id, state: 'current' }, select: { id: true, amount: true, schedule: true, recipientType: true } }) : null;
+      if (rule && Number(rule.amount) === 2_000_000 && rule.schedule === 'monthly' && rule.recipientType === 'all') return;
+      defaultBefore = { programId: program?.id ?? null, ruleId: rule?.id ?? null };
       const { saveDefault } = await import('@/lib/credit-rules');
-      await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true });
+      defaultBefore.savedProgramId = (await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true })).programId;
     });
     afterAll(async () => {
+      // The Instant Apps default goes back to what it was: the version in force before this suite, or no default at all
+      if (defaultBefore?.savedProgramId) {
+        if (defaultBefore.ruleId) {
+          await prisma.grantRule.updateMany({ where: { programId: defaultBefore.savedProgramId, state: 'current', id: { not: defaultBefore.ruleId } }, data: { state: 'superseded', supersededAt: new Date() } });
+          await prisma.grantRule.update({ where: { id: defaultBefore.ruleId }, data: { state: 'current', supersededAt: null } });
+        } else {
+          const { endProgram } = await import('@/lib/credit-rules');
+          await endProgram(defaultBefore.savedProgramId, { userId: sara, superAdmin: true });
+        }
+      }
       // Listing research issues the owner's monthly credit: theirs goes with them
       await prisma.creditAllocation.deleteMany({ where: { hold: { personId: { in: [sara, omar] } } } });
       await prisma.creditHold.deleteMany({ where: { personId: { in: [sara, omar] } } });
@@ -1182,6 +1199,7 @@ run('the bounded Instant executor, in a real database', () => {
       liveTools(p);
       setAdapterForTests(p.adapter);
       const all = ['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH'];
+      const keyBefore = process.env.ENCRYPTION_KEY;
       try {
         // Brick Tools > Add in the game: their own Exa with their key in the link, on this Brick only
         const row = await prisma.botMcpServer.create({ data: { botId: brick, name: 'my search', serverUrl: 'https://mcp.exa.ai/mcp?exaApiKey=x', enabled: true } as never });
@@ -1196,10 +1214,22 @@ run('the bounded Instant executor, in a real database', () => {
         // One that signs in on the App's site and was never signed in does not count either
         await prisma.botMcpServer.update({ where: { id: row.id }, data: { signInLostAt: null, signInLostStatus: null, authType: 'oauth', authConfig: null } });
         expect(await toolNames()).toEqual(all);
+        // ...nor sign-in settings saved with no access token (the Brick's call would stop at "reconnect"), nor settings that cannot be read
+        const { encryptApiKey } = await import('@/lib/encryption');
+        process.env.ENCRYPTION_KEY = keyBefore || 'a'.repeat(64);
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { authConfig: encryptApiKey(JSON.stringify({ clientId: 'c', tokenEndpoint: 'https://mcp.exa.ai/token' })) } });
+        expect(await toolNames()).toEqual(all);
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { authConfig: 'not-something-we-wrote' } });
+        expect(await toolNames()).toEqual(all);
+        // A stored sign-in with its access token: theirs again
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { authConfig: encryptApiKey(JSON.stringify({ accessToken: 'tok', clientId: 'c' })) } });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
         // Switched off for this Brick: not theirs here
         await prisma.botMcpServer.update({ where: { id: row.id }, data: { authType: 'none', enabled: false } });
         expect(await toolNames()).toEqual(all);
       } finally {
+        if (keyBefore === undefined) delete process.env.ENCRYPTION_KEY;
+        else process.env.ENCRYPTION_KEY = keyBefore;
         await prisma.botMcpServer.deleteMany({ where: { botId: brick, connectionId: null } });
       }
     });
@@ -1254,7 +1284,16 @@ run('the bounded Instant executor, in a real database', () => {
         // Their own Tavily (on any Brick, or none): listed under Connected, so not here
         await prisma.appConnection.create({ data: { ownerId: sara, name: 'My Tavily', serverUrl: 'https://mcp.tavily.com/mcp', authType: 'none', source: 'link' } as never });
         expect((await readyToUse()).body.apps?.map((app) => app.key)).toEqual(['exa']);
-        // Paused: nothing is ready to use
+        // Paused (the real pause, the Apps still served): nothing is ready to use, and it comes back on resume
+        const { pauseInstant } = await import('@/lib/instant/state');
+        await pauseInstant('manual', sara);
+        try {
+          expect((await readyToUse()).status).toBe(404);
+        } finally {
+          await resumeInstant(sara);
+        }
+        expect((await readyToUse()).body.apps?.map((app) => app.key)).toEqual(['exa']);
+        // No App served as Instant any more (an empty catalogue): nothing is ready to use
         p.instant.tool.mockImplementation((async () => null) as never);
         const { forgetToolSchemas } = await import('@/lib/instant/tools');
         forgetToolSchemas();
@@ -1291,11 +1330,11 @@ run('the bounded Instant executor, in a real database', () => {
       expect(p.instant.run).toHaveBeenCalledTimes(2);
       // A new question is not held back by it
       expect(await runInstant(ask({ taskKey: `task-${randomUUID()}` }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
-      // A run that names no question cannot be counted, so while a bound is set it is refused: nothing held, nothing sent, nothing saved
+      // A run that names no question cannot be counted, so while a bound is set it is refused with its own reason (not "as many look-ups as one question may have"): nothing held, nothing sent, nothing saved
       const sent = p.instant.run.mock.calls.length;
       const held = f.funds.reserve.mock.calls.length;
       const saved = await prisma.instantRun.count({ where: { personId: sara } });
-      expect(await runInstant(ask({ arguments: { query: 'no task' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'question_limit' });
+      expect(await runInstant(ask({ arguments: { query: 'no task' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'no_question' });
       expect(p.instant.run.mock.calls.length).toBe(sent);
       expect(f.funds.reserve.mock.calls.length).toBe(held);
       expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(saved);
@@ -1465,6 +1504,63 @@ run('the bounded Instant executor, in a real database', () => {
         }
       });
 
+      it('"not given" is decided by what is left, not by how many lots there are: a spent gift beside a monthly credit the budget left out is still "not given"; some credit left that is short is "used up"', async () => {
+        const { person } = await newOwner('dana');
+        const { createGift, endProgram } = await import('@/lib/credit-rules');
+        const { issuedInMonth, PLATFORM_ACCOUNT_ID } = await import('@/lib/credit-funding');
+        const { creditStanding, holdCredit, settleHold } = await import('@/lib/credit-spend');
+        const gift = await createGift({ categoryId: 'instant_apps', amount: 10_000, schedule: 'once', recipients: { kind: 'people', userIds: [person] } }, { userId: sara, superAdmin: true });
+        try {
+          // Room for the gift this month, not for the $2 default
+          await setBudget((await issuedInMonth(prisma, PLATFORM_ACCOUNT_ID, new Date())) + 10_000);
+          const start = await creditStanding(person, 'instant_apps');
+          expect(start).toMatchObject({ availableMicros: 10_000, notGiven: false });
+          // Some credit left that does not cover the run: "used up", as before
+          expect(await holdCredit({ holdKey: `h-${randomUUID()}`, personId: person, category: 'instant_apps', amountMicros: 20_000, chargeClass: 'instant_run' })).toMatchObject({ ok: false, reason: 'credit_used_up' });
+          // The gift spent to nothing: there is a lot, but nothing is left and this month's credit was never given, so "not given"
+          const key = `h-${randomUUID()}`;
+          expect((await holdCredit({ holdKey: key, personId: person, category: 'instant_apps', amountMicros: 10_000, chargeClass: 'instant_run' })).ok).toBe(true);
+          await settleHold({ holdKey: key, customerMicros: 10_000 });
+          expect(await creditStanding(person, 'instant_apps')).toMatchObject({ availableMicros: 0, notGiven: true });
+          expect(await holdCredit({ holdKey: `h-${randomUUID()}`, personId: person, category: 'instant_apps', amountMicros: 100, chargeClass: 'instant_run' })).toMatchObject({ ok: false, reason: 'not_given' });
+        } finally {
+          await setBudget(1_000_000_000_000);
+          await endProgram(gift.programId, { userId: sara, superAdmin: true });
+          await prisma.creditAllocation.deleteMany({ where: { hold: { personId: person } } });
+          await prisma.creditHold.deleteMany({ where: { personId: person } });
+          await prisma.creditLot.deleteMany({ where: { programId: gift.programId } });
+        }
+      });
+
+      it('a shared pool made when the budget is raised takes everyone it reaches off the "left out" count, not only the person whose look made it', async () => {
+        const { person: first } = await newOwner('rania');
+        const { person: second } = await newOwner('salem');
+        const { person: stranger } = await newOwner('tariq');
+        const { createGift, endProgram } = await import('@/lib/credit-rules');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        const { monthKeyOf } = await import('@/lib/credit-funding');
+        const gift = await createGift({ categoryId: 'instant_apps', amount: 30_000, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: [first, second] } }, { userId: sara, superAdmin: true });
+        try {
+          await setBudget(1);
+          await ensureIssued(first);
+          const leftOut = (personId: string) => prisma.creditIssueSkip.count({ where: { personId, programId: gift.programId } });
+          expect(await leftOut(first)).toBe(1);
+          // Someone the pool does not reach, counted for it anyway (written by an older rule): stays counted
+          await prisma.creditIssueSkip.create({ data: { personId: stranger, programId: gift.programId, monthKey: monthKeyOf(new Date()), reason: 'over_budget' } });
+          await setBudget(1_000_000_000_000);
+          // The second person's look makes the pool: the first is no longer left out, though they have not looked again
+          expect((await ensureIssued(second)).issued.map((lot) => lot.programId)).toContain(gift.programId);
+          expect(await leftOut(first)).toBe(0);
+          expect(await leftOut(second)).toBe(0);
+          expect(await leftOut(stranger)).toBe(1);
+        } finally {
+          await setBudget(1_000_000_000_000);
+          await endProgram(gift.programId, { userId: sara, superAdmin: true });
+          await prisma.creditIssueSkip.deleteMany({ where: { programId: gift.programId } });
+          await prisma.creditLot.deleteMany({ where: { programId: gift.programId } });
+        }
+      });
+
       it('an owner who spent their monthly credit is offered none until it comes back on the 1st (UTC), and gets it back as soon as room frees up', async () => {
         await setLimits();
         const { createInstantFunds } = await import('@/lib/funding/instant-funds');
@@ -1477,15 +1573,41 @@ run('the bounded Instant executor, in a real database', () => {
         const { availableCredit, holdCredit, releaseHold } = await import('@/lib/credit-spend');
         const { availableMicros } = await availableCredit(person, 'instant_apps');
         expect(availableMicros).toBe(2_000_000);
-        // All but a sliver is spoken for: less than the cheapest search holds
-        const spendKey = `spend-${randomUUID()}`;
-        const held = await holdCredit({ holdKey: spendKey, personId: person, category: 'instant_apps', amountMicros: availableMicros - 100, chargeClass: 'instant_run' });
-        expect(held.ok).toBe(true);
+        // What one run of the cheapest offered tool holds (the page-contents tool, not a search), and of Tavily's only tool
+        const { instantCatalog, holdFor } = await import('@/lib/instant/values');
+        const { getInstantLimits } = await import('@/lib/instant/state');
+        const { markupBps } = await getInstantLimits();
+        const holdOf = (tool: string) => holdFor(instantCatalog().find((row) => row.tool === tool)!.fromMicros, markupBps);
+        const cheapest = Math.min(...instantCatalog().map((row) => holdFor(row.fromMicros, markupBps)));
+        expect(cheapest).toBe(holdOf('EXA_GET_CONTENTS_ACTION'));
+        expect(holdOf('TAVILY_SEARCH')).toBeGreaterThan(cheapest);
+        const readyAppsFor = async (personId: string) => {
+          mockSession.current = { id: personId };
+          try {
+            const response = await readyToUseRoute(new NextRequest('http://localhost/api/me/apps/instant'));
+            return response.status === 200 ? ((await response.json()) as { apps: { key: string }[] }).apps.map((app) => app.key) : response.status;
+          } finally {
+            mockSession.current = null;
+          }
+        };
+        const leave = async (left: number) => {
+          const key = `spend-${randomUUID()}`;
+          expect((await holdCredit({ holdKey: key, personId: person, category: 'instant_apps', amountMicros: availableMicros - left, chargeClass: 'instant_run' })).ok).toBe(true);
+          return key;
+        };
+        // Exactly what the cheapest run holds is left: research is still offered, and only the Apps that much covers are ready to use (Exa, not Tavily)
+        const exact = await leave(cheapest);
+        expect((await listFor(bot)).tools).toHaveLength(4);
+        expect(await readyAppsFor(person)).toEqual(['exa']);
+        await releaseHold({ holdKey: exact });
+        // One millionth less: nothing is covered, so none is offered and the Brick is told it is used up
+        const spendKey = await leave(cheapest - 1);
         const now = new Date();
         const firstOfNext = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
         expect(await listFor(bot)).toEqual({ ready: true, reason: null, tools: [], research: { state: 'used_up', renewsAt: firstOfNext } });
         expect(await readyToUseFor(person)).toBe(404);
         await releaseHold({ holdKey: spendKey });
+        expect(await readyAppsFor(person)).toEqual(['exa', 'tavily']);
         expect((await listFor(bot)).tools).toHaveLength(4);
         const { forgetToolSchemas } = await import('@/lib/instant/tools');
         forgetToolSchemas();

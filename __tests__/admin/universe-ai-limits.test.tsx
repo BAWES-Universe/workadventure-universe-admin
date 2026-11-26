@@ -238,6 +238,30 @@ describe('Universe AI limits', () => {
     expect(screen.getByLabelText('Bricks').querySelectorAll('[data-testid^="limit-"]')[0]).toBe(row);
   });
 
+  it('a saved rollout budget whose standing could not be read drops the old figures instead of pairing them with the new budget', async () => {
+    answer();
+    const ok = fetchMock.getMockImplementation()!;
+    let budget = 20_000_000;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url !== '/api/admin/meter-settings') return ok(url, init);
+      if (init?.method === 'PATCH') {
+        budget = JSON.parse(String(init.body)).rolloutBudgetMicros;
+        // Saved, but this month's standing could not be read
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: null, rolloutBudgetMicros: budget }, rollout: null }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: null, rolloutBudgetMicros: budget }, rollout: { issuedMicros: 5_000_000, notGivenPeople: 0 }, missing: [] }) });
+    });
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-rolloutBudget');
+    await waitFor(() => expect(screen.getByTestId('limit-rolloutBudget').textContent).toContain('Issued $5.00 of $20.00 this month'));
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Rollout budget for grants.*in dollars/), { target: { value: '40' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByTestId('limit-rolloutBudget').textContent).toContain('$40'));
+    expect(screen.getByTestId('limit-rolloutBudget').textContent).not.toContain('Issued');
+  });
+
   it('takes a computer allowance of its own in dollars and cents', async () => {
     answer(SERVER_LIMITS_RECOMMENDED, VOICE_LIMITS_RECOMMENDED, 5_000_000);
     render(<UniverseAiLimits />);

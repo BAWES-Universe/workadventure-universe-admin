@@ -188,7 +188,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
       // A run that was refused never went out, so it does not count. While a bound is set, a run that names no question is refused: it could
       // not be counted, so leaving the key out would be a way round the bound (the bot server always sends one)
       const taskKey = taskKeyOf(input);
-      if (!taskKey && limits.maxRunsPerQuestion !== null) return { kind: 'refused', outcome: refuse('question_limit') };
+      if (!taskKey && limits.maxRunsPerQuestion !== null) return { kind: 'refused', outcome: refuse('no_question') };
       if (taskKey && limits.maxRunsPerQuestion !== null) {
         const runs = await tx.instantRun.count({ where: { personId: input.personId, taskKey, state: { not: 'refused' } } });
         if (runs >= limits.maxRunsPerQuestion) return { kind: 'refused', outcome: refuse('question_limit') };

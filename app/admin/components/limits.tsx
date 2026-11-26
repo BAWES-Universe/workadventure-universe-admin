@@ -1791,7 +1791,8 @@ export function UniverseAiLimits() {
     }
     const saved = result.data as { settings: MoneyLimitSettings; rollout?: RolloutStanding | null };
     setMoney(saved.settings);
-    if (saved.rollout) setRollout(saved.rollout);
+    // An answer with no standing (it could not be read) clears the old one, so the row never pairs the new budget with old figures
+    if (saved.rollout !== undefined) setRollout(saved.rollout);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }

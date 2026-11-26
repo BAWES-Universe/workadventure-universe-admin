@@ -197,7 +197,11 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
   if (!plan) return { skipped: null };
   const subjectKey = subjectKeyFor(rule, personId);
   const already = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
-  if (already) return { skipped: null };
+  // Already there (for a shared pool, made when someone else arrived first): this person has it, so they are not among the people left out
+  if (already) {
+    await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
+    return { skipped: null };
+  }
   const account = await getFundingAccount(rule.fundingAccountId, tx);
   if (!account || account.status !== 'active') return { skipped: 'account_inactive' };
   const budget = budgetOf(account, settings);
@@ -235,14 +239,29 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
     skipDuplicates: true,
   });
   if (count === 0) return { skipped: null };
-  // Given after all (the rollout budget was raised this month): no longer among the people it left out
-  await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
+  // Given after all (the rollout budget was raised this month): no longer among the people it left out. A shared pool is credit for everyone
+  // the rule reaches, so each of them left out earlier this month is cleared too; anyone it does not reach stays counted
+  await clearSkipsFor(tx, rule, personId, now);
   const lot = await tx.creditLot.findUniqueOrThrow({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
   // Credit for Instant Apps arrived (a gift or a renewal): what the person asked for before now is answered, so a later ask is a new one
   if (rule.covers.includes('instant_apps') && rule.share === 'each') {
     await tx.meterRequest.updateMany({ where: { personId, what: 'apps', answeredAt: null, createdAt: { lte: now } }, data: { answeredAt: now, grantKey: `lot:${lot.id}` } });
   }
   return { lot: { lotId: lot.id, programId: rule.programId, periodKey: plan.periodKey, subjectKey, amountMicros: plan.amountMicros } };
+}
+
+/** Clears this month's "left out" records that a new lot answers: the person's own, and for a shared pool everyone the rule reaches. */
+async function clearSkipsFor(tx: Tx, rule: RuleFacts, personId: string, now: Date): Promise<void> {
+  const monthKey = monthKeyOf(now);
+  await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey } });
+  if (rule.share !== 'shared') return;
+  const others = await tx.creditIssueSkip.findMany({ where: { programId: rule.programId, monthKey }, select: { personId: true } });
+  const reached: string[] = [];
+  for (const { personId: other } of others) {
+    const facts = await personFacts(tx, other);
+    if (facts && reaches(rule, facts)) reached.push(other);
+  }
+  if (reached.length > 0) await tx.creditIssueSkip.deleteMany({ where: { personId: { in: reached }, programId: rule.programId, monthKey } });
 }
 
 /** Issues for several people (a rollout, a migration run, a gift to people you pick): each one the same exactly-once way. */

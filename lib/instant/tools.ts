@@ -113,16 +113,28 @@ export type InstantListing = { ready: boolean; reason: string | null; tools: Off
  * to hide the tools (a run then says the books could not be read, as before).
  */
 async function researchStanding(personId: string, tools: readonly OfferedTool[]): Promise<ResearchStanding | null> {
+  const credit = await researchCredit(personId);
+  return credit ? standingFor(credit, tools) : null;
+}
+
+type ResearchCredit = { standing: Awaited<ReturnType<typeof creditStanding>>; covers: (tool: OfferedTool) => boolean };
+
+/** The person's Instant Apps credit and whether it covers one run of a tool (its hold); null when the books cannot be read. */
+async function researchCredit(personId: string): Promise<ResearchCredit | null> {
   try {
-    const cheapest = Math.min(...tools.map((tool) => tool.fromMicros));
     const { markupBps } = await getInstantLimits();
     const standing = await creditStanding(personId, 'instant_apps');
-    if (standing.availableMicros >= holdFor(cheapest, markupBps)) return null;
-    return { state: standing.notGiven ? 'not_given' : 'used_up', renewsAt: standing.notGiven ? null : (standing.renewsAt?.toISOString() ?? null) };
+    return { standing, covers: (tool) => standing.availableMicros >= holdFor(tool.fromMicros, markupBps) };
   } catch (error) {
     console.error('[Instant] Could not read research credit:', error instanceof Error ? error.message : 'unknown');
     return null;
   }
+}
+
+/** Null when the credit covers at least one of these tools; otherwise why not. */
+function standingFor({ standing, covers }: ResearchCredit, tools: readonly OfferedTool[]): ResearchStanding | null {
+  if (tools.some(covers)) return null;
+  return { state: standing.notGiven ? 'not_given' : 'used_up', renewsAt: standing.notGiven ? null : (standing.renewsAt?.toISOString() ?? null) };
 }
 
 export async function offeredInstantTools(botId: string | null): Promise<InstantListing> {
@@ -188,10 +200,12 @@ async function instantToolsWhere(wanted: (toolkit: string) => boolean): Promise<
 export async function instantAppsForPerson(personId: string): Promise<{ key: string; name: string; blurb: string }[]> {
   const own = await personOwnResearch(personId);
   const offered = await instantToolsWhere((toolkit) => !own.has(appKeyOf(toolkit)));
-  // Not shown as ready to use while the person has no credit that pays for a search
-  if (offered.tools.length === 0 || (await researchStanding(personId, offered.tools))) return [];
+  if (offered.tools.length === 0) return [];
+  // Only the Apps with a tool the person's credit covers now (each App by its own price, not only the cheapest one); unreadable books hide nothing
+  const credit = await researchCredit(personId);
+  const runnable = credit ? offered.tools.filter(credit.covers) : offered.tools;
   const apps: { key: string; name: string; blurb: string }[] = [];
-  for (const tool of offered.tools) {
+  for (const tool of runnable) {
     if (apps.some((app) => app.key === tool.toolkit)) continue;
     apps.push({ key: tool.toolkit, name: tool.app, blurb: tool.strength });
   }

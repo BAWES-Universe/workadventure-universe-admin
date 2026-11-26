@@ -473,6 +473,7 @@ export type InstantReason =
   | 'not_owner' // only the Brick's owner's own requests run Instant
   | 'already_checking' // the very same ask is still being looked up
   | 'question_limit' // this question already had the most runs one question may have
+  | 'no_question' // a bound per question is set and the run named no question, so it could not be counted
   | 'provider_off' // Composio refused: Instant is not switched on for the tool
   | 'provider_empty' // Composio's balance is empty
   | 'provider_failed' // it ran and did not work (nothing charged to the person)
@@ -501,6 +502,7 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   not_owner: 'Only my owner can have me run that.',
   already_checking: 'I am still checking the same request.',
   question_limit: 'That is as many look-ups as I do for one question.',
+  no_question: 'That could not run because it was not asked as part of a question.',
   provider_off: 'This is not available right now.',
   provider_empty: 'This is not available right now.',
   provider_failed: 'It did not work. You were not charged.',
