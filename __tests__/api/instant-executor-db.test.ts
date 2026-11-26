@@ -1408,6 +1408,63 @@ run('the bounded Instant executor, in a real database', () => {
         }
       });
 
+      it('a person the month’s budget left out is told so on every later look without a transaction, and is given their $2 on the first look after a raise', async () => {
+        await setBudget(1);
+        const { person } = await newOwner('yara');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
+        // The first look takes the full way: that is where being left out is written down for the Limits screen
+        const spy = jest.spyOn(prisma, '$transaction');
+        try {
+          const first = await ensureIssued(person);
+          expect(first.issued).toEqual([]);
+          expect(first.skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+          expect(spy).toHaveBeenCalled();
+          expect(await prisma.creditIssueSkip.count({ where: { personId: person, programId: program, reason: 'over_budget' } })).toBe(1);
+          // Every later look gives the same answer ("not given", never "used up") and opens no transaction, so it never waits on the lock
+          spy.mockClear();
+          const later = await ensureIssued(person);
+          expect(later).toEqual(first);
+          expect(spy).not.toHaveBeenCalled();
+          // Raised: the budget is read again on the next look, which takes the full way and gives them their $2
+          await setBudget(1_000_000_000_000);
+          const raised = await ensureIssued(person);
+          expect(raised.issued.map((lot) => lot.programId)).toContain(program);
+          expect(spy).toHaveBeenCalled();
+          expect(await prisma.creditIssueSkip.count({ where: { personId: person, programId: program } })).toBe(0);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the funding account’s own budget, when set, is the one in force for the look without locks too', async () => {
+        await setBudget(1_000_000_000_000);
+        const before = await prisma.fundingAccount.findUniqueOrThrow({ where: { id: 'funding-platform' }, select: { budgetMicros: true } });
+        await prisma.fundingAccount.update({ where: { id: 'funding-platform' }, data: { budgetMicros: BigInt(1) } });
+        try {
+          const { person } = await newOwner('maha');
+          const { ensureIssued } = await import('@/lib/credit-issue');
+          // The Limits row is told which budget is in force
+          const { rolloutThisMonth } = await import('@/lib/credit-funding');
+          expect((await rolloutThisMonth()).accountBudgetMicros).toBe(1);
+          const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
+          expect((await ensureIssued(person)).skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+          const spy = jest.spyOn(prisma, '$transaction');
+          try {
+            expect((await ensureIssued(person)).skipped).toContainEqual({ programId: program, categoryId: 'instant_apps', reason: 'over_budget' });
+            expect(spy).not.toHaveBeenCalled();
+            // The account's own number raised: the next look gives the $2, though the Limits number never changed
+            await prisma.fundingAccount.update({ where: { id: 'funding-platform' }, data: { budgetMicros: BigInt(1_000_000_000_000) } });
+            expect((await ensureIssued(person)).issued.map((lot) => lot.programId)).toContain(program);
+            expect(spy).toHaveBeenCalled();
+          } finally {
+            spy.mockRestore();
+          }
+        } finally {
+          await prisma.fundingAccount.update({ where: { id: 'funding-platform' }, data: { budgetMicros: before.budgetMicros } });
+        }
+      });
+
       it('an owner who spent their monthly credit is offered none until it comes back on the 1st (UTC), and gets it back as soon as room frees up', async () => {
         await setLimits();
         const { createInstantFunds } = await import('@/lib/funding/instant-funds');

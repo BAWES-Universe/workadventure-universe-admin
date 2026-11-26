@@ -1166,9 +1166,10 @@ export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
 export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
 /**
  * This UTC month against the rollout budget: what was issued, how many people were due a default and not given it, and what one more person
- * is given from it (the current defaults Universe pays for), so the row can say how many more people the rest funds.
+ * is given from it (the current defaults Universe pays for), so the row can say how many more people the rest funds. `accountBudgetMicros`
+ * is the platform funding account's own budget: when one is set, issuing goes by it instead of this row's number.
  */
-export type RolloutStanding = { issuedMicros: number; notGivenPeople: number; perPersonMicros?: number };
+export type RolloutStanding = { issuedMicros: number; notGivenPeople: number; perPersonMicros?: number; accountBudgetMicros?: number | null };
 
 const asDollars = (micros: number) => `$${(micros / 1_000_000).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -1185,10 +1186,14 @@ function leftOf(micros: number, rollout: RolloutStanding): string {
 /** The rollout budget row's line: issued against the budget this month, and the people it left out (never silent when it runs out). */
 export function rolloutStatus(micros: number | null, rollout: RolloutStanding | null | undefined): string | undefined {
   if (!rollout) return undefined;
-  const issued = micros === null ? `Issued ${asDollars(rollout.issuedMicros)} this month.` : `Issued ${asDollars(rollout.issuedMicros)} of ${asDollars(micros)} this month${leftOf(micros, rollout)}.`;
-  if (rollout.notGivenPeople === 0) return issued;
+  // The budget issuing goes by: the platform funding account's own one when set, else this row's
+  const own = rollout.accountBudgetMicros ?? null;
+  const inForce = own ?? micros;
+  const issued = inForce === null ? `Issued ${asDollars(rollout.issuedMicros)} this month.` : `Issued ${asDollars(rollout.issuedMicros)} of ${asDollars(inForce)} this month${leftOf(inForce, rollout)}.`;
+  const ownNote = own === null ? '' : ` The platform funding account has its own budget of ${asDollars(own)}, and that is the one in force, not this number.`;
+  if (rollout.notGivenPeople === 0) return `${issued}${ownNote}`;
   const people = rollout.notGivenPeople === 1 ? '1 person was' : `${rollout.notGivenPeople.toLocaleString('en')} people were`;
-  return `${issued} ${people} not given credit this month because it would go past this.`;
+  return `${issued} ${people} not given credit this month because it would go past this.${ownNote}`;
 }
 
 export function moneyLimits(settings: MoneyLimitSettings, rollout?: RolloutStanding | null): Limit[] {

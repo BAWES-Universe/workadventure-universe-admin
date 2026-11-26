@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
 import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
 import { budgetOf, issuedInMonth, platformAccount, getFundingAccount, monthKeyOf, PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
@@ -95,9 +95,11 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
     const planned = plansFor(await currentRules(prisma, { now }), first, early);
     if (planned.length === 0) return { issued: [], skipped: early };
     // Everything due this period is issued already (the answer on every look after the first one of a period, such as each chat turn's list
-    // of research Apps): nothing to lock and nothing to write, so no transaction takes the funding account's lock. A shared pool always takes
-    // the full way, which also answers this person's asks from a pool someone else's look made
-    if (await allIssuedAlready(personId, planned, now)) return { issued: [], skipped: early };
+    // of research Apps), or what is missing was already left out by this month's rollout budget and still does not fit: nothing to lock and
+    // nothing to write, so no transaction takes the funding account's lock. A shared pool always takes the full way, which also answers this
+    // person's asks from a pool someone else's look made
+    const settled = await settledWithoutLocks(personId, planned, now);
+    if (settled) return { issued: [], skipped: [...early, ...settled] };
     const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
       // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
       // the rules of each category this person is due something from under a shared lock that a save of that category's rules waits for, so a
@@ -149,16 +151,44 @@ async function answerAsksFromPools(tx: Tx, person: PersonFacts, now: Date): Prom
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
 
-/** Each plan already has its lot for this period (read without locks: a lot, once there, is never taken away), and none is a shared pool. */
-async function allIssuedAlready(personId: string, plans: readonly Plan[], now: Date): Promise<boolean> {
+/**
+ * Whether this look has nothing to do, read without locks: null when it must take the full way under the locks. Otherwise the skips to give
+ * back (empty when every per-person lot of this period is there). A missing lot counts as settled only when this person was already left out
+ * by the platform's rollout budget this month (the Limits screen's row) and it still does not fit: the platform account is active, has a
+ * budget, and what it issued this month plus this lot is past it. Lots are never taken away, so the month's issued total only goes up: a read
+ * without locks can only find it lower than it is, which sends the person the full way (never a wrong "no"), and a budget raised a moment
+ * ago is seen on the next look. A shared pool, any other skip reason, or anything that cannot be read takes the full way.
+ */
+async function settledWithoutLocks(personId: string, plans: readonly Plan[], now: Date): Promise<IssueResult['skipped'] | null> {
+  const skipped: IssueResult['skipped'] = [];
+  let room: { budget: number; issued: number } | null | undefined;
   for (const { rule } of plans) {
-    if (rule.share !== 'each') return false;
+    if (rule.share !== 'each') return null;
     const plan = planLot(rule, now);
     if (!plan) continue;
     const lot = await prisma.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey: subjectKeyFor(rule, personId), periodKey: plan.periodKey } }, select: { id: true } });
-    if (!lot) return false;
+    if (lot) continue;
+    if (rule.fundingAccountId !== PLATFORM_ACCOUNT_ID) return null;
+    const left = await prisma.creditIssueSkip.findUnique({ where: { personId_programId_monthKey: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } }, select: { reason: true } });
+    if (left?.reason !== 'over_budget') return null;
+    if (room === undefined) room = await platformRoom(now);
+    if (!room || room.issued + plan.amountMicros <= room.budget) return null;
+    skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: 'over_budget' });
   }
-  return true;
+  return skipped;
+}
+
+/** The platform account's budget in force this month and what it issued, read without locks; null when it is not active, has no budget, or cannot be read. */
+async function platformRoom(now: Date): Promise<{ budget: number; issued: number } | null> {
+  try {
+    const account = await getFundingAccount(PLATFORM_ACCOUNT_ID);
+    if (!account || account.status !== 'active') return null;
+    const budget = budgetOf(account, await getMeterSettingsStrict(prisma));
+    if (budget === null) return null;
+    return { budget, issued: await issuedInMonth(prisma, account.id, now) };
+  } catch {
+    return null;
+  }
 }
 
 /** One rule's lot for one person, inside the locks. `skipped: null` means it was already issued (the quiet, normal answer). */

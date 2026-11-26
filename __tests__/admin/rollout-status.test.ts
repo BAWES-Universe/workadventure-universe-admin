@@ -26,6 +26,17 @@ describe('the rollout budget row', () => {
     expect(rolloutStatus(null, { issuedMicros: 0, notGivenPeople: 0 })).toBe('Issued $0.00 this month.');
   });
 
+  it('goes by the platform funding account’s own budget when one is set, and says that number is the one in force', () => {
+    expect(rolloutStatus(1_000_000_000, { issuedMicros: 0, notGivenPeople: 0, perPersonMicros: 2_000_000, accountBudgetMicros: 20_000_000 })).toBe(
+      'Issued $0.00 of $20.00 this month, $20.00 left: enough for 10 more people at $2.00 each. The platform funding account has its own budget of $20.00, and that is the one in force, not this number.',
+    );
+    expect(rolloutStatus(null, { issuedMicros: 20_000_000, notGivenPeople: 3, accountBudgetMicros: 20_000_000 })).toBe(
+      'Issued $20.00 of $20.00 this month, nothing left. 3 people were not given credit this month because it would go past this. The platform funding account has its own budget of $20.00, and that is the one in force, not this number.',
+    );
+    // No own budget (null, or an older answer without the field): the row's own number
+    expect(rolloutStatus(20_000_000, { issuedMicros: 0, notGivenPeople: 0, accountBudgetMicros: null })).toBe('Issued $0.00 of $20.00 this month, $20.00 left.');
+  });
+
   it('is on the row itself', () => {
     expect(moneyLimits({ rolloutBudgetMicros: 20_000_000 }, { issuedMicros: 2_250_000, notGivenPeople: 0 })[0].status).toBe('Issued $2.25 of $20.00 this month, $17.75 left.');
     expect(moneyLimits({ rolloutBudgetMicros: 20_000_000 })[0].status).toBeUndefined();
