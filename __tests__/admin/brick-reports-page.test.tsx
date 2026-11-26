@@ -96,26 +96,30 @@ describe('one problem', () => {
       { label: '14 people', points: 28 },
       { label: '15 this week, 7 last week', points: 3 },
     ],
-    sample: [
-      { tried: 'Tried a link on each listing in a shortlist page.', stopped: 'Tapping does nothing in the chat preview.', idea: '' },
-      { tried: 'Tried a button that opens a booking page.', stopped: 'Nothing opens.', idea: 'Open links in a new tab.' },
-    ],
-    ideas: 1,
+    sample: ['Tapping a link on each listing does nothing in the chat preview.', 'Nothing opens. Open links in a new tab?'],
+    withWords: 6,
+    retried: 4,
     ...over,
   });
 
-  it('shows the counts, why it ranks, and two notes picked at random', async () => {
+  it('shows the counts, why it ranks, how often it tried again, and two people’s words picked at random', async () => {
     fetchMock.mockImplementation(() => ok(detail()));
     render(<BrickReportPage />);
     expect(await screen.findByText('Links inside pages don’t open')).toBeTruthy();
     expect(screen.getByText('Why it’s high')).toBeTruthy();
     expect(screen.getByTestId('brick-report-why').textContent).toBe('Stopped the work+59 Bricks+2714 people+2815 this week, 7 last week+3');
     const notes = screen.getAllByTestId('brick-report-sample');
-    expect(notes.map((note) => note.textContent)).toEqual([
-      'Tried a link on each listing in a shortlist page. Tapping does nothing in the chat preview.',
-      'Tried a button that opens a booking page. Nothing opens. Idea: Open links in a new tab.',
-    ]);
-    expect(screen.getByText('2 of 22 notes, picked at random')).toBeTruthy();
+    expect(notes.map((note) => note.textContent)).toEqual(['Tapping a link on each listing does nothing in the chat preview.', 'Nothing opens. Open links in a new tab?']);
+    expect(screen.getByText('2 of 6 notes with words, picked at random')).toBeTruthy();
+    expect(screen.getByTestId('brick-report-retried').textContent).toBe('Tried again before sending: 4 of 22');
+  });
+
+  it('shows no words section when nobody added words', async () => {
+    fetchMock.mockImplementation(() => ok(detail({ sample: [], withWords: 0, retried: 0 })));
+    render(<BrickReportPage />);
+    expect(await screen.findByText('Links inside pages don’t open')).toBeTruthy();
+    expect(screen.queryByText('In people’s own words')).toBeNull();
+    expect(screen.queryByTestId('brick-report-retried')).toBeNull();
   });
 
   it('moves it to another tab and reads it again', async () => {

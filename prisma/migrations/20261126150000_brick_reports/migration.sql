@@ -3,6 +3,8 @@ CREATE TABLE "brick_report_problems" (
     "id" TEXT NOT NULL,
     "kind" VARCHAR(20) NOT NULL,
     "area" VARCHAR(20) NOT NULL,
+    "operation" VARCHAR(60) NOT NULL,
+    "failure" VARCHAR(20) NOT NULL,
     "title" VARCHAR(80) NOT NULL,
     "state" VARCHAR(20) NOT NULL DEFAULT 'new',
     "came_back" BOOLEAN NOT NULL DEFAULT false,
@@ -13,24 +15,27 @@ CREATE TABLE "brick_report_problems" (
     CONSTRAINT "brick_report_problems_pkey" PRIMARY KEY ("id")
 );
 
-CREATE INDEX "brick_report_problems_kind_area_last_seen_at_idx" ON "brick_report_problems"("kind", "area", "last_seen_at");
+CREATE UNIQUE INDEX "brick_report_problems_kind_area_operation_failure_key" ON "brick_report_problems"("kind", "area", "operation", "failure");
 CREATE INDEX "brick_report_problems_state_idx" ON "brick_report_problems"("state");
 
 CREATE TABLE "brick_report_notes" (
     "id" TEXT NOT NULL,
     "problem_id" TEXT,
     "bot_id" TEXT,
+    "ref" VARCHAR(64) NOT NULL,
     "person_key" VARCHAR(64),
     "kind" VARCHAR(20) NOT NULL,
     "area" VARCHAR(20) NOT NULL,
-    "title" VARCHAR(80) NOT NULL,
-    "tried" VARCHAR(280) NOT NULL DEFAULT '',
-    "stopped" VARCHAR(280) NOT NULL DEFAULT '',
-    "idea" VARCHAR(280) NOT NULL DEFAULT '',
+    "operation" VARCHAR(60) NOT NULL,
+    "failure" VARCHAR(20) NOT NULL,
+    "retried" BOOLEAN NOT NULL DEFAULT false,
+    "words" VARCHAR(280) NOT NULL DEFAULT '',
+    "words_at" TIMESTAMP(3),
     "effect" VARCHAR(20) NOT NULL,
     "context" JSONB,
     "reopened" BOOLEAN NOT NULL DEFAULT false,
     "take_back_hash" VARCHAR(64) NOT NULL,
+    "take_back_sealed" TEXT NOT NULL,
     "taken_back_at" TIMESTAMP(3),
     "day" DATE NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -38,6 +43,7 @@ CREATE TABLE "brick_report_notes" (
     CONSTRAINT "brick_report_notes_pkey" PRIMARY KEY ("id")
 );
 
+CREATE UNIQUE INDEX "brick_report_notes_bot_id_ref_key" ON "brick_report_notes"("bot_id", "ref");
 CREATE INDEX "brick_report_notes_problem_id_created_at_idx" ON "brick_report_notes"("problem_id", "created_at");
 CREATE INDEX "brick_report_notes_bot_id_day_idx" ON "brick_report_notes"("bot_id", "day");
 

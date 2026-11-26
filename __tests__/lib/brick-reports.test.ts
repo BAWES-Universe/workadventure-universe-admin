@@ -2,7 +2,7 @@
  * Brick reports (mock "Brick reports inbox"): the cleaning every note goes through, how alike two titles read, and the priority with its
  * reasons. No database needed.
  */
-import { TEXT_MAX, TITLE_MAX, cleanReportText, priorityOf, titleLikeness } from '@/lib/brick-reports';
+import { OPERATION_PATTERN, TEXT_MAX, TITLE_MAX, cleanReportText, priorityOf, reportTitle } from '@/lib/brick-reports';
 
 describe('cleaning a note', () => {
   it.each([
@@ -53,16 +53,22 @@ describe('cleaning a note', () => {
   });
 });
 
-describe('how alike two titles read', () => {
-  it('the same problem in other words reads alike; another problem does not', () => {
-    expect(titleLikeness("Links inside pages don't open", 'Links inside pages do not open')).toBeGreaterThan(0.42);
-    expect(titleLikeness('Page links do not open', 'Page links won’t open when tapped')).toBeGreaterThan(0.42);
-    expect(titleLikeness('Page links do not open', 'Voice cuts out after a minute')).toBeLessThan(0.2);
-    expect(titleLikeness('', 'Anything')).toBe(0);
+describe('a note’s title', () => {
+  it('is built from fixed words only: how it failed, then what ran', () => {
+    expect(reportTitle({ area: 'apps', operation: 'app:gmail', failure: 'signed_out' }, new Map([['gmail', 'Gmail']]))).toBe('Signed out: Gmail App');
+    expect(reportTitle({ area: 'pages', operation: 'none', failure: 'missing_ability' })).toBe('Can’t do it yet: Pages');
+    expect(reportTitle({ area: 'apps', operation: 'app', failure: 'timed_out' })).toBe('Timed out: Apps: an App');
+    expect(reportTitle({ area: 'computer', operation: 'run_command', failure: 'failed' })).toBe('Failed: run_command');
+    expect(reportTitle({ area: 'chat', operation: 'none', failure: 'corrected' })).toBe('Corrected or unhappy: Chat');
   });
 
-  it('case and accents do not matter', () => {
-    expect(titleLikeness('Café menu', 'CAFE MENU')).toBe(1);
+  it('never longer than a title can be', () => {
+    expect(reportTitle({ area: 'apps', operation: 'app:x', failure: 'no_result' }, new Map([['x', 'y'.repeat(200)]])).length).toBeLessThanOrEqual(TITLE_MAX);
+  });
+
+  it('what ran is a tool name, an App key, app or none: never a sentence', () => {
+    for (const ok of ['none', 'app', 'app:gmail', 'app:google-calendar', 'make_artifact', 'run_command']) expect(OPERATION_PATTERN.test(ok)).toBe(true);
+    for (const bad of ['', 'Cannot open Blue Plover binder', 'app:', 'app:Gmail Inbox', 'x', 'drop table', 'a'.repeat(61), 'app:a b']) expect(OPERATION_PATTERN.test(bad)).toBe(false);
   });
 });
 

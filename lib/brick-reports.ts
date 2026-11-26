@@ -1,17 +1,25 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 
 /**
- * Brick reports (mock "Brick reports inbox"): when a Brick can't do something, gets something wrong, or has an idea, it sends a short note
- * to the Universe team. Notes that read alike join one problem, and the inbox counts and ranks problems across every Brick. No words from
- * chats: the Brick is told to write in general words, the bot server refuses a note that repeats the person, and Orbit removes emails,
- * phone numbers, links, @names and long numbers before anything is kept. People are counted as a one-way hash, never stored. The Brick
- * is kept only to tell its owner when a fix ships; no screen shows which Brick, owner, world or room sent a note.
+ * Brick reports (mock "Brick reports inbox"): when a Brick can't do something, a tool or App fails, someone corrects it, or it has an idea,
+ * it sends a note to the Universe team. A note the Brick sends on its own is product-only: what kind, which area, which of its own tools or
+ * which App from the catalog was running, how it failed, and whether it tried again, all from fixed lists and filled from what ran. It holds
+ * no words: its title is built here from those fixed words. A person's own words go with a note only when they press Send on the exact,
+ * cleaned words the chat shows them (emails, phone numbers, links, @names, keys, dates and long numbers taken out). Notes alike (the same
+ * kind, area, tool and failure) are one problem, and the inbox counts and ranks problems across every Brick. People are counted as a
+ * one-way hash. The Brick is kept only to tell its owner when a fix ships; no screen shows which Brick, owner, world or room sent a note.
  *
- * Note text is untrusted: anyone can get a Brick to send any words. Whatever reads notes later (the weekly sort, lessons that go into every
- * Brick's rules) must treat them as data inside a fenced block, never as instructions; a lesson may come only from a problem with notes
- * from 3 or more different owners, and never copies a note's words.
+ * A note sent again with the same reference (the chat's message and what it is about) is the same note: the chat gets the same receipt and
+ * key back, so an answer lost on the way never makes a second note. Taking a note back empties it at once. Deleting the chat changes
+ * nothing for a note already sent: Take it back (24 hours, anyone in the chat) is the way. Deleting the Brick keeps its notes, product-only,
+ * counted, with no link to the Brick.
+ *
+ * Words people add are untrusted: whatever reads notes later (the weekly sort, lessons that go into every Brick's rules) must treat them
+ * as data inside a fenced block, never as instructions; a lesson may come only from a problem with notes from 3 or more different owners,
+ * and never copies a note's words.
  */
 
 export const REPORT_KINDS = ['problem', 'cant_do', 'friction', 'idea'] as const;
@@ -24,15 +32,17 @@ export const REPORT_STATES = ['new', 'working', 'fixed'] as const;
 export type ReportState = (typeof REPORT_STATES)[number];
 
 export const TITLE_MAX = 80;
+/** A person's own words on a note. */
 export const TEXT_MAX = 280;
+/** How a step failed, from what it answered (bot server) or from the kind of note when no step ran. */
+export const REPORT_FAILURES = ['failed', 'signed_out', 'timed_out', 'not_allowed', 'no_result', 'missing_ability', 'corrected', 'idea'] as const;
+export type ReportFailure = (typeof REPORT_FAILURES)[number];
+/** One of the Brick's own tools (snake_case), `app:<catalog key>`, `app` for any other App, or `none`. */
+export const OPERATION_PATTERN = /^(?:none|app|app:[a-z0-9][a-z0-9_.-]{0,55}|[a-z][a-z0-9_]{1,59})$/;
 /** Notes one Brick sends in a day (UTC), the same for its own key and Universe AI: it keeps one Brick in a loop from filling the inbox. */
 export const NOTES_PER_BRICK_PER_DAY = 10;
 /** How long the chat can take a note back. */
 export const TAKE_BACK_MS = 24 * 60 * 60 * 1000;
-/** How close two titles must read (0 to 1) for a note to join a problem. */
-const SAME_PROBLEM = 0.42;
-/** The problems of one kind and area a new note is compared with, most recently seen first. */
-const CANDIDATES = 500;
 
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
@@ -97,33 +107,59 @@ export function cleanReportText(raw: unknown, max: number): string {
   return chars.length > max ? chars.slice(0, max).join('').trim() : text;
 }
 
-// ---------------------------------------------------------------- matching
+// ---------------------------------------------------------------- titles
 
-function trigrams(text: string): Set<string> {
-  const out = new Set<string>();
-  const words = text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean);
-  for (const word of words) {
-    const padded = `  ${word} `;
-    for (let i = 0; i + 3 <= padded.length; i++) out.add(padded.slice(i, i + 3));
-  }
-  return out;
+const FAILURE_WORDS: Record<ReportFailure, string> = {
+  failed: 'Failed',
+  signed_out: 'Signed out',
+  timed_out: 'Timed out',
+  not_allowed: 'Not allowed',
+  no_result: 'Gave nothing back',
+  missing_ability: 'Can’t do it yet',
+  corrected: 'Corrected or unhappy',
+  idea: 'Idea',
+};
+const AREA_TITLE: Record<ReportArea, string> = {
+  apps: 'Apps',
+  computer: 'Computer',
+  pages: 'Pages',
+  chat: 'Chat',
+  voice: 'Voice',
+  map: 'Map',
+  memory: 'Memory',
+  files: 'Files',
+  credit: 'Credit',
+  other: 'Other',
+};
+
+/** What ran, in words: "Gmail App", "make_artifact", "an App", or the area when nothing ran. */
+function operationWords(operation: string, area: ReportArea, appNames: ReadonlyMap<string, string>): string {
+  if (operation === 'none') return AREA_TITLE[area];
+  if (operation === 'app') return `${AREA_TITLE[area]}: an App`;
+  if (operation.startsWith('app:')) return `${appNames.get(operation.slice(4)) ?? 'An'} App`;
+  return operation;
 }
 
-/** How alike two titles read, from 0 to 1: shared three-letter pieces over all of them (the measure Postgres' pg_trgm uses). */
-export function titleLikeness(a: string, b: string): number {
-  const x = trigrams(a);
-  const y = trigrams(b);
-  if (x.size === 0 || y.size === 0) return 0;
-  let shared = 0;
-  for (const piece of x) if (y.has(piece)) shared += 1;
-  return shared / (x.size + y.size - shared);
+/** A note's title, from fixed words only: "Signed out: Gmail App", "Can’t do it yet: Pages". Never words from a chat. */
+export function reportTitle(note: { area: ReportArea; operation: string; failure: ReportFailure }, appNames: ReadonlyMap<string, string> = new Map()): string {
+  return `${FAILURE_WORDS[note.failure]}: ${operationWords(note.operation, note.area, appNames)}`.slice(0, TITLE_MAX);
+}
+
+/**
+ * `app:<key>` stays only for an App in the catalog (with its name for the title); any other App is `app`, with no name. An App the bot
+ * server knows only by its connection (`app` with `appConnectionId`) is named by the catalog entry that connection came from, if any: the
+ * name a person gave their own App is never used, and the connection is only looked up, never kept.
+ */
+async function checkedOperation(operation: string, appConnectionId?: string | null): Promise<{ operation: string; appNames: Map<string, string> }> {
+  let key: string | null = null;
+  if (operation.startsWith('app:')) key = operation.slice(4);
+  else if (operation === 'app' && appConnectionId) {
+    const connection = await prisma.appConnection.findUnique({ where: { id: appConnectionId }, select: { catalogKey: true } });
+    key = connection?.catalogKey ?? null;
+  }
+  if (!key) return { operation: operation.startsWith('app:') ? 'app' : operation, appNames: new Map() };
+  const entry = await prisma.appCatalogEntry.findUnique({ where: { key }, select: { key: true, name: true } });
+  return entry ? { operation: `app:${entry.key}`, appNames: new Map([[entry.key, entry.name.slice(0, 40)]]) } : { operation: 'app', appNames: new Map() };
 }
 
 // ---------------------------------------------------------------- intake
@@ -132,13 +168,18 @@ export interface NoteInput {
   botId: string;
   /** Who was in the chat, in the words reply windows use (person:<id>, guest:<id>). Kept only as a one-way hash. */
   personKey?: string | null;
+  /** The bot server's reference for this note (a hash of the chat's message and what the note is about): the same note sent again. */
+  ref: string;
   kind: ReportKind;
   area: ReportArea;
-  title: unknown;
-  tried?: unknown;
-  stopped?: unknown;
-  idea?: unknown;
+  operation: string;
+  /** For `app`: the connection the App ran on, only to find the catalog entry it came from. Never kept. */
+  appConnectionId?: string | null;
+  failure: ReportFailure;
+  retried: boolean;
   effect: ReportEffect;
+  /** Words the Brick drafted with the person: cleaned and shown back, never kept here. */
+  draftWords?: unknown;
   context?: NoteContext | null;
 }
 
@@ -150,132 +191,149 @@ export interface NoteContext {
   tools?: string[];
 }
 
-/** The note as it was kept, after cleaning: what the chat shows under "What was sent". */
+/** The note as it was kept: what the chat shows under "What was sent". */
 export interface SentNote {
   kind: ReportKind;
   area: ReportArea;
   title: string;
-  tried: string;
-  stopped: string;
-  idea: string;
+  operation: string;
+  failure: ReportFailure;
+  retried: boolean;
   effect: ReportEffect;
 }
 
 export type NoteOutcome =
-  | { sent: true; id: string; takeBackKey: string; note: SentNote }
-  | { sent: false; reason: 'empty' | 'limit' | 'unknown_brick' };
+  | { sent: true; id: string; takeBackKey: string; note: SentNote; again?: true; takenBack?: true; wordsPreview?: string }
+  | { sent: false; reason: 'limit' | 'unknown_brick' };
 
 /** A one-way hash of who was in the chat, marked only `g:` for a guest or `p:` for someone signed in: guests count less, since a guest id is cheap to change. */
 const personHash = (key: string) => `${key.startsWith('guest:') ? 'g' : 'p'}:${createHash('sha256').update(`brick-report:${key}`).digest('hex').slice(0, 32)}`;
 const keyHash = (key: string) => createHash('sha256').update(`brick-report-take-back:${key}`).digest('hex');
 const dayOf = (now: Date) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
+type KeptRow = { id: string; kind: string; area: string; operation: string; failure: string; retried: boolean; effect: string; takeBackSealed: string; takenBackAt: Date | null };
+
+/** The receipt a note already kept answers with, the same as the first time (its key unsealed), when it is sent again. */
+function receiptOf(row: KeptRow, title: string, wordsPreview: string): NoteOutcome {
+  return {
+    sent: true,
+    id: row.id,
+    takeBackKey: decryptApiKey(row.takeBackSealed),
+    note: { kind: row.kind as ReportKind, area: row.area as ReportArea, title, operation: row.operation, failure: row.failure as ReportFailure, retried: row.retried, effect: row.effect as ReportEffect },
+    again: true,
+    ...(row.takenBackAt ? { takenBack: true as const } : {}),
+    ...(wordsPreview ? { wordsPreview } : {}),
+  };
+}
+
+const KEPT_SELECT = { id: true, kind: true, area: true, operation: true, failure: true, retried: true, effect: true, takeBackSealed: true, takenBackAt: true } as const;
+
 /**
- * Keeps one note and counts it into a problem: an open problem of the same kind and area whose title reads alike, or a new one. A note on
- * a problem marked fixed takes it back to New as "came back". At most NOTES_PER_BRICK_PER_DAY a day per Brick. Never says who sent it.
+ * Keeps one note and counts it into its problem (the same kind, area, tool and failure), or starts one. A note on a problem marked fixed
+ * takes it back to New as "came back". At most NOTES_PER_BRICK_PER_DAY a day per Brick. The same reference sent again answers the note
+ * kept the first time, with its key, and keeps nothing new. Draft words come back cleaned (`wordsPreview`) and are not kept.
  */
 export async function recordReportNote(input: NoteInput, now: Date = new Date()): Promise<NoteOutcome> {
-  const note: SentNote = {
-    kind: input.kind,
-    area: input.area,
-    title: cleanReportText(input.title, TITLE_MAX),
-    tried: cleanReportText(input.tried, TEXT_MAX),
-    stopped: cleanReportText(input.stopped, TEXT_MAX),
-    idea: cleanReportText(input.idea, TEXT_MAX),
-    effect: input.effect,
-  };
-  if (note.title.length < 3) return { sent: false, reason: 'empty' };
   // Only a Brick sends notes: a room bot has no owner, and a deleted Brick is off
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { id: true, ownerId: true, deletedAt: true } });
   if (!bot || !bot.ownerId || bot.deletedAt) return { sent: false, reason: 'unknown_brick' };
+  const { operation, appNames } = await checkedOperation(input.operation, input.appConnectionId);
+  const note: SentNote = {
+    kind: input.kind,
+    area: input.area,
+    title: reportTitle({ area: input.area, operation, failure: input.failure }, appNames),
+    operation,
+    failure: input.failure,
+    retried: input.retried,
+    effect: input.effect,
+  };
+  const wordsPreview = cleanReportText(input.draftWords, TEXT_MAX);
 
   const day = dayOf(now);
   const takeBackKey = randomBytes(24).toString('base64url');
   const context = input.context ? (input.context as Prisma.InputJsonValue) : Prisma.JsonNull;
   return prisma.$transaction(async (tx) => {
-    // One Brick's notes, then one kind and area's problems, always in that order: two notes of the same Brick never pass the day's
-    // count together, and two alike notes never start two problems
+    // One Brick's notes, then one problem, always in that order: two notes of the same Brick never pass the day's count together or
+    // keep one reference twice, and two alike notes never start two problems
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-bot:${bot.id}`}, 0))`;
+    const kept = await tx.brickReportNote.findUnique({ where: { botId_ref: { botId: bot.id, ref: input.ref } }, select: KEPT_SELECT });
+    if (kept) return receiptOf(kept, note.title, wordsPreview);
     const today = await tx.brickReportNote.count({ where: { botId: bot.id, day } });
     if (today >= NOTES_PER_BRICK_PER_DAY) return { sent: false as const, reason: 'limit' as const };
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${note.kind}:${note.area}`}, 0))`;
-    const candidates = await tx.brickReportProblem.findMany({
-      where: { kind: note.kind, area: note.area },
-      orderBy: { lastSeenAt: 'desc' },
-      take: CANDIDATES,
-      select: { id: true, title: true, state: true },
-    });
-    let best: { id: string; state: string } | null = null;
-    let bestScore = 0;
-    for (const candidate of candidates) {
-      const score = titleLikeness(note.title, candidate.title);
-      if (score >= SAME_PROBLEM && score > bestScore) {
-        best = candidate;
-        bestScore = score;
-      }
-    }
-    const reopened = best?.state === 'fixed';
-    const problemId = best
+    const problemKey = { kind: note.kind, area: note.area, operation: note.operation, failure: note.failure };
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${note.kind}:${note.area}:${note.operation}:${note.failure}`}, 0))`;
+    const found = await tx.brickReportProblem.findUnique({ where: { kind_area_operation_failure: problemKey }, select: { id: true, state: true } });
+    const reopened = found?.state === 'fixed';
+    const problemId = found
       ? (
           await tx.brickReportProblem.update({
-            where: { id: best.id },
-            data: { lastSeenAt: now, ...(reopened ? { state: 'new', cameBack: true, stateAt: now } : {}) },
+            where: { id: found.id },
+            data: { lastSeenAt: now, title: note.title, ...(reopened ? { state: 'new', cameBack: true, stateAt: now } : {}) },
             select: { id: true },
           })
         ).id
-      : (await tx.brickReportProblem.create({ data: { kind: note.kind, area: note.area, title: note.title, firstSeenAt: now, lastSeenAt: now }, select: { id: true } })).id;
-    const kept = await tx.brickReportNote.create({
+      : (await tx.brickReportProblem.create({ data: { ...problemKey, title: note.title, firstSeenAt: now, lastSeenAt: now }, select: { id: true } })).id;
+    const row = await tx.brickReportNote.create({
       data: {
         problemId,
         botId: bot.id,
+        ref: input.ref,
         personKey: input.personKey ? personHash(input.personKey) : null,
-        ...note,
+        kind: note.kind,
+        area: note.area,
+        operation: note.operation,
+        failure: note.failure,
+        retried: note.retried,
+        effect: note.effect,
         context,
         reopened,
         takeBackHash: keyHash(takeBackKey),
+        takeBackSealed: encryptApiKey(takeBackKey),
         day,
         createdAt: now,
       },
       select: { id: true },
     });
-    return { sent: true as const, id: kept.id, takeBackKey, note };
+    return { sent: true as const, id: row.id, takeBackKey, note, ...(wordsPreview ? { wordsPreview } : {}) };
   });
+}
+
+/** The note a key opens, or null: compared in constant time, so a wrong key says nothing about the note. */
+async function noteFor(id: string, key: string) {
+  const row = await prisma.brickReportNote.findUnique({
+    where: { id },
+    select: { takeBackHash: true, takenBackAt: true, createdAt: true, reopened: true, problemId: true, kind: true, area: true, operation: true, failure: true, words: true },
+  });
+  const given = Buffer.from(keyHash(key), 'hex');
+  const held = row ? Buffer.from(row.takeBackHash, 'hex') : null;
+  if (!row || !held || held.length !== given.length || !timingSafeEqual(held, given)) return null;
+  return row;
 }
 
 export type TakeBackOutcome = { takenBack: true } | { takenBack: false; reason: 'not_found' | 'too_late' };
 
 /**
- * Takes a note back, for anyone in the chat that holds its key, within TAKE_BACK_MS of sending. Taking it back twice is fine. Its words go
- * at once: the row stays, empty, only so the Brick's count for the day still holds it. Its problem then reads as its other notes do (the
- * title of the earliest one left), or goes when none is left. A note that took a fixed problem back to New, taken back while no later note
- * holds the problem open, puts it back to Fixed: what was taken back never counts.
+ * Takes a note back, for anyone in the chat that holds its key, within TAKE_BACK_MS of sending. Taking it back twice is fine. Its words,
+ * context and person go at once: the row stays, empty, only so the Brick's count for the day still holds it (and its reference, so the
+ * same note sent again answers "taken back" and is not kept again). A problem with no note left goes. A note that took a fixed problem back
+ * to New, taken back while no later note holds the problem open, puts it back to Fixed: what was taken back never counts.
  */
 export async function takeBackReportNote(id: string, key: string, now: Date = new Date()): Promise<TakeBackOutcome> {
-  const row = await prisma.brickReportNote.findUnique({
-    where: { id },
-    select: { takeBackHash: true, takenBackAt: true, createdAt: true, reopened: true, problemId: true, kind: true, area: true },
-  });
-  const given = Buffer.from(keyHash(key), 'hex');
-  const held = row ? Buffer.from(row.takeBackHash, 'hex') : null;
-  if (!row || !held || held.length !== given.length || !timingSafeEqual(held, given)) return { takenBack: false, reason: 'not_found' };
+  const row = await noteFor(id, key);
+  if (!row) return { takenBack: false, reason: 'not_found' };
   if (row.takenBackAt) return { takenBack: true };
   if (now.getTime() - row.createdAt.getTime() > TAKE_BACK_MS) return { takenBack: false, reason: 'too_late' };
   await prisma.$transaction(async (tx) => {
-    // The same lock as a new note of this kind and area: a note arriving now either sees the problem as it is after this, or holds it open itself
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${row.kind}:${row.area}`}, 0))`;
+    // The same lock as a new note of this problem: a note arriving now either sees the problem as it is after this, or holds it open itself
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${row.kind}:${row.area}:${row.operation}:${row.failure}`}, 0))`;
     // Only a note not taken back yet: a second tap racing the first changes nothing
     const taken = await tx.brickReportNote.updateMany({
       where: { id, takenBackAt: null },
-      data: { title: '', tried: '', stopped: '', idea: '', context: Prisma.JsonNull, personKey: null, takenBackAt: now },
+      data: { words: '', wordsAt: null, context: Prisma.JsonNull, personKey: null, takenBackAt: now },
     });
     if (taken.count === 0 || !row.problemId) return;
-    const live = await tx.brickReportNote.findMany({
-      where: { problemId: row.problemId, takenBackAt: null },
-      orderBy: { createdAt: 'asc' },
-      select: { title: true, createdAt: true },
-    });
+    const live = await tx.brickReportNote.findMany({ where: { problemId: row.problemId, takenBackAt: null }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
     if (live.length === 0) {
-      // Nothing left: the problem goes, title and all (the emptied notes keep their row for the day's count)
       await tx.brickReportProblem.deleteMany({ where: { id: row.problemId } });
       return;
     }
@@ -286,10 +344,37 @@ export async function takeBackReportNote(id: string, key: string, now: Date = ne
       row.reopened && problem.state === 'new' && problem.stateAt?.getTime() === row.createdAt.getTime() && !live.some((note) => note.createdAt >= row.createdAt);
     await tx.brickReportProblem.update({
       where: { id: row.problemId },
-      data: { title: live[0].title, lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
+      data: { lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
     });
   });
   return { takenBack: true };
+}
+
+export type WordsOutcome = { added: true; words: string } | { added: false; reason: 'not_found' | 'too_late' | 'taken_back' | 'empty' };
+
+/**
+ * Adds the person's own words to a note, when they press Send on the exact words the chat showed them: cleaned again here (the same
+ * cleaning the preview had), within TAKE_BACK_MS, with the note's key. Sending again replaces them.
+ */
+export async function addReportWords(id: string, key: string, words: unknown, now: Date = new Date()): Promise<WordsOutcome> {
+  const row = await noteFor(id, key);
+  if (!row) return { added: false, reason: 'not_found' };
+  if (row.takenBackAt) return { added: false, reason: 'taken_back' };
+  if (now.getTime() - row.createdAt.getTime() > TAKE_BACK_MS) return { added: false, reason: 'too_late' };
+  const clean = cleanReportText(words, TEXT_MAX);
+  if (!clean) return { added: false, reason: 'empty' };
+  const done = await prisma.brickReportNote.updateMany({ where: { id, takenBackAt: null }, data: { words: clean, wordsAt: now } });
+  return done.count > 0 ? { added: true, words: clean } : { added: false, reason: 'taken_back' };
+}
+
+export type NoteStatus = { state: 'live' | 'taken_back'; words: string; canTakeBack: boolean } | { state: 'not_found' };
+
+/** What became of a note, for whoever holds its key (another device, a fresh chat): still there or taken back, and the words it holds. */
+export async function reportNoteStatus(id: string, key: string, now: Date = new Date()): Promise<NoteStatus> {
+  const row = await noteFor(id, key);
+  if (!row) return { state: 'not_found' };
+  if (row.takenBackAt) return { state: 'taken_back', words: '', canTakeBack: false };
+  return { state: 'live', words: row.words, canTakeBack: now.getTime() - row.createdAt.getTime() <= TAKE_BACK_MS };
 }
 
 // ---------------------------------------------------------------- the inbox
@@ -451,26 +536,29 @@ export async function reportInbox(state: ReportState, now: Date = new Date()): P
 
 export interface ProblemDetail extends ProblemRow {
   reasons: Reason[];
-  /** Two notes picked at random each time (their order never hints at who sent them): only what the Brick wrote, cleaned. */
-  sample: Array<{ tried: string; stopped: string; idea: string }>;
-  /** Notes with an idea, out of all. */
-  ideas: number;
+  /** Two of the words people added and sent, picked at random each time (their order never hints at who sent them), cleaned. */
+  sample: string[];
+  /** Notes people added words to, out of all. */
+  withWords: number;
+  /** Notes whose Brick tried again before it gave up. */
+  retried: number;
 }
 
-/** One problem, with why it ranks where it does and two notes picked at random. Null when it has no note left. */
+/** One problem, with why it ranks where it does and two of the words people added, picked at random. Null when it has no note left. */
 export async function reportProblem(id: string, now: Date = new Date()): Promise<ProblemDetail | null> {
   const [row] = await countedProblems(Prisma.sql`p.id = ${id}`, now);
   if (!row) return null;
   const base = rowOf(row);
   const priority = countsOf(row);
-  const [sample, ideas] = await Promise.all([
-    prisma.$queryRaw<Array<{ tried: string; stopped: string; idea: string }>>(Prisma.sql`
-      SELECT tried, stopped, idea FROM brick_report_notes
-      WHERE problem_id = ${id} AND taken_back_at IS NULL AND (tried <> '' OR stopped <> '' OR idea <> '')
+  const [sample, withWords, retried] = await Promise.all([
+    prisma.$queryRaw<Array<{ words: string }>>(Prisma.sql`
+      SELECT words FROM brick_report_notes
+      WHERE problem_id = ${id} AND taken_back_at IS NULL AND words <> ''
       ORDER BY random() LIMIT 2`),
-    prisma.brickReportNote.count({ where: { problemId: id, takenBackAt: null, idea: { not: '' } } }),
+    prisma.brickReportNote.count({ where: { problemId: id, takenBackAt: null, words: { not: '' } } }),
+    prisma.brickReportNote.count({ where: { problemId: id, takenBackAt: null, retried: true } }),
   ]);
-  return { ...base, reasons: priority.reasons, sample, ideas };
+  return { ...base, reasons: priority.reasons, sample: sample.map((note) => note.words), withWords, retried };
 }
 
 /** Moves a problem to another tab. Moving it to Fixed clears "came back": a note after that marks it again. */

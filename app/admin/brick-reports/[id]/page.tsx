@@ -13,8 +13,8 @@ const MOVES: Record<ReportState, ReportState[]> = { new: ['working', 'fixed'], w
 const MOVE_WORDS: Record<ReportState, string> = { new: 'Back to New', working: 'Working on it', fixed: 'Mark fixed' };
 
 /**
- * One problem of the Brick reports inbox (mock screen 2): its counts, why it ranks where it does, and two notes picked at random each time,
- * so their order never hints at who sent them. Nothing here names a Brick, owner, world or room. Super admins only.
+ * One problem of the Brick reports inbox (mock screen 2): its counts, why it ranks where it does, how often the Brick tried again, and two of
+ * the words people chose to add, picked at random each time, so their order never hints at who sent them. Nothing here names a Brick, owner, world or room. Super admins only.
  */
 export default function BrickReportPage() {
   const { id } = useParams<{ id: string }>();
@@ -128,18 +128,23 @@ export default function BrickReportPage() {
           ))}
         </div>
       </section>
+      {problem.retried > 0 && (
+        <p className={styles.note} data-testid="brick-report-retried">
+          Tried again before sending: {problem.retried.toLocaleString()} of {problem.times.toLocaleString()}
+        </p>
+      )}
       {shown > 0 && (
         <section className={styles.block} aria-labelledby="brick-report-say">
           <div id="brick-report-say" className={styles.eyebrow}>
-            What Bricks say
+            In people’s own words
           </div>
-          {problem.sample.map((note, index) => (
+          {problem.sample.map((words, index) => (
             <p key={index} className={styles.quote} data-testid="brick-report-sample">
-              {[note.tried, note.stopped, note.idea && `Idea: ${note.idea}`].filter(Boolean).join(' ')}
+              {words}
             </p>
           ))}
           <span className={styles.note}>
-            {shown} of {problem.times.toLocaleString()} {problem.times === 1 ? 'note' : 'notes'}, picked at random
+            {shown} of {problem.withWords.toLocaleString()} {problem.withWords === 1 ? 'note' : 'notes'} with words, picked at random
           </span>
         </section>
       )}
