@@ -55,7 +55,7 @@ describe('the Agent37 client', () => {
     expect(stubborn.sleep).toHaveBeenCalledTimes(3);
   });
 
-  it('CodeRabbit on #1040: a stop or a sleep asked as a power operation (`refused`) is never repeated after a gateway answer that may have reached the machine (502, 503, 504 without Agent37\'s own word); its own `try_again` and a 429 were not taken, and are asked again. Asked the default way (a restart under a wake\'s ticket) a gateway answer is repeated, as before', async () => {
+  it('CodeRabbit on #1040: a stop or a sleep asked as a power operation (`refused`) is never repeated after a gateway answer that may have reached the machine (502, 503, 504) or an answer whose own `try_again` is not known to mean "refused"; only a 429 from the edge was not taken, and is asked again. Asked the default way (a restart under a wake\'s ticket) a gateway answer is repeated, as before', async () => {
     for (const status of [502, 503, 504]) {
       for (const call of ['stopInstance', 'sleepInstance'] as const) {
         const gateway = client([json(status, {}), json(200, { id: 'abc', status: 'stopped' })]);
@@ -67,9 +67,17 @@ describe('the Agent37 client', () => {
         expect(plain.calls).toHaveLength(2);
       }
     }
-    const refused = client([json(429, {}), json(503, { error: { code: 'try_again' } }), json(200, { id: 'abc', status: 'stopped' })]);
+    const refused = client([json(429, {}), json(429, {}), json(200, { id: 'abc', status: 'stopped' })]);
     await expect(refused.api.stopInstance('abc', 'refused')).resolves.toEqual({ id: 'abc', status: 'stopped' });
     expect(refused.calls).toHaveLength(3);
+    // Agent37's own `try_again` (a 503, or a 409) may mean the request was accepted and is being carried out: a power POST is not repeated after it either (CodeRabbit on #1040)
+    for (const status of [503, 409]) {
+      for (const call of ['stopInstance', 'sleepInstance'] as const) {
+        const again = client([json(status, { error: { code: 'try_again' } }), json(200, { id: 'abc', status: 'stopped' })]);
+        await expect(again.api[call]('abc', 'refused')).rejects.toMatchObject({ status, code: 'try_again' });
+        expect(again.calls).toHaveLength(1);
+      }
+    }
     // A start is still asked again after a gateway answer: a wake that lands twice is the same wake
     const start = client([json(502, {}), json(200, { id: 'abc', status: 'running' })]);
     await expect(start.api.startInstance('abc')).resolves.toEqual({ id: 'abc', status: 'running' });

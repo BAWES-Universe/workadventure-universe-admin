@@ -231,9 +231,10 @@ export class Agent37Client {
   }
 
   /**
-   * For a power POST (a stop or a sleep): asked again only after an answer that says it was NOT taken (Agent37's own `try_again`, or a 429 from its edge). A gateway's 502, 503 or 504 may have come after the request reached the machine, so it is
-   * never repeated silently: it is thrown, and the caller (`stopAtProvider`) keeps the power operation open for the provider's margin, as it does for a call that got no answer. A repeat that then succeeded would have hidden the earlier attempt,
-   * and the operation would have been closed while that one could still land (CodeRabbit on #1040).
+   * For a power POST (a stop or a sleep): asked again only after an answer that says it was NOT taken: a 429 from Agent37's edge (a rate limit refuses the request before it reaches the machine). Everything else is thrown, and the caller
+   * (`stopAtProvider`) keeps the power operation open for the provider's margin, as it does for a call that got no answer: a gateway's 502, 503 or 504 may have come after the request reached the machine, and Agent37's own `try_again` is not known to
+   * mean "refused" either (on the network settings a 503 `try_again` means the change WAS saved and applies within two minutes). A repeat that then succeeded would have hidden the earlier attempt, and the operation would have been closed while
+   * that one could still land (CodeRabbit on #1040).
    */
   private async againPower<T>(run: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -241,7 +242,7 @@ export class Agent37Client {
         return await run();
       } catch (error) {
         const last = attempt >= RETRY_WAITS_MS.length;
-        if (last || !(error instanceof Agent37Error && (error.code === 'try_again' || error.status === 429))) throw error;
+        if (last || !(error instanceof Agent37Error && error.status === 429)) throw error;
         await this.sleep(RETRY_WAITS_MS[attempt]);
       }
     }
