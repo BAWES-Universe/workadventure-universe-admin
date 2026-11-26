@@ -186,9 +186,14 @@ export interface PauseOptions {
 /** What a pause decided inside its transaction: nothing (and why), or the pause of a job that held the machine, with what the steps after the commit need. */
 export type PauseDecision =
   | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' }
-  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean };
+  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean; /** When the pause was decided (after every lock was held): the steps after the commit, and the job that starts next on the machine, are dated from it, never from the ask */ at: Date };
 
 export interface PauseInOptions extends PauseOptions {
+  /**
+   * The clock of a pause that may have waited for locks (`pauseWhenRowFree`): read once the pause holds every lock it needs, so the stretch it ends, its pause row and the next start are dated when the pause is WRITTEN, not when it
+   * was asked (the job kept running meanwhile). Without it the pause is dated `now`.
+   */
+  clock?: () => Date;
   /** A pause decided for a refused model call: only while that call's key is still good and was made under the owner epoch the job has now (a delayed call of a worker that was replaced pauses nothing: `key_gone`). */
   key?: string;
   /** The person's own tap may pause a job waiting in line; a pause for the month or a limit is only ever for a job that holds the machine (one in line is left to the line). */
@@ -222,9 +227,10 @@ async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: 
  * and, for the month or a limit, what Brick is to tell the person. Nothing is sent to the provider here: the caller runs `afterPause` once this commits (Rule C).
  * `provider`: the Brick computer's provider, read BEFORE the transaction opened (a read that fails inside it would leave the transaction aborted).
  */
-export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PauseWhy, now: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PauseWhy, asked: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
   // A machine pause is only ever a job sent back in line by itself, from the room the job held; it never becomes the job's own `paused_why`
   if (why === 'machine' && !options.backInLine) throw new Error('A machine pause always goes back in line');
+  let now = asked;
   const row = await lockJob(tx, jobId);
   if (!row) return { kind: 'not_found' };
   if (isOver(row.status)) return { kind: 'over' };
@@ -258,6 +264,8 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   }
   // From here the pause writes the Brick computer's row: it is taken now, without waiting, before the room is settled (post-0.5.0: pause during take-over; see `takeRowOrYield`)
   await takeRowOrYield(tx, row.botId);
+  // Every lock is held now (the job's, the computer's row): the pause is dated this moment, not the ask or the start of the transaction (CodeRabbit on #1040)
+  if (options.clock) now = options.clock();
   const job = await tx.computerJob.findUniqueOrThrow({
     where: { id: jobId },
     select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true, awakeProvedAt: true },
@@ -334,7 +342,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   await staleCarriedOn(tx, jobId, now);
   // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them); a screen taken back says so, in place of the usual line
   if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now, { heldScreen });
-  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen };
+  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen, at: now };
 }
 
 /** A digest of the person's own active spending limits (their ids, versions and amounts): kept with a limit's pause, for support (the room check decides whether it carries on). */
@@ -347,12 +355,14 @@ async function ruleRevIn(tx: Prisma.TransactionClient, personId: string): Promis
  * The steps after a pause committed (Rule C), in this order: the turn the commit read is cancelled (that one only), the stretch is written to the books under its own event, where the browser went so far is kept, the job's
  * sign-ins are put away for it alone, the machine rests (or is proved asleep under a turn hold), and the line moves. None of it can undo the pause.
  */
-export async function afterPause(jobId: string, decided: PauseDecision, now: Date, options: PauseOptions = {}): Promise<PauseResult> {
+export async function afterPause(jobId: string, decided: PauseDecision, asked: Date, options: PauseOptions = {}): Promise<PauseResult> {
   if (decided.kind !== 'held') {
     if (decided.kind === 'queued' || decided.kind === 'already') return { ok: true, kind: decided.kind };
     return { ok: false, reason: decided.kind === 'key_gone' ? 'superseded' : decided.kind };
   }
   const { botId, n } = decided;
+  // Every step after the commit, and the job that starts next on the machine, is dated when the pause was decided, which is later than the ask when it waited for the computer's row: the next job's stretch never begins before the paused one's ends
+  const now = decided.at;
   // Rule C: only now, and only the turn the commit read
   if (decided.responseId) await controlInternals.cancelAgentTurn(botId, decided.responseId);
   await bookPause(jobId, n, now);
@@ -383,7 +393,7 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
   // A take-over leader's stop may hold the computer's row, which this pause writes: the pause yields at once when it cannot take it and is tried again once the row is free (`pauseWhenRowFree`)
-  const decided = await pauseWhenRowFree(first.botId, now, (at) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, at, provider, options), TX));
+  const decided = await pauseWhenRowFree(first.botId, now, (clock) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ...options, clock }), TX));
   return afterPause(jobId, decided, now, options);
 }
 
@@ -446,12 +456,12 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
     // A take-over leader's stop may hold the computer's row: the pause yields and is tried again once it is free (see `pauseWhenRowFree`)
-    const done = await pauseWhenRowFree(botId, now, (at) => prisma.$transaction(async (tx) => {
+    const done = await pauseWhenRowFree(botId, now, (clock) => prisma.$transaction(async (tx) => {
       // The job's locks first (the order used everywhere), then the command's row: a copy of this tap waits here for the first, then finds its row
       if (!(await lockJob(tx, jobId))) return { decided: { kind: 'not_found' } as PauseDecision };
       const claimed = await claimCommandIn(tx, under.command, under.row);
       if (!('fresh' in claimed)) return { seen: claimed };
-      const decided = await decidePauseIn(tx, jobId, 'person', at, provider);
+      const decided = await decidePauseIn(tx, jobId, 'person', now, provider, { clock });
       // A pause of a job that held the machine is kept PENDING until its sign-ins are put away (after this commit): a copy never reads a success that does not yet say whether they were kept (CodeRabbit on #1025, 51). A pause that
       // only moved a job out of the line, or was refused, has nothing more to do: its answer is final here
       await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId], held: [{ jobId, n: decided.n }] } : decisionOutcome(decided));
@@ -561,7 +571,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = options.pauseRunning ? providerFor(await prisma.brickComputer.findUnique({ where: { botId } })) : null;
   type FirstDecided = { seen: Exclude<Claimed, { fresh: true }> } | { refused: ControlRefusal } | { paused: Array<{ id: string; decided: PauseDecision }> };
-  const decide = (at: Date) => prisma.$transaction(async (tx): Promise<FirstDecided> => {
+  const decide = (clock: () => Date) => prisma.$transaction(async (tx): Promise<FirstDecided> => {
     await lockLine(tx, botId);
     const holding = options.pauseRunning ? (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } })).map((held) => held.id) : [];
     const rows = new Map<string, Awaited<ReturnType<typeof lockJob>>>();
@@ -574,7 +584,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     // Everything after this point is undone by a refusal (finding 11), and the refusal itself is kept as the command's outcome
     await tx.$executeRaw`SAVEPOINT "do_this_first"`;
     try {
-      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, at);
+      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now, clock);
       // What was paused has its sign-ins put away only after this commit: the answer stays pending until then (CodeRabbit on #1025, 51)
       if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id), held: paused.flatMap((one) => (one.decided.kind === 'held' ? [{ jobId: one.id, n: one.decided.n }] : [])) } : { ok: true });
       return { paused };
@@ -586,7 +596,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     }
   }, TX);
   // Pausing what holds the computer writes the computer's row, which a take-over leader's stop may hold: a pause that cannot take it yields at once (the line is let go) and is tried again once it is free. Without a pause the row is not written
-  const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, now, decide) : decide(now));
+  const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, now, decide) : decide(() => now));
   if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pendingOutcomeOf(under!.command, jobId), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };
   const paused = decided.paused;
@@ -596,7 +606,9 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     const after = await afterPause(one.id, one.decided, now, { advance: false });
     if (after.ok && after.kind === 'held') kept = (kept ?? true) && after.signInsKept;
   }
-  await controlInternals.startNext(botId, now);
+  // The next job starts when the pauses were written (the latest of them), never before: the wait for the computer's row is the paused job's time, not the next one's
+  const started = paused.reduce((latest, one) => (one.decided.kind === 'held' && one.decided.at > latest ? one.decided.at : latest), now);
+  await controlInternals.startNext(botId, started);
   if (under && paused.length > 0) {
     const final = await settleResume(under.command, kept === undefined ? { ok: true } : { ok: true, signInsKept: kept });
     if (final.ok && final.signInsKept !== undefined) kept = final.signInsKept;
@@ -606,7 +618,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
 }
 
 /** "Do this first" itself, under the line's and every job's locks: refused by throwing `ControlRefused` (the caller undoes everything it wrote). */
-async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: string, holding: string[], rows: Map<string, Awaited<ReturnType<typeof lockJob>>>, provider: Provider | null, now: Date): Promise<Array<{ id: string; decided: PauseDecision }>> {
+async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: string, holding: string[], rows: Map<string, Awaited<ReturnType<typeof lockJob>>>, provider: Provider | null, now: Date, clock: () => Date): Promise<Array<{ id: string; decided: PauseDecision }>> {
       const target = rows.get(jobId);
       if (!target || target.botId !== botId) throw new ControlRefused('not_found');
       if (isOver(target.status)) throw new ControlRefused('over');
@@ -626,7 +638,7 @@ async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: strin
       await tx.computerJob.update({ where: { id: jobId }, data: { queueRank: top + 2 } });
       const out: Array<{ id: string; decided: PauseDecision }> = [];
       for (const id of held) {
-        const decided = await decidePauseIn(tx, id, 'person', now, provider, { backInLine: { rank: top + 1 }, advance: false });
+        const decided = await decidePauseIn(tx, id, 'person', now, provider, { backInLine: { rank: top + 1 }, advance: false, clock });
         if (decided.kind !== 'held') throw new ControlRefused(decided.kind === 'taken_over' ? 'taken_over' : decided.kind === 'over' ? 'over' : 'ending');
         out.push({ id, decided });
       }

@@ -338,6 +338,48 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     expect(await jobOf(job.id)).toMatchObject({ status: 'running', pauses: 0 });
   }, 60_000);
 
+  it('CodeRabbit: the job that starts next on the machine starts when the pause was written, never before it: the wait for the row is not billed twice', async () => {
+    const { sara, job } = await running('overlap');
+    const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Next', writes: true }, NOW);
+    if (!next.ok) throw new Error('no job');
+    expect(next.job.status).toBe('queued');
+    const asked = new Date(job.stretchStarted!.getTime() + 60_000);
+    const leader = await leaderHolds(sara.brickId, 17_000);
+    try {
+      expect(await pauseJobAs(job.id, 'person', asked)).toMatchObject({ ok: true, kind: 'held' });
+    } finally {
+      await leader.release();
+    }
+    const pause = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } });
+    expect(pause.at.getTime()).toBeGreaterThanOrEqual(asked.getTime() + 16_000);
+    const started = await jobOf(next.job.id);
+    expect(started.status).not.toBe('queued');
+    expect(started.startedAt!.getTime()).toBeGreaterThanOrEqual(pause.at.getTime());
+  }, 80_000);
+
+  it('CodeRabbit: the pause is dated after every lock is held: a pause that waited 3 s for the job\'s own lock is dated 3 s later, though it took the computer\'s row at once', async () => {
+    const { job } = await running('joblock');
+    let release: () => void = () => undefined;
+    let locked: () => void = () => undefined;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+    const holder = prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 AS one FROM "computer_jobs" WHERE "id" = ${job.id} FOR UPDATE`;
+        locked();
+        await new Promise<void>((resolve) => (release = resolve));
+      },
+      { timeout: 30_000 },
+    );
+    await lockTaken;
+    setTimeout(() => release(), 3_000);
+    const asked = new Date(job.stretchStarted!.getTime() + 60_000);
+    expect(await pauseJobAs(job.id, 'person', asked)).toMatchObject({ ok: true, kind: 'held' });
+    await holder;
+    const pause = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } });
+    expect(pause.at.getTime()).toBeGreaterThanOrEqual(asked.getTime() + 2_800);
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(62);
+  }, 60_000);
+
   describe('the wait itself', () => {
     it('untilRowFree waits for a held row and holds nothing afterwards: the row can be locked at once when it returns', async () => {
       const sara = await owner('until');

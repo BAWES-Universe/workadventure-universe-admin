@@ -98,14 +98,16 @@ const ROW_TRIES = 3;
  * (post-0.5.0: pause during take-over). The first try goes straight in: the pause takes the row without waiting (`takeRowOrYield`) the moment it knows it will write it. One that did not get the row (or timed out) wrote nothing:
  * the row is waited for here, outside any transaction, holding nothing, and the same pause is tried again. Any other error is the caller's, and a third failure is too.
  *
- * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives `at`, the caller's `now` moved on by the real time spent here (Sentry on #1040: a stretch ended at
+ * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives a `clock`: the caller's `now` moved on by the real time spent since the ask, for the pause to read once it holds its locks (Sentry and CodeRabbit on #1040: a stretch ended at
  * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
  */
-export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (at: Date) => Promise<T>): Promise<T> {
+export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock: () => Date) => Promise<T>): Promise<T> {
   const began = Date.now();
+  // Read by the pause once it holds every lock it needs (`decidePauseIn`), so a wait for the job's lock counts too, not only the wait for the row
+  const clock = () => new Date(now.getTime() + (Date.now() - began));
   for (let attempt = 1; ; attempt++) {
     try {
-      return await run(new Date(now.getTime() + (Date.now() - began)));
+      return await run(clock);
     } catch (error) {
       if (!(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES) throw error;
       await untilRowFree(botId);

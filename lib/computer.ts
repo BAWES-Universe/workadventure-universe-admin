@@ -2296,7 +2296,7 @@ export async function renewJob(
     look = 'unknown';
   }
   // The renewal writes the computer's row only when the room is refused and the job pauses; a take-over leader's stop may hold it then. The pause yields at once when it cannot take the row (before it settles anything), and the renewal waits for the row outside any transaction and tries again
-  const decide = (at: Date) => prisma.$transaction(
+  const decide = (clock: () => Date) => prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
       if (!job || isOver(job.status)) return { kind: 'over' as const };
@@ -2321,7 +2321,7 @@ export async function renewJob(
       // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. While the person holds the screen it pauses too: the screen is taken back in
       // the same write and it never carries on by itself (Fable's ruling of 23 Nov, section 7)
       if (room.reason === 'allowance' || room.reason === 'rule') {
-        const paused = await controls.decidePauseIn(tx, jobId, room.reason, at, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true, blocked: { kind: 'renewal', micros: moreMicros } });
+        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { clock, ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true, blocked: { kind: 'renewal', micros: moreMicros } });
         if (paused.kind === 'held') return { kind: 'paused' as const, paused, why: room.reason };
       }
       return { kind: 'refused' as const, room, epoch: job.ownerEpoch };
@@ -2412,11 +2412,11 @@ async function awakeLookFor(job: { status: string; stretchStarted: Date | null; 
 async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
   const controls = await import('@/lib/computer-job-controls');
   // A take-over leader's stop may hold the computer's row, which this pause writes: it yields at once when it cannot take it, and is tried again once the row is free (`pauseWhenRowFree`)
-  const decide = (at: Date) => prisma.$transaction(
+  const decide = (clock: () => Date) => prisma.$transaction(
     async (tx) => {
       const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
       // Never `heldScreen`: a machine pause never takes the screen back from a person who took it (their take-over answers `taken_over` and stands)
-      const paused = await controls.decidePauseIn(tx, jobId, 'machine', at, provider, { ownerEpoch, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
+      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { clock, ownerEpoch, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
       if (paused.kind === 'held') await tx.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'working' }, data: { machine: 'stopping', restClaimedAt: null } });
       return paused;
     },
