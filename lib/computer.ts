@@ -384,11 +384,11 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
  * `stopping`: nothing uses it, it still counts as awake for the wind-down, and every sweep tries again. `only` limits which stored states this
  * may rewrite (the caller knows what it saw). Returns whether the machine is proved asleep.
  */
-async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number): Promise<boolean> {
+async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }): Promise<boolean> {
   // A stop the caller decided from a state it saw (`only`, and for a start that failed, its wake ticket) is CLAIMED first, in a committed conditional write, and the provider is called only when that write changed the row: a
   // replacement that woke the machine since (it sets another state and takes the next ticket) makes the claim write nothing, and nothing is stopped under it (GPT's seventh note, B)
   if (only || ticket !== undefined) {
-    const op = await claimStop(botId, ref, only, ticket);
+    const op = await claimStop(botId, ref, only, ticket, abandoned);
     if (!op) return false;
     const proven = await stopAtProvider(botId, ref, provider, op);
     await noteStopped(botId, ref, proven, ['stopping']);
@@ -403,9 +403,10 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
  * The claim of a stop: the machine goes to `stopping` only while it is still in a state the caller saw (and, for a start's own failure, under that start's ticket). The stop is recorded as a power operation IN THE SAME COMMIT
  * (post-0.5.0 B): a wake whose ticket comes after this claim sees the stop open and waits for it, and one that came before made the claim write nothing. The operation's id when this write took it, else null.
  */
-async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<string | null> {
+async function claimStop(botId: string, ref: string, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }): Promise<string | null> {
   const states = only ? Prisma.sql`AND "machine" = ANY(${only}::text[])` : Prisma.empty;
-  const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : Prisma.empty;
+  // An abandoned wake is stopped only under the epoch that was seen and while its beat is STILL stale, judged by the database's clock in this write (a live wake beats, a replacement takes the next ticket)
+  const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : abandoned ? Prisma.sql`AND "wake_epoch" = ${abandoned.epoch} AND "updated_at" <= ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${abandoned.staleMs / 1000}))` : Prisma.empty;
   return prisma.$transaction(async (tx) => {
     const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
@@ -3966,7 +3967,7 @@ export async function underTurnHold(botId: string): Promise<boolean> {
  */
 export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
   try {
-    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true } });
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true } });
     if (!row?.turnUnprovenSince) return true;
     const seen = row.turnUnprovenSince;
     // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays
@@ -3980,12 +3981,16 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (holders > 0) return false;
     const provider = providerFor(row);
     if (!provider || !row.providerRef) return false;
+    const abandoned = (row.machine === 'waking' || row.machine === 'restoring') && Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
-    if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
+    // (A wake that is abandoned is not copied: the copy would write the row, and with it the beat that proves the wake dead, and it has run nothing since the last copy)
+    if (!abandoned && (await provider.awake(row.providerRef).catch(() => false))) await saveCopy(botId, row.providerRef, provider);
     // Claimed against the state it saw: a wake that took its ticket since (the machine is then `waking`) makes the claim write nothing, and no stop is sent under it (Opus's second minor note on #1036). The state read is the one claimed
     // (a machine `resting` or `broken` under a hold is stopped and the hold lifted, as before). A machine in any other state is not touched: a live wake has a running job (counted above), a park's wake has none and is not stopped
-    if (!(['working', 'stopping', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
-    if (!(await stopMachine(botId, row.providerRef, provider, [row.machine]))) return false;
+    // One exception (CodeRabbit on #1040): a wake that took its ticket and then died (no job holds the machine, nothing beats the row) leaves it `waking` or `restoring` for good, and every queued job waits for this hold to lift. A wake whose beat has
+    // been missed for the whole stale time is abandoned, and is stopped like any machine: claimed against the wake epoch that was seen AND the beat still being stale in the same write, so a live wake, or a replacement that took the next ticket, is never stopped
+    if (!abandoned && !(['working', 'stopping', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
+    if (!(await stopMachine(botId, row.providerRef, provider, [row.machine], undefined, abandoned ? { epoch: row.wakeEpoch, staleMs: wakeTiming.staleMs } : undefined))) return false;
     await lift();
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
     await clearFirstTurnMarks(botId);

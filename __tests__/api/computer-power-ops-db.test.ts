@@ -437,14 +437,74 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       });
     });
 
-    it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
+    it('a turn hold\'s stop is claimed against the state it saw: a wake that takes its ticket AFTER the state was read and BEFORE the claim gets no stop sent under it (the interleaving is held at the provider look between the two)', async () => {
       const sara = await owner('holdclaim');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
-      // The machine is awake with a hold; before the hold's stop is claimed, a replacement's wake took its ticket (the machine is `waking`)
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      let tookTicket: number | null | object = null;
+      // settleTurnHold has read `working` (a stoppable state) and now looks at the machine: a replacement's wake takes its ticket right here, before the stop is claimed
+      const look = jest.spyOn(fake, 'awake').mockImplementationOnce(async () => {
+        const seen = await machineOf(sara);
+        tookTicket = await takeWakeTicketForTests(sara.brickId, 'waking', 'working', { epoch: seen.wakeEpoch });
+        return false;
+      });
+      try {
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+      } finally {
+        look.mockRestore();
+      }
+      expect(typeof tookTicket).toBe('number');
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+      expect((await machineOf(sara)).machine).toBe('waking');
+    });
+
+    it('a turn hold on a machine that is `waking` with a beat that is still fresh is left alone (a live wake)', async () => {
+      const sara = await owner('holdwaking');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
       const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
       expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect((await machineOf(sara)).machine).toBe('waking');
+    });
+
+    it.each(['waking', 'restoring'] as const)('CodeRabbit on #1040: a turn hold on a machine whose `%s` wake was abandoned (no beat for the whole stale time, no job) is stopped and lifted, never left to hold every start in line for ever', async (state) => {
+      const sara = await owner(`abandoned-${state}`);
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state, turnUnprovenSince: NOW } });
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+    });
+
+    it('CodeRabbit on #1040: an abandoned wake that a replacement takes over between the read and the claim is never stopped under the replacement', async () => {
+      const sara = await owner('abandoned-replaced');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      // settleTurnHold has read the row and counted the jobs holding the machine (none): the replacement's takeover lands right here, before the stop is claimed
+      const original = prisma.computerJob.count.bind(prisma.computerJob);
+      const look = jest.spyOn(prisma.computerJob, 'count').mockImplementationOnce((async (args: Parameters<typeof original>[0]) => {
+        const counted = await original(args);
+        const seen = await machineOf(sara);
+        // A replacement start takes the dead wake over (its beat has been missed for the whole stale time) and wakes it itself
+        await takeWakeTicketForTests(sara.brickId, 'waking', 'waking', { epoch: seen.wakeEpoch, staleMs: 60_000 });
+        return counted;
+      }) as typeof prisma.computerJob.count);
+      try {
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+      } finally {
+        look.mockRestore();
+      }
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
       expect((await machineOf(sara)).machine).toBe('waking');
     });
