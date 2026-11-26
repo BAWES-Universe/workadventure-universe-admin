@@ -2228,17 +2228,21 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
       const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
       const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
-      // A wake call that fails leaves the machine `waking` under this start's own ticket, as it always did (nothing is stopped under a job that may use it, and the stale wake is taken over by the next start). But when the row has
-      // meanwhile been stopped (the stop of an abandoned wake, Turn off computer), the failed call may still have started the instance at the provider after that stop was proved: it is stopped against the state the row has (CodeRabbit on #1040)
+      // A wake call that fails may still have started the instance (Agent37 starts it and then waits for health; a wait that runs out rejects with the instance running at full rate): it is stopped as a failed readiness is, under this
+      // start's own ticket, and against the state the row has when that ticket went to a stop (the stop of an abandoned wake, Turn off computer). Nothing stops a `broken` row afterwards, so nothing is left to the sweep (Opus on #1040)
       try {
         await provider.wake(ref);
       } catch (error) {
-        await stopLateWake(botId, ref, provider, mine);
+        if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine).catch(() => false))) await stopLateWake(botId, ref, provider, mine);
         throw error;
       }
       // A wake that was given up on (its beat missed, so its stop was claimed under the next epoch) can still reach the provider AFTER the stop was proved: the machine the row calls stopped is awake again. It is stopped against the
       // state the row has now, and this start looks again from the top (it wakes the machine under a ticket of its own when it still needs it) instead of waiting for readiness on a machine it no longer owns (CodeRabbit on #1040)
-      if (await stopLateWake(botId, ref, provider, mine)) continue;
+      if (await stopLateWake(botId, ref, provider, mine)) {
+        // A machine that was stopped under this start (a turn-off, a take-over's stop, the stop of an abandoned wake) is woken again only while a job still needs it: with none left there is nothing to wake it for, and it stays asleep (Sentry on #1040)
+        if (!(await wakeStillWanted(botId))) return;
+        continue;
+      }
       try {
         // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
         mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
@@ -2284,7 +2288,14 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       await untilCleaned(botId);
       return;
     }
+    // The wake was given up on and the machine stopped (its ticket went to that stop): with no job left that needs it, it stays asleep instead of being woken again for nobody (Sentry on #1040)
+    if ((row.machine === 'stopped' || row.machine === 'stopping') && !(await wakeStillWanted(botId))) return;
   }
+}
+
+/** Whether any job of this Brick is running or waiting, that is, still needs its machine woken. */
+async function wakeStillWanted(botId: string): Promise<boolean> {
+  return (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0;
 }
 
 /**

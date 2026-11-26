@@ -2400,7 +2400,8 @@ run('a Brick’s computer, in a real database', () => {
       provider.failNext.wake = true;
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
       expect(second).toEqual({ ok: false, reason: 'broken_start' });
-      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'waking' });
+      // The wake that failed may have started the machine, so it is stopped under the start's own ticket (Opus on #1040); the first job is not ended by the second start's failure
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'stopped' });
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.job.id } })).toMatchObject({ status: 'running' });
     });
 

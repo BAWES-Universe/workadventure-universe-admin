@@ -580,13 +580,14 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await settleTurnHold(sara.brickId)).toBe(true);
       expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
       expect((await machineOf(sara)).wakeEpoch).toBeGreaterThan(ticket);
-      // The original wake comes back: its ticket is no longer the Brick's, so it writes nothing over the stop (it is a replaced start: it wakes the machine again under a ticket of its own, instead of taking the machine as working)
+      // The original wake comes back: its ticket is no longer the Brick's, so it writes nothing over the stop; no job needs the machine any more, so it is not woken again for nobody (Sentry on #1040)
       fake.heldReady.splice(0).forEach((release) => release());
       await starting;
-      expect(callNames()).toEqual(['wake', 'wake', 'stop', 'wake']);
+      expect(callNames()).toEqual(['wake', 'wake', 'stop']);
+      expect(await fake.awake(sara.ref)).toBe(false);
     }, 30_000);
 
-    it('CodeRabbit on #1040: an abandoned wake whose wake call reaches the provider only AFTER the stop was proved stops the machine it woke, and looks again, instead of waiting for readiness on a machine nothing counts', async () => {
+    it('CodeRabbit on #1040: an abandoned wake whose wake call reaches the provider only AFTER the stop was proved stops the machine it woke, and does not wake it again for nobody', async () => {
       const sara = await owner('abandoned-wake-lands-after-stop');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
@@ -604,8 +605,9 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       // The wake call reaches the machine now, after the stop was proved
       fake.heldWake.splice(0).forEach((release) => release());
       await starting;
-      // The machine it woke was stopped (one more stop), and the start then woke it again under a ticket of its own
+      // The machine it woke was stopped (one more stop); no job needs it, so it is not woken again
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsAfterProof + 1);
+      expect(await fake.awake(sara.ref)).toBe(false);
     }, 30_000);
 
     it('CodeRabbit on #1040: an abandoned wake whose wake call reaches the provider after the stop was proved, starts the machine and then rejects, leaves no machine awake', async () => {
@@ -626,6 +628,19 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       fake.heldWake.splice(0).forEach((release) => release());
       await starting;
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsAfterProof + 1);
+      expect(await fake.awake(sara.ref)).toBe(false);
+    }, 30_000);
+
+    it('Opus on #1040: a single start whose wake call reached the machine and then rejects (Agent37 started it and its health wait ran out) stops it: the row is not left `broken` with the machine awake', async () => {
+      const sara = await owner('wake-rejects-single');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      await fake.stop(sara.ref);
+      fake.failWakeAfterLanding = true;
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
       expect(await fake.awake(sara.ref)).toBe(false);
     }, 30_000);
 
@@ -679,6 +694,28 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         spy.mockRestore();
       }
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBeGreaterThan(stopsBefore);
+    }, 30_000);
+
+    it('Sentry on #1040: a computer turned off while a start\'s wake call is slow is stopped, and is woken again only when a job still needs it', async () => {
+      for (const wanted of [true, false]) {
+        const sara = await owner(`turned-off-wanted-${wanted}`);
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+        fake.holdWake = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldWake.length === 1);
+        await fake.stop(sara.ref);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+        // The job the start serves ends with the turn-off, or it is still there (a job that needs its computer)
+        if (!wanted) await prisma.computerJob.updateMany({ where: { botId: sara.brickId, status: { in: ['running', 'waiting'] } }, data: { status: 'done', endedAt: NOW } });
+        const wakesBefore = fake.calls.filter((call) => call.name === 'wake' && call.ref === sara.ref).length;
+        fake.heldWake.splice(0).forEach((release) => release());
+        await starting.catch(() => undefined);
+        const wakes = fake.calls.filter((call) => call.name === 'wake' && call.ref === sara.ref).length - wakesBefore;
+        // The held call itself is one wake; a job that still needs the machine wakes it once more
+        expect(wakes).toBe(wanted ? 2 : 1);
+      }
     }, 30_000);
 
     it('Opus on #1040: a start whose wake call lands late never stops a machine a replacement woke since (the row is `waking`)', async () => {
