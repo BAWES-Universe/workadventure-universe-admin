@@ -62,7 +62,8 @@ const OBF_DOMAIN = /\S+\s*[\[(]\s*(?:\.|dot)\s*[\])]\s*\S+/giu;
  * `.so`, `.io`, `.me`, `.app` and `.dev` are not here: they are web addresses as often as file names.
  */
 const FILE_EXT = new Set(['js', 'ts', 'tsx', 'jsx', 'json', 'html', 'htm', 'css', 'md', 'txt', 'csv', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp3', 'mp4', 'py', 'sh', 'yml', 'yaml', 'zip', 'docx', 'xlsx', 'pptx']);
-const DOMAIN = /\b[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(\p{L}{2,24})\b(?:\/\S*)?/giu;
+/** Bounded by any script's letters and digits, not `\b` (which knows only a to z): пример.com and example.рф are web addresses too. */
+const DOMAIN = /(?<![\p{L}\p{N}_-])[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(\p{L}{2,24})(?![\p{L}\p{N}_-])(?:\/\S*)?/giu;
 const AT_NAME = /(^|[^\p{L}\p{N}_])@[\p{L}\p{N}_]+(?:[.-][\p{L}\p{N}_]+)*/gu;
 /** 16 or more letters, digits and _-+/= mixing letters and digits: keys, tokens and ids. */
 const TOKEN = /[A-Za-z0-9_\-+/=]{16,}/g;

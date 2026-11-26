@@ -10,6 +10,7 @@ describe('cleaning a note', () => {
     ['a link', 'The page https://booking.example.com/a?b=1 did not open', 'The page did not open'],
     ['a link with www', 'Opened www.example.org/path fine', 'Opened fine'],
     ['a bare web address', 'Checked bawes.net/about and shop.example.io', 'Checked and'],
+    ['a web address in another script', 'Checked пример.com and example.рф and мой-сайт.рф/путь today', 'Checked and and today'],
     ['an @name', 'Asked @khalid_b about it, and @sara.', 'Asked about it, and.'],
     ['a phone number', 'Called +965 5555-1234 twice', 'Called twice'],
     ['a phone number in brackets', 'Ring (02) 9876 5432 please', 'Ring please'],
