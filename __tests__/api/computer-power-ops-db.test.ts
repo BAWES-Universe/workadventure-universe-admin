@@ -1826,7 +1826,8 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
     };
     const stopsOf = (ref: string) => fake.calls.filter((call) => call.name === 'stop' && call.ref === ref).length;
     const stopOps = (ref: string) => prisma.computerPowerOp.findMany({ where: { providerRef: ref, kind: 'stop' } });
-    const booked = async () => ({ events: await prisma.meterEvent.count(), reservations: await prisma.meterReservation.count({ where: { state: 'held' } }) });
+    /** What is booked for THIS Brick's person (rows other suites left behind are booked by other sweep steps and say nothing here) */
+    const booked = async (sara: Owner) => ({ events: await prisma.meterEvent.count({ where: { botId: sara.brickId } }), reservations: await prisma.meterReservation.count({ where: { personId: sara.id } }) });
     const warned = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-start-found').length;
     const rowSeconds = (sara: Owner, text: string) => prisma.$executeRawUnsafe(`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '${text}') WHERE "bot_id" = '${sara.brickId}'`);
 
@@ -1858,7 +1859,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       // The sender is frozen for good; its start lands from outside (it is not told anything)
       await fake.wake(sara.ref);
       expect(await fake.awake(sara.ref)).toBe(true);
-      const before = await booked();
+      const before = await booked(sara);
       const stopsBefore = stopsOf(sara.ref);
       const opsBefore = (await stopOps(sara.ref)).length;
       await sweepComputers(NOW);
@@ -1869,7 +1870,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(ops.filter((op) => op.doneAt === null)).toEqual([]);
       expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
       expect(await prisma.computerJob.findMany({ where: { botId: sara.brickId, title: 'A' }, select: { status: true, stretchStarted: true } })).toEqual([{ status: 'done', stretchStarted: null }]);
-      expect(await booked()).toEqual(before);
+      expect(await booked(sara)).toEqual(before);
       expect(warned()).toBe(1);
       // Nothing is left to stop on the next pass
       await sweepComputers(NOW);
