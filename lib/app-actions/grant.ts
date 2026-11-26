@@ -76,17 +76,19 @@ interface ListedAction {
  * the grant. The row takes the name the App's list uses now, and when two rows were one action the strictest choice a person made
  * for it stays (Off is never lost to a new spelling).
  *
+ * `force` runs the sync even when the grant already follows the App's list: for a grant found holding two rows for one action.
+ *
  * The grant is held for the whole write (`lockGrant`), and the App's list too (read under a share lock, so a read of the provider
  * can't save between the rows, their count and the version stamped on the grant).
  */
-export async function ensureAppActionTools(serverId: string, attempt = 0): Promise<boolean> {
+export async function ensureAppActionTools(serverId: string, attempt = 0, force = false): Promise<boolean> {
   const head = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
   if (!head || !isAppActionsConnection(head.connection)) return false;
   const toolkit = head.connection.providerToolkit.toLowerCase();
   const catalog = await ensureAppActions(toolkit, attempt === 0 && head.appActionsVersion === null ? FIRST_READ_WAIT_MS : 0);
   // Never read (or Orbit could not check): the grant stays as it is, and the next read tries again
   if (!catalog?.refreshedAt) return false;
-  if (head.appActionsVersion === catalog.version) return false;
+  if (!force && head.appActionsVersion === catalog.version) return false;
 
   try {
     return await prisma.$transaction(
@@ -98,7 +100,7 @@ export async function ensureAppActionTools(serverId: string, attempt = 0): Promi
         if (version === undefined || !listLock[0].refreshed) return false;
         const server = await tx.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, tools: { select: TOOL_SELECT } } });
         // Gone, or brought up to this list by another call while this one waited for the grant
-        if (!server || server.appActionsVersion === version) return false;
+        if (!server || (!force && server.appActionsVersion === version)) return false;
 
         // The App's list, one entry per action: the first spelling in the App's order names it, and it goes under the strictest heading any spelling has
         const order = await tx.appAction.findMany({ where: { toolkit }, select: { slug: true, heading: true }, orderBy: [{ position: 'asc' }, { slug: 'asc' }] });
@@ -207,10 +209,13 @@ export async function ensureAppActionTools(serverId: string, attempt = 0): Promi
       { maxWait: 15_000, timeout: 60_000 },
     );
   } catch (error) {
-    if (attempt < 3 && (error instanceof StaleRows || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'))) return ensureAppActionTools(serverId, attempt + 1);
+    if (attempt < 3 && (error instanceof StaleRows || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'))) return ensureAppActionTools(serverId, attempt + 1, force);
     throw error;
   }
 }
+
+/** Whether a grant holds two rows for one action (names that differ only in case, dashes or spaces). */
+export const hasDuplicateActions = (tools: readonly { name: string }[]): boolean => new Set(tools.map((tool) => slugKey(tool.name))).size !== tools.length;
 
 /* ------------------------------ judging an action ------------------------------ */
 
@@ -241,11 +246,19 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   const grant = await prisma.botMcpServer.findFirst({ where: { botId, connectionId }, select: { id: true, appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
   if (!grant || !holdsAppActions(grant)) return null;
   await ensureAppActionTools(grant.id);
-  const server = await prisma.botMcpServer.findUnique({
-    where: { id: grant.id },
-    select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
-  });
+  const load = () =>
+    prisma.botMcpServer.findUnique({
+      where: { id: grant.id },
+      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
+    });
+  let server = await load();
   if (!server) return null;
+  // Two rows for one action (never made by the sync; only data from before it): they are made one now, even with nothing new in the App's list
+  if (hasDuplicateActions(server.tools)) {
+    await ensureAppActionTools(grant.id, 0, true);
+    server = await load();
+    if (!server) return null;
+  }
   const toolkit = grant.connection!.providerToolkit!.toLowerCase();
   const settings: Record<Heading, Setting> = {
     looksUp: server.lookUpSetting as Setting,

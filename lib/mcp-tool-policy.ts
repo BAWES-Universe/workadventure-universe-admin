@@ -1,5 +1,5 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
-import { ensureAppActionTools, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
+import { ensureAppActionTools, hasDuplicateActions, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -287,7 +287,13 @@ export async function readServerTools(botId: string, serverId: string, options: 
   await ensureKeyAppTools(serverId);
   // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
   if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
-  return describeNow(serverId);
+  const described = await describeNow(serverId);
+  // Two rows for one action (only data from before one row per action): made one before anyone sees them
+  if (described.kind === 'appActions' && hasDuplicateActions(described.tools)) {
+    await ensureAppActionTools(serverId, 0, true);
+    return describeNow(serverId);
+  }
+  return described;
 }
 
 export interface CatalogResult extends ServerToolsJson {

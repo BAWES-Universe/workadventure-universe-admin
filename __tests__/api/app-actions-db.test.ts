@@ -538,24 +538,28 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(rows).toEqual([expect.objectContaining({ name: `${U}_DELETE_MESSAGE`, heading: 'deletesOrSends' })]);
       // A second row for the same action (made before this was one row): the person's Off is on it, not on the row the App's spelling names
       await prisma.botMcpTool.create({ data: { serverId, name: `${U}_delete-message`, fingerprint: 'x', heading: 'looksUp', suggestedHeading: 'looksUp', suggestionSource: 'builtIn', confirmedAt: new Date(), setting: 'off' } });
+      const versionNow = (await catalogRow()).version;
+      const rowsOf = async (key: string) =>
+        (await prisma.botMcpTool.findMany({ where: { serverId }, select: { name: true, setting: true } })).filter((tool) => tool.name.toUpperCase().replace(/-/g, '_') === key);
+      // Judged at once by the strictest of the two, and made one row with the person's Off, with nothing new in the App's list
       const judge = await actionJudgeFor(saraBrick, connectionId);
       for (const spelling of [`${U}_DELETE_MESSAGE`, `${U}_DELETE-MESSAGE`, `${U}_delete-message`]) expect(judge!.judge(spelling).setting).toBe('off');
-      // The next sync makes them one row again, with the person's Off
-      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
-      expect(await ensureAppActionTools(serverId)).toBe(true);
-      const again = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.toUpperCase().replace('-', '_') === `${U}_DELETE_MESSAGE`);
-      expect(again).toEqual([expect.objectContaining({ name: `${U}_DELETE_MESSAGE`, setting: 'off' })]);
-      // The same for an action the App's list no longer has: its two rows become one, and the stricter choice is the one kept
+      expect(await rowsOf(`${U}_DELETE_MESSAGE`)).toEqual([{ name: `${U}_DELETE_MESSAGE`, setting: 'off' }]);
+      // The same for an action the App's list no longer has, found when the Brick's tools are read: one row, the stricter choice kept
       await prisma.botMcpTool.createMany({
         data: [
           { serverId, name: `${U}_GONE_ONE`, fingerprint: 'g1', heading: 'looksUp', confirmedAt: new Date(), setting: 'rightAway' },
           { serverId, name: `${U}_gone-one`, fingerprint: 'g2', heading: 'looksUp', confirmedAt: new Date(), setting: 'off' },
         ],
       });
-      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
-      expect(await ensureAppActionTools(serverId)).toBe(true);
       const gone = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.toUpperCase().replace('-', '_') === `${U}_GONE_ONE`);
       expect(gone).toEqual([expect.objectContaining({ setting: 'off' })]);
+      expect((await catalogRow()).version).toBe(versionNow);
+      // And when the App's list changes, the sync does the same
+      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_fetch-emails`, fingerprint: 'f9', heading: 'looksUp', confirmedAt: new Date(), setting: 'asksFirst' } });
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
+      expect(await ensureAppActionTools(serverId)).toBe(true);
+      expect(await rowsOf(`${U}_FETCH_EMAILS`)).toEqual([{ name: `${U}_FETCH_EMAILS`, setting: 'asksFirst' }]);
     });
 
     it('never moves an App’s action to another heading, and has nothing to confirm', async () => {
