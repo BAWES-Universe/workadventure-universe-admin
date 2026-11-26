@@ -755,6 +755,26 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await prisma.computerJobPause.count({ where: { jobId: job.id } })).toBe(0);
     });
 
+    it('CodeRabbit on #1040: the person takes the machine and hands it back while it is being read, and the look said asleep: the old look pauses nothing, and the renewal goes on under the current state', async () => {
+      const sara = await owner('handed-back');
+      const job = await workingJob(sara);
+      const began = job.stretchStarted!.getTime();
+      expect(await renewJob(job.id, new Date(began + 30_000))).toMatchObject({ ok: true });
+      await fake.stop(sara.ref);
+      const look = jest.spyOn(fake, 'awake').mockImplementationOnce(async () => {
+        // Between the look and the pause the person took the screen and handed it back (both move the control generation); the job is Brick's and running again
+        await prisma.computerJob.update({ where: { id: job.id }, data: { controlGeneration: { increment: 2 }, leaseVersion: { increment: 2 } } });
+        return false;
+      });
+      try {
+        expect(await renewJob(job.id, new Date(began + 90_000))).toMatchObject({ ok: true });
+      } finally {
+        look.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', control: 'brick', pauses: 0, awakeProvedAt: new Date(began + 30_000) });
+      expect(await prisma.computerJobPause.count({ where: { jobId: job.id } })).toBe(0);
+    });
+
     it('Opus fix 2: a look that never answers is given up within a few seconds, well inside the runner’s 8 s, and proves nothing', async () => {
       const sara = await owner('silent');
       const job = await workingJob(sara);

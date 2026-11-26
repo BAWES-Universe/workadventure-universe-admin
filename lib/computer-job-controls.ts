@@ -179,13 +179,15 @@ export interface PauseOptions {
   backInLine?: { rank: number };
   /** Only while this worker still owns the job (a pause decided for a worker, such as the month running out in its renewal): another owner's job is left alone (`superseded`). Left out for the person's own tap. */
   ownerEpoch?: number;
+  /** Only while the job is still on this control generation (a take-over and a hand back each move it): a pause decided from something read earlier (a machine found asleep) is not made under a hand-over that came since (`changed`, CodeRabbit on #1040). */
+  controlGeneration?: number;
   /** False when the caller moves the line itself afterwards. */
   advance?: boolean;
 }
 
 /** What a pause decided inside its transaction: nothing (and why), or the pause of a job that held the machine, with what the steps after the commit need. */
 export type PauseDecision =
-  | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' }
+  | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' | 'changed' }
   | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean; /** When the pause was decided (after every lock was held): the steps after the commit, and the job that starts next on the machine, are dated from it, never from the ask */ at: Date };
 
 export interface PauseInOptions extends PauseOptions {
@@ -235,6 +237,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   if (!row) return { kind: 'not_found' };
   if (isOver(row.status)) return { kind: 'over' };
   if (options.ownerEpoch !== undefined && row.ownerEpoch !== options.ownerEpoch) return { kind: 'superseded' };
+  if (options.controlGeneration !== undefined && row.controlGeneration !== options.controlGeneration) return { kind: 'changed' };
   if (row.status === 'queued') {
     if (options.heldOnly) return { kind: 'already' };
     if (options.backInLine) return { kind: 'already' };
@@ -358,7 +361,7 @@ async function ruleRevIn(tx: Prisma.TransactionClient, personId: string): Promis
 export async function afterPause(jobId: string, decided: PauseDecision, asked: Date, options: PauseOptions = {}): Promise<PauseResult> {
   if (decided.kind !== 'held') {
     if (decided.kind === 'queued' || decided.kind === 'already') return { ok: true, kind: decided.kind };
-    return { ok: false, reason: decided.kind === 'key_gone' ? 'superseded' : decided.kind };
+    return { ok: false, reason: decided.kind === 'key_gone' || decided.kind === 'changed' ? 'superseded' : decided.kind };
   }
   const { botId, n } = decided;
   // Every step after the commit, and the job that starts next on the machine, is dated when the pause was decided, which is later than the ask when it waited for the computer's row: the next job's stretch never begins before the paused one's ends

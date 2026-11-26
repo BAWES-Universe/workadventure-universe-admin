@@ -2301,8 +2301,9 @@ export async function renewJob(
   let look = await awakeLookFor(first, row, provider);
   if (look === 'asleep' && row?.providerRef) {
     if (!epochMatches(first.ownerEpoch, owner.epoch)) return SUPERSEDED;
-    const lost = await machineLostUnder(jobId, first.botId, row.providerRef, first.ownerEpoch, provider, now);
+    const lost = await machineLostUnder(jobId, first.botId, row.providerRef, first.ownerEpoch, first.controlGeneration, provider, now);
     // The person took the screen while the machine was being read (Opus on e58adde1, fix 1): their take-over stands. The renewal goes on as usual and proves nothing; the take-over has its own owner of the machine
+    // The same when the job changed hands since it was read (a take-over and a hand back both move its control generation; CodeRabbit on #1040): the asleep look was of a machine that has been handed over meanwhile, so it pauses nothing
     if (lost !== 'taken_over') return lost;
     look = 'unknown';
   }
@@ -2420,21 +2421,21 @@ async function awakeLookFor(job: { status: string; stretchStarted: Date | null; 
  * told, never shown as a pause), with its stretch ended at the last proof of awake and only those seconds priced; the room's unused part goes back in the same commit. The machine is marked `stopping`, so nothing uses it until a
  * recorded stop proves it asleep, and the next start wakes it under the power-operation fence. The turn died with the machine: no cancel is sent to it. The worker is told it no longer owns the job.
  */
-async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
+async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, controlGeneration: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
   const controls = await import('@/lib/computer-job-controls');
   // A take-over leader's stop may hold the computer's row, which this pause writes: it yields at once when it cannot take it, and is tried again once the row is free (`pauseWhenRowFree`)
   const decide = (clock: () => Date) => prisma.$transaction(
     async (tx) => {
       const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
       // Never `heldScreen`: a machine pause never takes the screen back from a person who took it (their take-over answers `taken_over` and stands)
-      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { clock, ownerEpoch, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
+      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { clock, ownerEpoch, controlGeneration, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
       if (paused.kind === 'held') await tx.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'working' }, data: { machine: 'stopping', restClaimedAt: null } });
       return paused;
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
   const decided = await pauseWhenRowFree(botId, now, decide);
-  if (decided.kind === 'taken_over') return 'taken_over';
+  if (decided.kind === 'taken_over' || decided.kind === 'changed') return 'taken_over';
   console.error('[Computer] A machine was found asleep under a billed job: the job goes back in line, billed only to the last proof of awake');
   Sentry.captureMessage('Computer machine found asleep under a billed job', { level: 'warning', tags: { area: 'computer', step: 'machine-lost' } });
   if (decided.kind === 'held') {
