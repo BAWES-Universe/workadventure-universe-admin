@@ -68,6 +68,9 @@ beforeEach(() => {
   fakeDb.ban = { findFirst: jest.fn().mockResolvedValue(null) };
   fakeDb.visitCard = { findUnique: jest.fn().mockResolvedValue(null) };
   fakeDb.bot = { findFirst: jest.fn().mockResolvedValue({ id: BOT.slice(4) }) };
+  // A bot that is not a bot of the room is asked about as a Brick that visits or lives here: none does in these tests
+  fakeDb.brickVisit = { findUnique: jest.fn().mockResolvedValue(null) };
+  fakeDb.brickHome = { findUnique: jest.fn().mockResolvedValue(null) };
   fakeDb.roomAccess = { create: jest.fn().mockResolvedValue({}) };
 });
 
