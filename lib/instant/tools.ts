@@ -94,19 +94,21 @@ function tighten(own: unknown, limit: Record<string, unknown>): unknown {
 }
 
 export async function offeredInstantTools(botId: string | null): Promise<{ ready: boolean; reason: string | null; tools: OfferedTool[] }> {
+  // Only a person's own Brick runs Instant (no room, an owner, not deleted), exactly as the executor refuses everything else: nothing is
+  // offered to any other bot, so a model is never invited to call what would only be refused
+  const bot = botId ? await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } }) : null;
+  const ownerId = bot && bot.roomId === null && bot.deletedAt === null && bot.ownerId ? bot.ownerId : null;
   // A Brick's owner's own App of the same service is on for it: the Universe-paid one is not offered beside it
-  const own = botId ? await brickOwnResearch(botId) : new Set<string>();
-  const offered = await instantToolsWhere((toolkit) => !own.has(appKeyOf(toolkit)));
-  if (offered.tools.length === 0 || !botId) return offered;
-  const used = await appsUsedByOwner(botId);
+  const own = botId && ownerId ? await brickOwnResearch(botId) : new Set<string>();
+  const offered = await instantToolsWhere((toolkit) => !!ownerId && !own.has(appKeyOf(toolkit)));
+  if (offered.tools.length === 0 || !ownerId) return offered;
+  const used = await appsUsedBy(ownerId);
   return { ...offered, tools: offered.tools.map((tool) => ({ ...tool, firstUse: !used.has(tool.toolkit) })) };
 }
 
-/** The Apps of the table the Brick's owner has had a run of that worked (on any Brick of theirs). */
-async function appsUsedByOwner(botId: string): Promise<Set<string>> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
-  if (!bot?.ownerId) return new Set();
-  const runs = await prisma.instantRun.findMany({ where: { personId: bot.ownerId, state: 'succeeded' }, distinct: ['toolkit'], select: { toolkit: true } });
+/** The Apps of the table a person has had a run of that worked (on any Brick of theirs). */
+async function appsUsedBy(personId: string): Promise<Set<string>> {
+  const runs = await prisma.instantRun.findMany({ where: { personId, state: 'succeeded' }, distinct: ['toolkit'], select: { toolkit: true } });
   return new Set(runs.map((run) => run.toolkit));
 }
 

@@ -1064,6 +1064,28 @@ run('the bounded Instant executor, in a real database', () => {
       forgetToolSchemas();
     });
 
+    it('nothing is offered to a bot that cannot run Instant: a room bot, a deleted Brick, an unknown Brick or no Brick at all', async () => {
+      await setLimits();
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      liveTools(p);
+      setAdapterForTests(p.adapter);
+      const listFor = async (botId: string | null) =>
+        ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools${botId === null ? '' : `?botId=${botId}`}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { ready: boolean; tools: unknown[] });
+      expect((await listFor(brick)).tools).toHaveLength(4);
+      const universe = await prisma.universe.create({ data: { slug: `research-${tag}`, name: 'Research', ownerId: sara } });
+      const world = await prisma.world.create({ data: { universeId: universe.id, slug: 'hq', name: 'HQ' } });
+      const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
+      const roomBot = (await prisma.bot.create({ data: { name: `Room ${tag}`, roomId: room.id } as never })).id;
+      const gone = (await prisma.bot.create({ data: { name: `Gone ${tag}`, ownerId: sara, roomId: null, deletedAt: new Date(), goneAt: new Date(Date.now() + 86_400_000), enabled: false } as never })).id;
+      try {
+        for (const id of [roomBot, gone, randomUUID(), null]) expect(await listFor(id)).toMatchObject({ ready: true, tools: [] });
+      } finally {
+        await prisma.bot.deleteMany({ where: { id: { in: [roomBot, gone] } } });
+        await prisma.universe.delete({ where: { id: universe.id } });
+      }
+    });
+
     it('the owner’s own App of the same service, on for this Brick, wins: the Universe-paid one is neither offered nor run, and nothing is held for it', async () => {
       await setLimits();
       setInstantFunds(fakeFunds(1_000_000).funds);
