@@ -54,7 +54,7 @@ async function readAndSave(toolkit: string): Promise<boolean> {
     data: { claimedUntil: new Date(now.getTime() + CLAIM_MS) },
   });
   if (claimed.count !== 1) return false;
-  // A failed read keeps the claim a while, so the next polls wait instead of each asking the provider again
+  // After a failed read the provider is not asked again for a while (retry_after), so the next polls do not each ask it
   const backOff = () => prisma.appActionCatalog.updateMany({ where: { toolkit }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
   let listed: ProviderAction[];
   try {
@@ -155,8 +155,13 @@ export async function ensureAppActions(toolkit: string, waitMs = 0): Promise<Cat
     const run = claimed ? (running.get(key) ?? null) : refreshAppActions(key).catch(() => false);
     if (catalog?.refreshedAt || waitMs <= 0) return catalog;
     const until = Date.now() + waitMs;
-    // Done: read, waited long enough, or a read that failed is now waited out (nothing more will come)
-    const settled = (state: Awaited<ReturnType<typeof read>>) => !!state?.refreshedAt || Date.now() >= until || (!!state?.retryAfter && state.retryAfter.getTime() > Date.now());
+    // Done: read, waited long enough, or nothing more will come (a read that failed is waited out, or no reader holds the claim)
+    const settled = (state: Awaited<ReturnType<typeof read>>) =>
+      !!state?.refreshedAt ||
+      Date.now() >= until ||
+      (!!state?.retryAfter && state.retryAfter.getTime() > Date.now()) ||
+      !state?.claimedUntil ||
+      state.claimedUntil.getTime() <= Date.now();
     if (run) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([run, new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);

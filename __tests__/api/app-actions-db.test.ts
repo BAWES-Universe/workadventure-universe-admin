@@ -86,7 +86,7 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: true } } }, boss);
   });
   afterEach(async () => {
-    setAdapterForTests(undefined);
+    setAdapterForTests(null);
     mockUser.current = null;
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
@@ -155,18 +155,32 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     it('waits on a first read for another reader that took the claim at the same moment', async () => {
       const adapter = fake();
       setAdapterForTests(adapter);
-      // This process loses the claim; the other reader reads the list a moment later
-      const spy = jest.spyOn(prisma.appActionCatalog, 'updateMany').mockImplementationOnce((async () => {
-        setTimeout(() => void refreshAppActions(KEY), 300);
-        return { count: 0 };
-      }) as never);
+      // This process loses the claim to another reader, which holds it and reads the list a moment later
+      let other: Promise<boolean> | undefined;
+      const spy = jest
+        .spyOn(prisma.appActionCatalog, 'updateMany')
+        .mockImplementationOnce((async () => {
+          await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: new Date(Date.now() + 120_000) } });
+          setTimeout(() => (other = refreshAppActions(KEY)), 300);
+          return { count: 0 };
+        }) as never)
+        // The other reader's own claim: it already holds it
+        .mockImplementationOnce((async () => ({ count: 1 })) as never);
       try {
         const state = await ensureAppActions(KEY, 3_000);
         expect(state?.refreshedAt).toBeInstanceOf(Date);
         expect(adapter.actions).toHaveBeenCalledTimes(1);
       } finally {
+        await other;
         spy.mockRestore();
       }
+    });
+
+    it('does not wait on a first read when nobody reads the list (no App provider set up)', async () => {
+      setAdapterForTests(null);
+      const started = Date.now();
+      expect((await ensureAppActions(KEY, 3_000))?.refreshedAt ?? null).toBeNull();
+      expect(Date.now() - started).toBeLessThan(1_000);
     });
 
     it('brings a grant made before over on its first read, keeps its heading settings, drops the meta tools, and is the same when read again or at once', async () => {
