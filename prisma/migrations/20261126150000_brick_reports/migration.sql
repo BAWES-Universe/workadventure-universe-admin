@@ -8,6 +8,7 @@ CREATE TABLE "brick_report_problems" (
     "title" VARCHAR(80) NOT NULL,
     "state" VARCHAR(20) NOT NULL DEFAULT 'new',
     "came_back" BOOLEAN NOT NULL DEFAULT false,
+    "reopened_by_note" BOOLEAN NOT NULL DEFAULT false,
     "state_at" TIMESTAMP(3),
     "first_seen_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "last_seen_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

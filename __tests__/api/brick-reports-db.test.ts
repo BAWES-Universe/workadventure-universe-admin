@@ -464,6 +464,31 @@ run('Brick reports', () => {
     expect(await reportProblem(problemId)).toMatchObject({ state: 'new' });
   });
 
+  it('a note whose clock read came before the reopening but joined after it still holds the problem open; a move by hand at the same moment stands (CodeRabbit)', async () => {
+    const [saraBrick, omarBrick] = await freshPair();
+    const base = new Date();
+    const at = (ms: number) => new Date(base.getTime() + ms);
+    const first = await recordReportNote(idea(saraBrick, 'clock'), at(0));
+    if (!first.sent) throw new Error('not sent');
+    const problemId = await problemOf(first.id);
+    await setReportState(problemId, 'fixed', at(1000));
+    // The opener takes the lock first; the other read its clock earlier but joins after it
+    const opener = await recordReportNote(idea(saraBrick, 'clock'), at(3000));
+    const joined = await recordReportNote(idea(omarBrick, 'clock'), at(2000));
+    if (!opener.sent || !joined.sent) throw new Error('not sent');
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new', cameBack: true });
+    await takeBackReportNote(opener.id, opener.takeBackKey, at(4000));
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new', cameBack: true });
+    await takeBackReportNote(joined.id, joined.takeBackKey, at(5000));
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'fixed', cameBack: false });
+    // Back to New by hand at the very moment a note reopened it: still the person's call
+    const again = await recordReportNote(idea(saraBrick, 'clock'), at(6000));
+    if (!again.sent) throw new Error('not sent');
+    await setReportState(problemId, 'new', at(6000));
+    await takeBackReportNote(again.id, again.takeBackKey, at(7000));
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new' });
+  });
+
   it('moves a problem between tabs, and a note on a fixed problem brings it back to New', async () => {
     const [saraBrick, omarBrick] = await freshPair();
     const first = await send(note(saraBrick, 'memory', { area: 'memory' }));

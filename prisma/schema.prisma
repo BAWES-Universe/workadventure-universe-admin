@@ -1790,6 +1790,9 @@ model BrickReportProblem {
   state       String            @default("new") @db.VarChar(20)
   // A note came in after it was marked fixed: it went back to New, ranked higher
   cameBack    Boolean           @default(false) @map("came_back")
+  // New because a note came in after the fix, and nobody has moved it by hand since: taking back every note from after the fix puts it
+  // back to Fixed. Set and read only under the problem's lock, so it never depends on clocks or on which note goes last
+  reopenedByNote Boolean        @default(false) @map("reopened_by_note")
   stateAt     DateTime?         @map("state_at")
   firstSeenAt DateTime          @default(now()) @map("first_seen_at")
   lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
@@ -1828,7 +1831,9 @@ model BrickReportNote {
   effect       String              @db.VarChar(20)
   // What the bot server already knew, with no words in it: the model, own key or not, the game version, the tools it had
   context      Json?
-  // This note took a problem marked fixed back to New: taking it back puts the problem back to Fixed when no later note holds it open
+  // Sent after the latest fix: it took a problem marked fixed back to New, or joined it while it stood reopened by a note. Set under the
+  // problem's lock, cleared when a person marks it fixed again. Once no such note is left (and nobody moved the problem by hand), the
+  // problem goes back to Fixed
   reopened     Boolean             @default(false)
   takeBackHash   String            @map("take_back_hash") @db.VarChar(64)
   takeBackSealed String            @map("take_back_sealed")

@@ -274,13 +274,16 @@ export async function recordReportNote(input: NoteInput, now: Date = new Date())
     if (today >= NOTES_PER_BRICK_PER_DAY) return { sent: false as const, reason: 'limit' as const };
     const problemKey = { kind: note.kind, area: note.area, operation: note.operation, failure: note.failure };
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${note.kind}:${note.area}:${note.operation}:${note.failure}`}, 0))`;
-    const found = await tx.brickReportProblem.findUnique({ where: { kind_area_operation_failure: problemKey }, select: { id: true, state: true } });
-    const reopened = found?.state === 'fixed';
+    const found = await tx.brickReportProblem.findUnique({ where: { kind_area_operation_failure: problemKey }, select: { id: true, state: true, reopenedByNote: true } });
+    // From after the fix: this note takes it back to New, or joins it while it stands reopened by a note. Decided here, under the lock, so
+    // a note whose clock read came earlier but joined later still counts as after the fix
+    const reopens = found?.state === 'fixed';
+    const reopened = reopens || !!found?.reopenedByNote;
     const problemId = found
       ? (
           await tx.brickReportProblem.update({
             where: { id: found.id },
-            data: { lastSeenAt: now, title: note.title, ...(reopened ? { state: 'new', cameBack: true, stateAt: now } : {}) },
+            data: { lastSeenAt: now, title: note.title, ...(reopens ? { state: 'new', cameBack: true, reopenedByNote: true, stateAt: now } : {}) },
             select: { id: true },
           })
         ).id
@@ -361,18 +364,21 @@ async function emptyNote(row: NoteRow, now: Date, onlyUndelivered = false): Prom
       await tx.brickReportProblem.deleteMany({ where: { id: row.problemId } });
       return true;
     }
-    const problem = await tx.brickReportProblem.findUnique({ where: { id: row.problemId }, select: { state: true, stateAt: true, cameBack: true } });
+    const problem = await tx.brickReportProblem.findUnique({ where: { id: row.problemId }, select: { state: true, reopenedByNote: true } });
     if (!problem) return true;
     // Back to Fixed once no note from after the fix is left, whichever of them goes last: only while it is New because a note came back
-    // (its state was set by that note, at that note's time). Moved by hand since (Working on, Back to New, Fixed again) is a person's call,
-    // and it stands; so does any note from after the fix still there
-    const cameBackAt = problem.state === 'new' && problem.cameBack ? problem.stateAt : null;
-    const byANote =
-      !!cameBackAt && (await tx.brickReportNote.count({ where: { problemId: row.problemId, reopened: true, createdAt: cameBackAt } })) > 0;
-    const restore = byANote && !live.some((note) => note.createdAt >= cameBackAt!);
+    // and nobody moved it by hand since (Working on, Back to New, Fixed again is a person's call, and it stands); so does any note from
+    // after the fix still there. Both are read under the lock, never from clocks
+    const restore =
+      problem.state === 'new' &&
+      problem.reopenedByNote &&
+      (await tx.brickReportNote.count({ where: { problemId: row.problemId, takenBackAt: null, reopened: true } })) === 0;
     await tx.brickReportProblem.update({
       where: { id: row.problemId },
-      data: { lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
+      data: {
+        lastSeenAt: live[live.length - 1].createdAt,
+        ...(restore ? { state: 'fixed', cameBack: false, reopenedByNote: false, stateAt: now } : {}),
+      },
     });
     return true;
   });
@@ -654,8 +660,11 @@ export async function setReportState(id: string, state: ReportState, now: Date =
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${problem.kind}:${problem.area}:${problem.operation}:${problem.failure}`}, 0))`;
     const moved = await tx.brickReportProblem.updateMany({
       where: { id },
-      data: { state, stateAt: now, ...(state === 'fixed' ? { cameBack: false } : {}) },
+      // A move by hand is a person's call: taking notes back no longer puts it back to Fixed
+      data: { state, stateAt: now, reopenedByNote: false, ...(state === 'fixed' ? { cameBack: false } : {}) },
     });
+    // Marked fixed: every note it holds now is from before this fix, so only notes that come after it can take it back to New and hold it
+    if (moved.count > 0 && state === 'fixed') await tx.brickReportNote.updateMany({ where: { problemId: id, reopened: true }, data: { reopened: false } });
     return moved.count > 0;
   });
 }
