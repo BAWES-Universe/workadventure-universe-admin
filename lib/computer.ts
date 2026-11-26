@@ -434,14 +434,17 @@ export class StopInFlight extends Error {
 }
 
 /**
- * A start whose ticket is no longer the Brick's, and whose machine the row now calls `stopped` or `stopping` (its wake was given up on and stopped), can still have woken the machine at the provider after that stop was proved (its wake call
- * landed late, or it only failed to be ready later): a machine awake that nothing counts. It is stopped against the state the row has now, and only then: a replacement that woke it since (the row is `waking` or `working`) owns it, and the claim of
- * a stop that saw another state writes nothing. True when the ticket was lost to a stop and this stop was sent.
+ * A start whose machine the row now calls `stopped` or `stopping` can still have woken it at the provider after that stop was proved (its wake call landed late, or it only failed afterwards): a machine awake that nothing counts. The stop
+ * may be the one that took its ticket (an abandoned wake) or one that moved no number (Turn off computer, the deletion of the Brick, a take-over leader's stop): either way it is stopped again, against the states the row can have now. A
+ * replacement that woke it since (the row is `waking`, `restoring` or `working`) owns it and is never stopped, and the claim of a stop writes nothing when the row left those states between the read and the claim. A second stop is harmless
+ * (the sweep stops a `stopping` row again). True when the row said stopped or stopping and this stop was sent.
  */
 async function stopLateWake(botId: string, ref: string, provider: Provider, mine: number): Promise<boolean> {
-  const now = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, wakeEpoch: true, providerRef: true } }).catch(() => null);
-  if (!now || now.wakeEpoch === mine || now.providerRef !== ref || (now.machine !== 'stopped' && now.machine !== 'stopping')) return false;
-  await stopMachine(botId, ref, provider, [now.machine]).catch(() => false);
+  const now = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, providerRef: true, wakeEpoch: true } }).catch(() => null);
+  if (!now || now.providerRef !== ref || (now.machine !== 'stopped' && now.machine !== 'stopping')) return false;
+  // A `stopping` row under this start's own number is the stop that was just sent under it and not proved (or a turn-off's whose proof is still to come): the sweep sends it again until it is proved, so it is not sent twice at once
+  if (now.machine === 'stopping' && now.wakeEpoch === mine) return false;
+  await stopMachine(botId, ref, provider, ['stopped', 'stopping']).catch(() => false);
   return true;
 }
 
@@ -2225,7 +2228,14 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
       const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
       const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
-      await provider.wake(ref);
+      // A wake call that fails leaves the machine `waking` under this start's own ticket, as it always did (nothing is stopped under a job that may use it, and the stale wake is taken over by the next start). But when the row has
+      // meanwhile been stopped (the stop of an abandoned wake, Turn off computer), the failed call may still have started the instance at the provider after that stop was proved: it is stopped against the state the row has (CodeRabbit on #1040)
+      try {
+        await provider.wake(ref);
+      } catch (error) {
+        await stopLateWake(botId, ref, provider, mine);
+        throw error;
+      }
       // A wake that was given up on (its beat missed, so its stop was claimed under the next epoch) can still reach the provider AFTER the stop was proved: the machine the row calls stopped is awake again. It is stopped against the
       // state the row has now, and this start looks again from the top (it wakes the machine under a ticket of its own when it still needs it) instead of waiting for readiness on a machine it no longer owns (CodeRabbit on #1040)
       if (await stopLateWake(botId, ref, provider, mine)) continue;
