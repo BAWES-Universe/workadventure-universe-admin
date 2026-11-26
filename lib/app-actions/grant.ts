@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import type { Heading, Setting } from '@/lib/mcp-tool-policy';
 import { ensureAppActions, noteUnknownAction } from '@/lib/app-actions/catalog';
 import { effectiveSetting, nameRule, stricterHeading } from '@/lib/app-actions/sort';
-import { GITHUB_ACTIONS_KEY, startsOn } from '@/lib/github/actions';
+import { GITHUB_ACTIONS_KEY, ownActionList, startsOn } from '@/lib/github/actions';
 
 /**
  * A Brick's grant of a ready-made App holds the App's actions as its tool rows (`BotMcpTool`), not the provider's four meta tools:
@@ -61,6 +61,42 @@ export function stricterSetting(a: Setting | null, b: Setting | null): Setting |
 }
 
 /**
+ * The choice an action of Universe's own list holds when the person made none for it (lib/github/actions.ts: Run a workflow asks first):
+ * its starting choice where that is stricter than its heading's setting, else none (it follows its heading). So it never makes the action
+ * looser than its heading (a heading set Off keeps it Off), and never looser than its starting choice either, unless the person picks a
+ * looser choice for that one action themselves.
+ */
+export function startingChoice(toolkit: string, slug: string, headingSetting: Setting): Setting | null {
+  const start = startsOn(toolkit, slug);
+  return start && start !== headingSetting && stricterSetting(start, headingSetting) === start ? start : null;
+}
+
+/**
+ * Whether an action with a starting choice (Universe's own list) holds anything but what it should: the person made no choice for it
+ * (its row is empty or holds the starting choice) and its heading moved since. Read outside a write, on every read of a grant brought over,
+ * so a heading a person changes is followed at once.
+ */
+async function startingChoicesOff(serverId: string, toolkit: string): Promise<boolean> {
+  const own = ownActionList(toolkit)?.filter((action) => action.startsOn);
+  if (!own?.length) return false;
+  const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { ...SETTINGS_SELECT, tools: { where: { name: { in: own.map((action) => action.slug) } }, select: { name: true, heading: true, setting: true } } } });
+  if (!server) return false;
+  const settings = settingsOfGrant(server);
+  return server.tools.some((tool) => {
+    const start = startsOn(toolkit, tool.name);
+    if (!tool.heading || (tool.setting !== null && tool.setting !== start)) return false;
+    return (tool.setting ?? null) !== startingChoice(toolkit, tool.name, settings[tool.heading as Heading]);
+  });
+}
+
+const settingsOfGrant = (server: { lookUpSetting: string; makeSetting: string; changeSetting: string; deleteSendSetting: string }): Record<Heading, Setting> => ({
+  looksUp: server.lookUpSetting as Setting,
+  makesNew: server.makeSetting as Setting,
+  changesThings: server.changeSetting as Setting,
+  deletesOrSends: server.deleteSendSetting as Setting,
+});
+
+/**
  * Holds one grant (its row in `bot_mcp_servers`) until the transaction ends. Bringing a grant over to App actions, the bot server's
  * list of tools and a person's change to a tool all take it first, so each sees the grant wholly before or wholly after another.
  */
@@ -96,7 +132,9 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
   const catalog = await ensureAppActions(toolkit, attempt === 0 && head.appActionsVersion === null ? FIRST_READ_WAIT_MS : 0);
   // Never read (or Orbit could not check): the grant stays as it is, and the next read tries again
   if (!catalog?.refreshedAt) return false;
-  if (!force && head.appActionsVersion === catalog.version) return false;
+  // Up to date with the list: only an action whose starting choice no longer matches its heading (the person moved the heading) is synced
+  if (!force && head.appActionsVersion === catalog.version && !(await startingChoicesOff(serverId, toolkit))) return false;
+  if (head.appActionsVersion === catalog.version) force = true;
 
   try {
     return await prisma.$transaction(
@@ -170,10 +208,13 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           const rows = groups.get(entry.key) ?? [];
           // The row that stays: the one already named as the App names it now, else the one with the strictest choice
           const keeper = rows.find((tool) => tool.name === entry.slug) ?? rows.reduce<ToolRow | undefined>((best, tool) => (!best || stricterSetting(best.setting as Setting | null, tool.setting as Setting | null) !== best.setting ? tool : best), undefined);
-          // The person's strictest choice for it, else the choice Universe starts it on (own lists: Run a workflow asks first) when it is
-          // new to this grant, then never looser than what it was judged by before it was brought over
+          // The person's strictest choice for it. An action Universe starts on its own choice (own lists: Run a workflow asks first) holds
+          // that choice while the person made none (or left it as it started), only where it is stricter than its heading. Then never looser
+          // than what it was judged by before it was brought over
           const chosen = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
-          const setting = carried(rows, entry.heading, chosen ?? (!keeper || firstTime ? startsOn(toolkit, entry.slug) : null));
+          const start = startsOn(toolkit, entry.slug);
+          const own = start && (chosen === null || chosen === start) ? startingChoice(toolkit, entry.slug, settings[entry.heading]) : chosen;
+          const setting = carried(rows, entry.heading, own);
           for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
             name: entry.slug,
@@ -326,14 +367,17 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     toolkit,
     knows(slug: string): boolean {
       const key = slugKey(slug);
-      return rows.has(key) || listed.has(key);
+      return rows.has(key) || listed.has(key) || !!ownActionList(toolkit)?.some((action) => slugKey(action.slug) === key);
     },
     judge(slug: string): ActionVerdict {
       const key = slugKey(slug);
       const row = rows.get(key);
       if (row) return { slug, ...row };
       const known = listed.get(key);
-      if (known) return { slug, title: known.title, heading: known.heading, setting: settings[known.heading] };
+      if (known) return { slug, title: known.title, heading: known.heading, setting: startingChoice(toolkit, slug, settings[known.heading]) ?? settings[known.heading] };
+      // Universe's own list knows it even when the saved list does not have it yet (a release's new action, before its list is saved)
+      const ownAction = ownActionList(toolkit)?.find((action) => slugKey(action.slug) === key);
+      if (ownAction) return { slug, title: ownAction.title, heading: ownAction.heading, setting: startingChoice(toolkit, ownAction.slug, settings[ownAction.heading]) ?? settings[ownAction.heading] };
       if (!noted) {
         noted = true;
         void noteUnknownAction(toolkit);

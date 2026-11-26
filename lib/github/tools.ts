@@ -225,6 +225,11 @@ export interface RunOptions {
    * workflow and its choice instead (it may ask first). Left out, any run may be run again.
    */
   handStartedRerun?: string;
+  /**
+   * Set when Commit files may not make a branch that is not there yet, because Make a branch is not Right away for this Brick: the words
+   * the Brick reads. A commit onto a branch that is there runs as usual. Left out, Commit files makes a new branch as it always did.
+   */
+  newBranchStop?: string;
 }
 
 export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch, options: RunOptions = {}): Promise<ToolResult> {
@@ -457,7 +462,7 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       return answer.ok ? out({ branch, from, sha }) : refusal(answer, `making branch ${branch}`);
     }
     case 'github_write_files':
-      return writeFiles(request, args);
+      return writeFiles(request, args, options);
     case 'github_create_pull_request': {
       const repo = repoPath(args.repo);
       const base = text(args.base, 'base', false) ?? (await defaultBranch(request, repo));
@@ -567,7 +572,7 @@ async function modesOf(request: Request, repo: string, treeSha: string, paths: s
 }
 
 /** One commit that writes (or deletes) files on a branch, through GitHub's git data API. The branch is made when it is new. */
-async function writeFiles(request: Request, args: Record<string, unknown>): Promise<ToolResult> {
+async function writeFiles(request: Request, args: Record<string, unknown>, options: RunOptions): Promise<ToolResult> {
   const repo = repoPath(args.repo);
   const branch = text(args.branch, 'branch') as string;
   const message = text(args.message, 'message') as string;
@@ -587,6 +592,8 @@ async function writeFiles(request: Request, args: Record<string, unknown>): Prom
   let parent = await headOf(request, repo, branch);
   let made = false;
   if (!parent) {
+    // Making the branch is Make a branch: it follows that action's choice (the same as a push from the Brick's computer)
+    if (options.newBranchStop) return { text: options.newBranchStop, isError: true };
     parent = await headOf(request, repo, await defaultBranch(request, repo));
     if (!parent) throw new ToolError('The repository has no commits to start a branch from.');
     made = true;

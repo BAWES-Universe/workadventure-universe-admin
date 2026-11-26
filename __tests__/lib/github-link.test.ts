@@ -33,7 +33,7 @@ jest.mock('@/lib/github/judge', () => ({
     knows: () => true,
     judge: (slug: string) => ({
       slug,
-      title: slug === 'github_run_workflow' ? 'Run a workflow' : slug === 'github_merge_pull_request' ? 'Merge a pull request' : slug,
+      title: ({ github_run_workflow: 'Run a workflow', github_merge_pull_request: 'Merge a pull request', github_create_branch: 'Make a branch' } as Record<string, string>)[slug] ?? slug,
       heading: 'changesThings',
       setting: choices.get(slug) ?? 'rightAway',
     }),
@@ -180,6 +180,52 @@ describe('what the Brick may do with each GitHub action (second guard after the 
     expect(github).toHaveBeenCalledWith('https://api.github.com/repos/acme/tools/actions/workflows/deploy.yml/dispatches', expect.objectContaining({ method: 'POST', body: JSON.stringify({ ref: 'main' }) }));
     // A change: it stays asked, so it is never started twice
     expect(written.has('github:b:wf-1')).toBe(true);
+  });
+
+  describe('Commit files onto a branch that is not there (that is Make a branch)', () => {
+    const commit = (callId: string, fetchImpl: typeof fetch) =>
+      call(callId, fetchImpl, { name: 'github_write_files', arguments: { repo: 'acme/tools', branch: 'new-one', message: 'Add a', files: [{ path: 'a.txt', content: 'a' }] } });
+    // GitHub: the branch is not there; the default branch is main at commit m
+    const noBranch = () =>
+      jest.fn(async (url: string) => {
+        if (url.endsWith('/git/ref/heads/new-one')) return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+        if (url.endsWith('/repos/acme/tools')) return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+        if (url.endsWith('/git/ref/heads/main')) return new Response(JSON.stringify({ object: { sha: 'm' } }), { status: 200 });
+        return new Response(JSON.stringify({}), { status: 500 });
+      }) as unknown as typeof fetch & jest.Mock;
+    const text = (outcome: Awaited<ReturnType<typeof call>>) => JSON.parse((outcome as { answer: { body: string } }).answer.body).result as { content: { text: string }[]; isError: boolean };
+
+    it('makes nothing while Make a branch asks first, and says to use it first', async () => {
+      choices.set('github_create_branch', 'asksFirst');
+      const github = noBranch();
+      const result = text(await commit('wb-1', github));
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('making it is Make a branch, which asks first. Nothing was committed. Use Make a branch first');
+      // Only the branch was looked up: no tree, commit or branch was written
+      expect(github.mock.calls.every(([, init]) => ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET')).toBe(true);
+      expect(written.has('github:b:wb-1')).toBe(false);
+    });
+
+    it('says it is off when Make a branch is Off', async () => {
+      choices.set('github_create_branch', 'off');
+      expect(text(await commit('wb-2', noBranch())).content[0].text).toContain('which is off for Nudge in GitHub. Nothing was committed.');
+    });
+
+    it('still commits onto a branch that is there while Make a branch asks first', async () => {
+      choices.set('github_create_branch', 'asksFirst');
+      const github = jest.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/git/ref/heads/new-one')) return new Response(JSON.stringify({ object: { sha: 'p' } }), { status: 200 });
+        if (url.endsWith('/git/commits/p')) return new Response(JSON.stringify({ tree: { sha: 't' } }), { status: 200 });
+        if (url.includes('/git/trees/t')) return new Response(JSON.stringify({ tree: [] }), { status: 200 });
+        if (url.endsWith('/git/trees')) return new Response(JSON.stringify({ sha: 't2' }), { status: 201 });
+        if (url.endsWith('/git/commits')) return new Response(JSON.stringify({ sha: 'c2' }), { status: 201 });
+        if (url.endsWith('/git/refs/heads/new-one') && init?.method === 'PATCH') return new Response(JSON.stringify({}), { status: 200 });
+        return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+      }) as unknown as typeof fetch & jest.Mock;
+      const result = text(await commit('wb-3', github));
+      expect(result.content[0].text).not.toContain('Make a branch');
+      expect(result.isError).toBe(false);
+    });
   });
 
   describe('running a run again', () => {

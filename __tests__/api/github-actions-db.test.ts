@@ -113,8 +113,11 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     });
     await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { makeSetting: 'off' } });
     const before = (await gitHubJudgeFor(sara.brickId, sara.connectionId))!;
-    // Before it is brought over, Orbit judges by Universe's sorting: Commit files is under Changes things (still Right away)
-    expect(before.judge('github_write_files').setting).toBe('rightAway');
+    // Before it is brought over, Orbit judges by Universe's sorting and never looser than the grant's own rows: Commit files stays Off,
+    // on the computer too; an action the rows never had follows Universe's sorting
+    expect(before.judge('github_write_files').setting).toBe('off');
+    expect(computerStops(before, 'Nudge').push).toBe('Commit files is off for Nudge in GitHub, so nothing was pushed.');
+    expect(before.judge('github_create_branch').setting).toBe('rightAway');
 
     const tools = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
     const byName = new Map(tools.tools.map((tool) => [tool.name, tool]));
@@ -122,6 +125,44 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     expect(byName.get('github_read_file')).toMatchObject({ heading: 'looksUp', setting: null });
     expect(byName.get('github_create_branch')?.setting).toBeNull();
     expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_write_files').setting).toBe('off');
+  });
+
+  it('never makes Run a workflow looser than its heading: a heading set Off keeps it Off, before and after the grant is brought over', async () => {
+    const sara = await withGitHub('sara');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'off' } });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+    const tools = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    expect(tools.tools.find((tool) => tool.name === 'github_run_workflow')?.setting).toBeNull();
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+  });
+
+  it('follows the person’s heading as they change it: Off holds Run a workflow Off, and a looser heading brings back Asks first; a choice of their own stays', async () => {
+    const sara = await withGitHub('sara');
+    const first = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    const runId = first.tools.find((tool) => tool.name === 'github_run_workflow')!.id;
+    const settingOfRun = async () => (await readServerTools(sara.brickId, sara.serverId, { appActions: true })).tools.find((tool) => tool.name === 'github_run_workflow')?.setting;
+    const judged = async () => (await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting;
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'off' } });
+    expect(await judged()).toBe('off');
+    expect(await settingOfRun()).toBeNull();
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'rightAway' } });
+    expect(await settingOfRun()).toBe('asksFirst');
+    expect(await judged()).toBe('asksFirst');
+    // The person picks Right away for it themselves: that stays, whatever the heading does
+    await setToolSetting(sara.brickId, sara.serverId, runId, 'rightAway');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'asksFirst' } });
+    expect(await settingOfRun()).toBe('rightAway');
+    expect(await judged()).toBe('rightAway');
+  });
+
+  it('judges an action of Universe’s list that the grant has no row for by Universe’s list, not as Right away', async () => {
+    const sara = await withGitHub('sara');
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    // As if a release added Run a workflow and its list was not saved yet
+    await prisma.botMcpTool.deleteMany({ where: { serverId: sara.serverId, name: 'github_run_workflow' } });
+    const judge = (await gitHubJudgeFor(sara.brickId, sara.connectionId))!;
+    expect(judge.knows('github_run_workflow')).toBe(true);
+    expect(judge.judge('github_run_workflow')).toMatchObject({ title: 'Run a workflow', heading: 'changesThings', setting: 'asksFirst' });
   });
 
   it('judges a grant not brought over yet by Universe’s sorting and its headings, Run a workflow asking first', async () => {

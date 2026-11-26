@@ -117,7 +117,13 @@ export async function linkGitHub(
         params.name === 'github_rerun_ci' && workflow.setting !== 'rightAway'
           ? `This run was started by hand, like a deploy, so running it again is the same as ${workflow.title}, which ${workflow.setting === 'off' ? `is off for ${bot.name} in GitHub` : 'asks first'}. Nothing was run.${workflow.setting === 'off' ? '' : ` Use ${workflow.title} for it instead.`}`
           : undefined;
-      const result = await runGitHubTool(token.token, params.name, args, fetchImpl, handStartedRerun ? { handStartedRerun } : {});
+      // Commit files onto a branch that is not there makes it: that is Make a branch, so it follows Make a branch's choice too
+      const branch = judge!.judge('github_create_branch');
+      const newBranchStop =
+        params.name === 'github_write_files' && branch.setting !== 'rightAway'
+          ? `This branch is not there yet, and making it is ${branch.title}, which ${branch.setting === 'off' ? `is off for ${bot.name} in GitHub` : 'asks first'}. Nothing was committed.${branch.setting === 'off' ? ' Commit onto a branch that is already there instead.' : ` Use ${branch.title} first, then commit again.`}`
+          : undefined;
+      const result = await runGitHubTool(token.token, params.name, args, fetchImpl, { ...(handStartedRerun ? { handStartedRerun } : {}), ...(newBranchStop ? { newBranchStop } : {}) });
       // Certain that nothing changed on GitHub (only looked, answered or not, or GitHub turned the change down): the call is let
       // go, so the same call may be asked again. A change GitHub made or may have made stays asked, so it is never made twice.
       if (result.changedNothing) await prisma.meterEvent.deleteMany({ where: { eventId: eventIdOf(input.botId, input.callId) } });

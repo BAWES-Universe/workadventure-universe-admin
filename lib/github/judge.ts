@@ -1,34 +1,45 @@
 import { prisma } from '@/lib/db';
-import { actionJudgeFor, slugKey, type ActionJudge, type ActionVerdict } from '@/lib/app-actions/grant';
-import { effectiveSetting, nameRule } from '@/lib/app-actions/sort';
-import { settingsOf } from '@/lib/mcp-tool-policy';
+import { actionJudgeFor, slugKey, startingChoice, stricterSetting, type ActionJudge, type ActionVerdict } from '@/lib/app-actions/grant';
+import { nameRule } from '@/lib/app-actions/sort';
+import { settingsOf, type Heading, type Setting } from '@/lib/mcp-tool-policy';
 import { GITHUB_ACTIONS, GITHUB_ACTIONS_KEY } from '@/lib/github/actions';
 
 /**
  * What a Brick may do with each of its owner's GitHub actions, wherever Orbit runs one: the app link (chat and goals, behind the bot
  * server's gate), and the Brick's computer (git and opening a pull request, where nobody can be asked). A grant brought over to App actions
  * (lib/app-actions/grant.ts) is judged by its rows: each action's own choice, else its heading's. A grant not brought over yet (no reader that
- * knows App actions has read it) is judged by Universe's own sorting of GitHub and the grant's four headings, so every GitHub grant is
- * judged the same way on Orbit's side from the start. Null when the Brick has no grant of this connection.
+ * knows App actions has read it) is judged by Universe's own sorting of GitHub and the grant's four headings, never looser than its own
+ * rows judged a tool before, so every GitHub grant is judged the same way on Orbit's side from the start. Null when the Brick has no grant of this connection.
  */
 export async function gitHubJudgeFor(botId: string, connectionId: string): Promise<ActionJudge | null> {
   const judge = await actionJudgeFor(botId, connectionId);
   if (judge) return judge;
   const grant = await prisma.botMcpServer.findFirst({
     where: { botId, connectionId },
-    select: { lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true },
+    select: { lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true, tools: { select: { name: true, heading: true, suggestedHeading: true } } },
   });
   if (!grant) return null;
   const settings = settingsOf(grant);
   const byKey = new Map(GITHUB_ACTIONS.map((action) => [slugKey(action.slug), action]));
+  // What the grant's own rows judged each tool by before (the bot server's list, under the heading a person or the bot server put it):
+  // never looser than that, the same as when the grant is brought over (a tool under a heading set Off stays Off)
+  const before = new Map<string, Setting>();
+  for (const tool of grant.tools) {
+    const heading = (tool.heading ?? tool.suggestedHeading) as Heading | null;
+    if (!heading) continue;
+    const key = slugKey(tool.name);
+    before.set(key, stricterSetting(before.get(key) ?? null, settings[heading])!);
+  }
   return {
     toolkit: GITHUB_ACTIONS_KEY,
     knows: (slug) => byKey.has(slugKey(slug)),
     judge(slug: string): ActionVerdict {
-      const action = byKey.get(slugKey(slug));
+      const key = slugKey(slug);
+      const action = byKey.get(key);
       // An action Universe's list does not have: by its name, else the strictest heading
       const heading = action?.heading ?? nameRule(slug) ?? 'deletesOrSends';
-      return { slug, title: action?.title ?? slug, heading, setting: effectiveSetting(action?.startsOn ?? null, heading, settings) };
+      const now = action ? (startingChoice(GITHUB_ACTIONS_KEY, action.slug, settings[heading]) ?? settings[heading]) : settings[heading];
+      return { slug, title: action?.title ?? slug, heading, setting: stricterSetting(now, before.get(key) ?? null)! };
     },
   };
 }
