@@ -1423,6 +1423,9 @@ model BotMcpServer {
   // lost fields above are then read from the connection and never copied, and what is kept here is the Brick's own: its
   // four headings, its tools and their confirmations, its switch. Null for every app set up on a bot as before.
   connectionId       String?   @map("connection_id")
+  // A ready-made App's grant whose rows are the App's actions (lib/app-actions): the version of the App's list they were made from. Null
+  // until a reader that knows App actions (GET .../tools?actions=1) first reads it: until then its rows stay as the bot server saved them.
+  appActionsVersion  Int?      @map("app_actions_version")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1940,6 +1943,8 @@ model AppActionCatalog {
   // A refresh in progress holds this until it ends or the time passes
   claimedUntil DateTime? @map("claimed_until")
   actionCount  Int       @default(0) @map("action_count")
+  // Goes up whenever an action of the App is added, removed or sorted differently: a grant made from this version needs no new look
+  version      Int       @default(0)
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   @@map("app_action_catalogs")

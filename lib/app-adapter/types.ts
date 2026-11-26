@@ -141,6 +141,8 @@ export interface ProviderAction {
   /** The provider's tags (readOnlyHint, createHint, updateHint, destructiveHint among free words). */
   tags: string[];
   version: string | null;
+  /** The provider marks it deprecated: it still runs, so it is kept, after the others. */
+  deprecated?: boolean;
 }
 
 export interface ReadyMadeAdapter {
@@ -164,7 +166,7 @@ export interface ReadyMadeAdapter {
   use(input: { person: string; toolkit: string; tool: string; arguments: Record<string, unknown>; providerAccountId: string | null; callId: string }): Promise<UseResult>;
   /**
    * Every action one App offers, as the provider lists them (every page), so Universe can sort them under the four headings
-   * (lib/app-actions). Listing is not a use and costs nothing. Deprecated actions are left out. Optional: an adapter without it
+   * (lib/app-actions). Listing is not a use and costs nothing. Deprecated actions are kept and marked. Optional: an adapter without it
    * leaves a grant with no action rows, and every action is then judged by its name and else asks first.
    */
   actions?(toolkit: string): Promise<ProviderAction[]>;

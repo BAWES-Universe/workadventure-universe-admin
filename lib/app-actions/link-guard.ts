@@ -14,20 +14,29 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 /** How deep a batch inside a batch is looked into (the same bound as the sandbox check). */
 const BATCH_DEPTH = 8;
 
-/** The provider's own meta tools and Universe's code job tools are not App actions: they are never judged as one. */
-const isMetaTool = (name: string): boolean => /^(COMPOSIO|UNIVERSE)_/i.test(name.trim());
+/**
+ * The link's own tools that run no App action: its search, its schemas and its connection steps. Only these, by name: any other tool
+ * of the link is judged as an action (one the App's list does not have is judged strictly), so a new tool of the link is never let
+ * through unseen. Universe's code job tools run no App action either.
+ */
+const NO_ACTION_TOOLS = new Set(['COMPOSIO_SEARCH_TOOLS', 'COMPOSIO_GET_TOOL_SCHEMAS', 'COMPOSIO_MANAGE_CONNECTIONS', 'COMPOSIO_WAIT_FOR_CONNECTIONS']);
+const runsNoAction = (name: string): boolean => {
+  const tool = name.trim().toUpperCase();
+  return NO_ACTION_TOOLS.has(tool) || tool.startsWith('UNIVERSE_');
+};
 
 /**
  * The App actions a call runs: the call's own name when it is an action, or every action inside a batch, at any depth. A batch nested
- * past the bound counts as the batch itself (never trusted as empty). Meta tools (search, schemas, connections) run no action.
+ * past the bound, or one whose list cannot be read (not a list, an entry without an action's name), counts as the batch itself and is
+ * judged as an action the App's list does not have: never trusted as empty.
  */
 export function actionsOfCall(name: string, args: unknown, depth = 0): string[] {
   const tool = name.trim();
-  if (tool.toUpperCase() !== BATCH_TOOL) return isMetaTool(tool) ? [] : [tool];
+  if (tool.toUpperCase() !== BATCH_TOOL) return runsNoAction(tool) ? [] : [tool];
   if (depth >= BATCH_DEPTH) return [tool];
   const list = isObject(args) ? args.tools : undefined;
-  if (!Array.isArray(list)) return [];
-  return list.flatMap((entry) => (isObject(entry) && typeof entry.tool_slug === 'string' ? actionsOfCall(entry.tool_slug, entry.arguments ?? entry.parameters, depth + 1) : []));
+  if (!Array.isArray(list)) return [tool];
+  return list.flatMap((entry) => (isObject(entry) && typeof entry.tool_slug === 'string' ? actionsOfCall(entry.tool_slug, entry.arguments ?? entry.parameters, depth + 1) : [tool]));
 }
 
 /** The actions of a call that are Off for this Brick, each once, in the order they were asked. */
@@ -35,7 +44,7 @@ export function offActions(judge: ActionJudge, slugs: readonly string[]): Action
   const seen = new Set<string>();
   const off: ActionVerdict[] = [];
   for (const slug of slugs) {
-    const key = slug.toUpperCase();
+    const key = slug.trim().toUpperCase();
     if (seen.has(key)) continue;
     seen.add(key);
     const verdict = judge.judge(slug);
@@ -57,12 +66,19 @@ export function refusalAnswer(id: unknown, text: string): LinkAnswer {
   return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) };
 }
 
-/** A value that names one of this App's actions the way its lists do (GMAIL_FETCH_EMAILS for Gmail): only such a value is ever taken out. */
-const slugOfApp = (toolkit: string) => {
-  const prefix = `${toolkit.toUpperCase().replace(/[^A-Z0-9]/g, '')}_`;
+/**
+ * A value that names one of this App's actions: one the App's list (or the grant) holds, or one written the way its lists write them
+ * (GMAIL_FETCH_EMAILS for Gmail, GOOGLE_CALENDAR_... for google_calendar), in any case. Only such a value is ever taken out.
+ */
+const slugOfApp = (judge: ActionJudge) => {
+  const upper = judge.toolkit.toUpperCase();
+  const prefixes = [...new Set([`${upper.replace(/[^A-Z0-9]/g, '')}_`, `${upper.replace(/[^A-Z0-9]+/g, '_')}_`])];
   return (value: string): boolean => {
     const text = value.trim();
-    return text.startsWith(prefix) && /^[A-Z0-9]+(_[A-Z0-9]+)+$/.test(text);
+    if (text.length === 0 || text.length > 255) return false;
+    if (judge.knows(text)) return true;
+    const key = text.toUpperCase();
+    return prefixes.some((prefix) => key.startsWith(prefix)) && /^[A-Z0-9]+(_[A-Z0-9]+)+$/.test(key);
   };
 };
 
@@ -115,7 +131,7 @@ export function withoutOffActions(answer: LinkAnswer, id: unknown, judge: Action
   const parsed = linkJson(answer.body, typeof id === 'number' || typeof id === 'string' ? id : undefined);
   if (!parsed || !isObject(parsed.result)) return answer;
   const isOff = (slug: string) => judge.judge(slug).setting === 'off';
-  const looksLikeSlug = slugOfApp(judge.toolkit);
+  const looksLikeSlug = slugOfApp(judge);
   const result = { ...parsed.result };
   let changed = false;
   if (Array.isArray(result.tools)) {

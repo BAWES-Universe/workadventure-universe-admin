@@ -570,13 +570,14 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
         for (const item of json.items as unknown[]) {
           if (!isObject(item)) continue;
           const slug = str(item.slug);
-          if (!slug || seen.has(slug) || item.is_deprecated === true) continue;
+          if (!slug || seen.has(slug)) continue;
           seen.add(slug);
           found.push({
             slug,
             description: str(item.human_description) ?? str(item.description),
             tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
             version: str(item.version),
+            ...(item.is_deprecated === true ? { deprecated: true } : {}),
           });
         }
         const next = str(json.next_cursor);

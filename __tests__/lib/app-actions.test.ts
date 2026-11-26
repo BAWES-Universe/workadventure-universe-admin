@@ -67,6 +67,7 @@ describe('sorting an App’s actions', () => {
     expect(actionTitle('slack', 'OTHER_THING')).toBe('Other thing');
     expect(actionTitle('gmail', 'GMAIL')).toBe('Gmail');
     expect(withoutProvider('Searches tools in Composio (Composio) and Composio’s list.')).toBe('Searches tools in and list.');
+    expect(withoutProvider('See https://docs.composio.dev/tools/gmail or composio.dev, by ComposioHQ.')).toBe('See or, by.');
   });
 
   it('takes an action’s own choice over its heading’s', () => {
@@ -81,7 +82,8 @@ describe('the link’s guard', () => {
   const settingOf: Record<string, Setting> = { GMAIL_FETCH_EMAILS: 'rightAway', GMAIL_DELETE_MESSAGE: 'off', GMAIL_SEND_EMAIL: 'asksFirst', GMAIL_MOVE_TO_TRASH: 'off' };
   const judge: ActionJudge = {
     toolkit: 'gmail',
-    judge: (slug) => ({ slug, title: actionTitle('gmail', slug), heading: 'looksUp', setting: settingOf[slug.toUpperCase()] ?? 'asksFirst' }),
+    judge: (slug) => ({ slug, title: actionTitle('gmail', slug), heading: 'looksUp', setting: settingOf[slug.trim().toUpperCase()] ?? 'asksFirst' }),
+    knows: (slug) => slug.trim().toUpperCase() in settingOf,
   };
 
   it('finds every action a call runs, in a batch at any depth, and none in a lookup', () => {
@@ -92,7 +94,14 @@ describe('the link’s guard', () => {
       'GMAIL_DELETE_MESSAGE',
     ]);
     expect(actionsOfCall(' composio_multi_execute_tool ', { tools: [{ tool_slug: 'GMAIL_SEND_EMAIL', parameters: {} }] })).toEqual(['GMAIL_SEND_EMAIL']);
-    expect(actionsOfCall('COMPOSIO_MULTI_EXECUTE_TOOL', { tools: 'x' })).toEqual([]);
+    // A batch that cannot be read is judged as the batch itself (an action the list does not have), never as empty
+    expect(actionsOfCall('COMPOSIO_MULTI_EXECUTE_TOOL', { tools: 'x' })).toEqual(['COMPOSIO_MULTI_EXECUTE_TOOL']);
+    expect(actionsOfCall('COMPOSIO_MULTI_EXECUTE_TOOL', { tools: [{ tool_slug: 'GMAIL_FETCH_EMAILS' }, { slug: 'GMAIL_DELETE_MESSAGE' }] })).toEqual(['GMAIL_FETCH_EMAILS', 'COMPOSIO_MULTI_EXECUTE_TOOL']);
+    // Only the link's search, schemas and connection steps (and Universe's code job tools) run no action; any other tool of the link is judged
+    expect(actionsOfCall('COMPOSIO_GET_TOOL_SCHEMAS', {})).toEqual([]);
+    expect(actionsOfCall('COMPOSIO_MANAGE_CONNECTIONS', {})).toEqual([]);
+    expect(actionsOfCall('UNIVERSE_RUN_CODE', {})).toEqual([]);
+    expect(actionsOfCall('COMPOSIO_SOMETHING_NEW', {})).toEqual(['COMPOSIO_SOMETHING_NEW']);
     // A batch nested past the bound is never trusted as empty
     let nested: Record<string, unknown> = { tools: [{ tool_slug: 'GMAIL_DELETE_MESSAGE' }] };
     for (let i = 0; i < 10; i += 1) nested = { tools: [{ tool_slug: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: nested }] };
@@ -143,6 +152,17 @@ describe('the link’s guard', () => {
     // A word in upper case that is not one of this App's actions is never taken out
     const unrelated = answer({ content: [{ type: 'text', text: JSON.stringify({ status: ['NOT_FOUND', 'OTHER_DELETE_MESSAGE'] }) }] });
     expect(withoutOffActions(unrelated, 3, { ...judge, judge: (slug) => ({ slug, title: slug, heading: 'deletesOrSends', setting: 'off' }) })).toBe(unrelated);
+  });
+
+  it('finds an App’s actions however its lists write them: its letters, its own name with underscores, any case', () => {
+    const calendar: ActionJudge = {
+      toolkit: 'google_calendar',
+      judge: (slug) => ({ slug, title: slug, heading: 'deletesOrSends', setting: /DELETE/i.test(slug) ? 'off' : 'rightAway' }),
+      knows: (slug) => slug.trim().toUpperCase() === 'GCAL_DELETE_ALL',
+    };
+    const found = { slugs: ['GOOGLECALENDAR_DELETE_EVENT', 'google_calendar_delete_calendar', 'GOOGLE_CALENDAR_LIST_EVENTS', 'gcal_delete_all', 'OTHER_DELETE_THING'] };
+    const out = withoutOffActions(answer({ content: [{ type: 'text', text: JSON.stringify(found) }] }), 3, calendar);
+    expect(JSON.parse(JSON.parse(out.body).result.content[0].text)).toEqual({ slugs: ['GOOGLE_CALENDAR_LIST_EVENTS', 'OTHER_DELETE_THING'] });
   });
 
   it('reads an event stream answer too', () => {

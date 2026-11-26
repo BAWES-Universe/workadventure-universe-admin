@@ -117,12 +117,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     setAdapterForTests(adapter);
     const connectionId = await readyMadeConnection();
     const grant = await grantToBrick(sara, connectionId, saraBrick);
+    // The first read of a reader that knows App actions brings the grant over
+    await readServerTools(saraBrick, grant!.id, { appActions: true });
     return { adapter, connectionId, serverId: grant!.id };
   }
 
   const toolsOf = async (serverId: string) => {
     asSara();
-    const response = await getTools(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/tools`), params({ id: saraBrick, serverId }));
+    const response = await getTools(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/tools?actions=1`), params({ id: saraBrick, serverId }));
     expect(response.status).toBe(200);
     return response.json();
   };
@@ -162,9 +164,19 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
           { serverId: old.id, name: 'COMPOSIO_MULTI_EXECUTE_TOOL', fingerprint: 'f2', heading: 'looksUp', movedById: sara, confirmedById: sara, confirmedAt: new Date() },
         ],
       });
-      const [one, two, three] = await Promise.all([readServerTools(saraBrick, old.id), readServerTools(saraBrick, old.id), ensureAppActionTools(old.id)]);
+      // A reader that does not know App actions (today's bot server) sees the grant as it was, and nothing is judged per action
+      const plain = await readServerTools(saraBrick, old.id);
+      expect(plain.kind).toBe('tools');
+      expect(plain.tools.map((tool) => tool.name).sort()).toEqual(['COMPOSIO_MULTI_EXECUTE_TOOL', 'COMPOSIO_SEARCH_TOOLS']);
+      expect(await actionJudgeFor(saraBrick, connectionId)).toBeNull();
+      expect(adapter.actions).not.toHaveBeenCalled();
+      asSara();
+      const plainGet = await (await getTools(request(`/api/bots/${saraBrick}/mcp-servers/${old.id}/tools`), params({ id: saraBrick, serverId: old.id }))).json();
+      expect(plainGet.kind).toBe('tools');
+      const [one, two, three] = await Promise.all([readServerTools(saraBrick, old.id, { appActions: true }), readServerTools(saraBrick, old.id, { appActions: true }), ensureAppActionTools(old.id)]);
       expect(three).toEqual(expect.any(Boolean));
       expect(one.tools.map((tool) => tool.name).sort()).toEqual(two.tools.map((tool) => tool.name).sort());
+      // Brought over once: every reader sees the actions from now on
       const again = await readServerTools(saraBrick, old.id);
       expect(again.kind).toBe('appActions');
       expect(again.tools).toHaveLength(GMAIL_LIKE().length);
@@ -202,9 +214,10 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
 
     it('reads the list again once it is a day old: new actions come, gone ones go, and a person’s own choice stays', async () => {
       let list = GMAIL_LIKE();
-      const { adapter, serverId } = await granted(() => list);
+      const { adapter, serverId, connectionId } = await granted(() => list);
       expect((await patch(serverId, await toolId(serverId, 'FETCH_EMAILS'), { setting: 'asksFirst' })).status).toBe(200);
-      list = [...list.filter((entry) => !entry.slug.endsWith('_LIST_LABELS')), action('ARCHIVE', ['updateHint'])];
+      expect((await patch(serverId, await toolId(serverId, 'DELETE_MESSAGE'), { setting: 'off' })).status).toBe(200);
+      list = [...list.filter((entry) => !entry.slug.endsWith('_LIST_LABELS') && !entry.slug.endsWith('_DELETE_MESSAGE')), action('ARCHIVE', ['updateHint'])];
       await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { refreshedAt: new Date(Date.now() - 25 * 60 * 60_000) } });
       await readServerTools(saraBrick, serverId);
       // The old list was used while the new one was read in the background
@@ -215,6 +228,12 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(names).toContain(`${U}_ARCHIVE`);
       expect(names).not.toContain(`${U}_LIST_LABELS`);
       expect(body.tools.find((tool) => tool.name === `${U}_FETCH_EMAILS`)?.setting).toBe('asksFirst');
+      // An action the list no longer has keeps the person's choice (it may come back): still Off
+      expect(body.tools.find((tool) => tool.name === `${U}_DELETE_MESSAGE`)).toMatchObject({ setting: 'off', heading: 'deletesOrSends' });
+      const judge = await actionJudgeFor(saraBrick, connectionId);
+      expect(judge!.judge(`${U}_DELETE_MESSAGE`).setting).toBe('off');
+      // Nothing new: the next reads change nothing and stay cheap
+      expect(await ensureAppActionTools(serverId)).toBe(false);
     });
 
     it('leaves a list as it was when the provider cannot be asked', async () => {
@@ -229,9 +248,34 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(await refreshAppActions(KEY)).toBe(false);
       expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(GMAIL_LIKE().length);
       expect((await readServerTools(saraBrick, serverId)).tools).toHaveLength(GMAIL_LIKE().length);
-      // And the next reader may try again at once
+      // The provider is not asked again on every read while the failure is waited out
       fail = false;
+      const calls = adapter.actions.mock.calls.length;
+      expect(await refreshAppActions(KEY)).toBe(false);
+      expect(adapter.actions.mock.calls.length).toBe(calls);
+      // Once waited out, the next reader reads it
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
       expect(await refreshAppActions(KEY)).toBe(true);
+    });
+
+    it('does not believe an empty or much shorter list: the actions and the choices made for them stay', async () => {
+      let list = Array.from({ length: 12 }, (_, i) => action(`LOOK_${i}`, ['readOnlyHint']));
+      const { serverId } = await granted(() => list);
+      list = [];
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { refreshedAt: null } });
+      expect(await refreshAppActions(KEY)).toBe(false);
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+      list = list.concat(action('LOOK_0', ['readOnlyHint']));
+      expect(await refreshAppActions(KEY)).toBe(false);
+      expect(await prisma.appAction.count({ where: { toolkit: KEY } })).toBe(12);
+      expect((await readServerTools(saraBrick, serverId)).tools).toHaveLength(12);
+    });
+
+    it('keeps an action the provider calls old, after the others', async () => {
+      const { serverId } = await granted(() => [{ ...action('OLD_FETCH', ['readOnlyHint']), deprecated: true }, ...GMAIL_LIKE()]);
+      const kept = await prisma.appAction.findMany({ where: { toolkit: KEY }, orderBy: { position: 'asc' }, select: { slug: true } });
+      expect(kept[kept.length - 1].slug).toBe(`${U}_OLD_FETCH`);
+      expect((await readServerTools(saraBrick, serverId)).tools.map((tool) => tool.name)).toContain(`${U}_OLD_FETCH`);
     });
   });
 
@@ -352,7 +396,7 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     it('takes Off actions out of what the App lists and looks up, and leaves the rest as it came', async () => {
       const { adapter, serverId } = await granted();
       await patch(serverId, await toolId(serverId, 'DELETE_MESSAGE'), { setting: 'off' });
-      const found = { results: [{ primary_tool_slugs: [`${U}_FETCH_EMAILS`, `${U}_DELETE_MESSAGE`] }], tool_schemas: { [`${U}_DELETE_MESSAGE`]: {}, [`${U}_SEND_EMAIL`]: {} } };
+      const found = { results: [{ primary_tool_slugs: [`${U}_FETCH_EMAILS`, `${U}_DELETE_MESSAGE`, `${U}_delete_message`.toLowerCase()] }], tool_schemas: { [`${U}_DELETE_MESSAGE`]: {}, [`${U}_SEND_EMAIL`]: {} } };
       adapter.callLink.mockImplementation(async ({ message }) => ({
         status: 200,
         contentType: 'application/json',
@@ -370,12 +414,34 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(listed.result.tools.map((tool: { name: string }) => tool.name)).not.toContain(`${U}_DELETE_MESSAGE`);
     });
 
+    it('judges a batch it cannot read, and any other tool of the link, as an action the list does not have', async () => {
+      const { adapter, serverId } = await granted();
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { deleteSendSetting: 'off' } });
+      const odd = [
+        { name: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: { tools: 'all of them' } },
+        { name: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: { tools: [{ slug: `${U}_FETCH_EMAILS` }] } },
+        { name: 'COMPOSIO_SOMETHING_NEW', arguments: {} },
+      ];
+      for (const params of odd) {
+        const answer = JSON.parse((await (await link(serverId, { jsonrpc: '2.0', id: 2, method: 'tools/call', params }, `call-${randomUUID()}`)).json()).body);
+        expect(answer.result.isError).toBe(true);
+        expect(answer.result.content[0].text).toContain('Nothing in this request was done.');
+      }
+      expect(adapter.callLink).not.toHaveBeenCalled();
+      // The link's search still runs: it runs no action
+      expect((await link(serverId, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_SEARCH_TOOLS', arguments: {} } }, `call-${randomUUID()}`)).status).toBe(200);
+      expect(adapter.callLink).toHaveBeenCalledTimes(1);
+    });
+
     it('refuses a single use of an action that is Off and asks nothing of the App', async () => {
       const { adapter, serverId } = await granted();
       await patch(serverId, await toolId(serverId, 'SEND_EMAIL'), { setting: 'off' });
       const used = await useApp(request('/api/ready-made/use', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, tool: `${U}_SEND_EMAIL`, arguments: {}, callId: `call-${randomUUID()}` } }));
       const body = await used.json();
       expect(JSON.stringify(body)).toContain('Send email is off for Nudge in Gmail');
+      // Nor does a single use ever reach the provider's own sandbox
+      const sandbox = await useApp(request('/api/ready-made/use', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, tool: 'COMPOSIO_REMOTE_WORKBENCH', arguments: {}, callId: `call-${randomUUID()}` } }));
+      expect(JSON.stringify(await sandbox.json())).toContain('does not run code itself');
       expect(adapter.use).not.toHaveBeenCalled();
       expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(0);
     });

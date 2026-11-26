@@ -1,5 +1,5 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
-import { ensureAppActionTools, isAppActionsConnection } from '@/lib/app-actions/grant';
+import { ensureAppActionTools, holdsAppActions } from '@/lib/app-actions/grant';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -196,6 +196,7 @@ const SERVER_SELECT = {
   policyRevision: true,
   toolsCut: true,
   toolsSeen: true,
+  appActionsVersion: true,
   connection: { select: { source: true, providerToolkit: true } },
 } as const;
 
@@ -217,7 +218,7 @@ const toToolJson = (row: ToolRow): ToolJson => ({
   setting: (row.setting as Setting | null) ?? null,
 });
 
-const kindOf = (server: Pick<ServerRow, 'connection'>): ServerKind => (isAppActionsConnection(server.connection) ? 'appActions' : 'tools');
+const kindOf = (server: Pick<ServerRow, 'connection' | 'appActionsVersion'>): ServerKind => (holdsAppActions(server) ? 'appActions' : 'tools');
 
 export function settingsOf(server: Pick<ServerRow, 'lookUpSetting' | 'makeSetting' | 'changeSetting' | 'deleteSendSetting'>): Record<Heading, Setting> {
   return {
@@ -260,13 +261,21 @@ async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: 
 
 const bump = { policyRevision: { increment: 1 } } as const;
 
+export interface ReadToolsOptions {
+  /**
+   * The reader knows App actions (the bot server's and the game's `?actions=1`): a ready-made App's grant is brought over to its
+   * actions here. A reader that does not ask keeps seeing the grant as it was until a reader that asks brought it over.
+   */
+  appActions?: boolean;
+}
+
 /** One server's tools, their settings and state. */
-export async function readServerTools(botId: string, serverId: string): Promise<ServerToolsJson> {
-  await loadServer(prisma, botId, serverId);
+export async function readServerTools(botId: string, serverId: string, options: ReadToolsOptions = {}): Promise<ServerToolsJson> {
+  const server = await loadServer(prisma, botId, serverId);
   // A key app's operations are its tools (game #2044): they are made to match its definition before they are read, so the gate never sees a stale list
   await ensureKeyAppTools(serverId);
-  // A ready-made App's actions are its rows: made to match the App's list before they are read, and a grant made before that is brought over here
-  await ensureAppActionTools(serverId);
+  // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
+  if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
   return describe(prisma, serverId);
 }
 

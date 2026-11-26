@@ -19,7 +19,7 @@ import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable, type OwnerNote } from '@/lib/app-share';
 import { revokeGitHub } from '@/lib/github/connection';
-import { ensureAppActionTools } from '@/lib/app-actions/grant';
+import { ensureAppActions } from '@/lib/app-actions/catalog';
 import { appCallIsPaused } from '@/lib/capability-pause';
 
 /**
@@ -442,11 +442,9 @@ export async function grantToBrick(ownerId: string, connectionId: string, botId:
     }
     throw error;
   }
-  // A ready-made App's actions become the grant's rows now, so the Brick's screen for it has them at once. Never a reason the grant fails:
-  // its first read brings them over otherwise
-  if (connection.source === 'ready_made') {
-    await ensureAppActionTools(grant.id).catch((error) => console.error('[Apps] Could not list an App’s actions for a new grant:', error instanceof Error ? error.message : 'unknown'));
-  }
+  // A ready-made App's list of actions is read now (in the background, never a reason the grant fails), so the grant's first read as
+  // actions (the bot server's or the Brick's screen, `?actions=1`) finds it there
+  if (connection.source === 'ready_made' && connection.providerToolkit) void ensureAppActions(connection.providerToolkit);
   return grant;
 }
 

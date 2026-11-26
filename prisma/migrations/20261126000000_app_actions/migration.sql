@@ -1,5 +1,6 @@
 -- What a ready-made App can do, sorted by Universe once per App (lib/app-actions), and an App action's own choice on a Brick's grant
 ALTER TABLE "bot_mcp_tools" ADD COLUMN "setting" VARCHAR(20);
+ALTER TABLE "bot_mcp_servers" ADD COLUMN "app_actions_version" INTEGER;
 
 CREATE TABLE "app_actions" (
     "id" TEXT NOT NULL,
@@ -26,6 +27,7 @@ CREATE TABLE "app_action_catalogs" (
     "refreshed_at" TIMESTAMP(3),
     "claimed_until" TIMESTAMP(3),
     "action_count" INTEGER NOT NULL DEFAULT 0,
+    "version" INTEGER NOT NULL DEFAULT 0,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "app_action_catalogs_pkey" PRIMARY KEY ("toolkit")

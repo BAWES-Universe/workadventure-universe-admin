@@ -351,6 +351,8 @@ export async function runReadyMade(input: { botId: string; connectionId: string;
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, name: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
+  // The provider's own sandbox is never reached, here as on the link (alone or inside a batch): nothing is counted
+  if (touchesSandbox(input.tool, input.arguments)) return { status: 'done', ok: false, data: { error: 'This App does not run code itself.' } };
   // An action that is Off for this Brick never runs, and nothing is counted
   const judge = await actionJudgeFor(input.botId, input.connectionId);
   if (judge) {

@@ -110,7 +110,8 @@ export function actionTitle(toolkit: string, slug: string): string {
 /** The provider's name never shows: taken out of any words shown to people, with the spaces tidied. */
 export function withoutProvider(text: string): string {
   return text
-    .replace(/\bcomposio\b(['’]s)?/gi, '')
+    .replace(/\b(?:https?:\/\/)?[\w.-]*composio[\w.-]*\.[a-z]{2,}(?:\/[^\s)]*)?/gi, '')
+    .replace(/\bcomposio(?:hq)?\b(['’]s)?/gi, '')
     .replace(/\(\s*\)/g, '')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\s+([.,;:])/g, '$1')

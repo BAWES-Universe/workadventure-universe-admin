@@ -17,6 +17,7 @@ jest.mock('@/lib/workbench/state', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { ensureAppActionTools } from '@/lib/app-actions/grant';
 import { saveMeterSettings } from '@/lib/meter';
 import { AdapterError } from '@/lib/app-adapter/types';
 import { readCodeJobsBudget } from '@/lib/workbench/budget';
@@ -190,6 +191,8 @@ run('code jobs for Apps, in a real database', () => {
     await prisma.appActionCatalog.create({ data: { toolkit: KEY, refreshedAt: new Date(), actionCount: 5 } });
     const serverRow = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Crm', serverUrl: 'https://mcp.example/unused', enabled: true } });
     serverId = serverRow.id;
+    // Brought over to the App's actions, as the first read of a bot server that knows them does
+    await ensureAppActionTools(serverId);
   });
 
   beforeEach(async () => {
