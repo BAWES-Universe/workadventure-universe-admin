@@ -554,10 +554,11 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     },
 
     /**
-     * GET /tools?toolkit_slug&limit&cursor -> { items: [{ slug, description, human_description, tags, version, is_deprecated }], next_cursor }
+     * GET /tools?toolkit_slug&toolkit_versions=latest&limit&cursor -> { items: [{ slug, description, human_description, tags, version, is_deprecated }], next_cursor }
      * (read live 26 Nov 2026: 1000 a page holds every action of the largest Apps; `tags` carries readOnlyHint, createHint, updateHint and
      * destructiveHint among free words). Listing costs nothing. A page that cannot be read fails the whole list, so a cut list is never
-     * taken for all of an App's actions.
+     * taken for all of an App's actions. Latest versions are asked for by name, as the single-action reads do, so each action is sorted
+     * and described from its newest version.
      */
     async actions(toolkit) {
       const found: ProviderAction[] = [];
@@ -565,7 +566,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       let cursor: string | null = null;
       const cursors = new Set<string>();
       for (let page = 0; page < ACTION_PAGES; page += 1) {
-        const query = `toolkit_slug=${encodeURIComponent(toolkit)}&limit=${ACTION_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const query = `toolkit_slug=${encodeURIComponent(toolkit)}&toolkit_versions=latest&limit=${ACTION_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
         const json = await call(`/tools?${query}`, null);
         if (!Array.isArray(json.items)) throw new AdapterError('provider', 'Provider sent no list of actions');
         for (const item of json.items as unknown[]) {
