@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import type { ExecOptions } from '@/lib/computer-provider';
 import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
-import { asciiJson } from '@/lib/computer-outside';
+import { asciiJson, LIST_SEND_PIECE } from '@/lib/computer-outside';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
@@ -1232,7 +1232,8 @@ describe('cold storage operations on a computer', () => {
         const names = w.execs.filter((entry) => !entry.command.startsWith('python3')).map((entry) => (entry.options as { name?: string }).name);
         expect(names.every((name) => typeof name === 'string' && name.startsWith('cold-install:'))).toBe(true);
         expect(new Set(names).size).toBe(names.length);
-        expect(w.execs.filter((entry) => entry.command.startsWith('umask 077'))).toHaveLength(1);
+        // One command for each piece of the script (the script is a few pieces of at most 48 KiB: each its own command, the first makes the file new)
+        expect(w.execs.filter((entry) => entry.command.startsWith('umask 077'))).toHaveLength(Math.ceil(Buffer.byteLength(UNIVERSE_COLD) / LIST_SEND_PIECE));
         // The failed first piece and the piece the new try starts with are the same first piece (offset zero: the file is made new), under two different names
         const firsts = asked.filter((entry) => entry.command.startsWith('umask 077 && mkdir -p'));
         expect(firsts).toHaveLength(2);

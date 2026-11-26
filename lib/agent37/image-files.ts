@@ -1271,9 +1271,25 @@ def home_stats():
                 pass
     return files, size
 
-def newer_than(info, reference):
-    # True when a file was written or changed after the reference time: its modification time or its change time (which a copy cannot set back)
-    return max(info.st_mtime, info.st_ctime) > reference
+# On a real computer the image is unpacked onto the disk when the computer is made, and every image file gets that moment as its change time (its modification time stays the image's own). The unpack
+# ends with the marker files: measured on a real Agent37 computer, every file of the image had a change time between 20 s before and 5.2 s after the marker's. So a file is "changed after the
+# image" when its modification time is later than the time the image was built (a file written or edited here), or its change time is later than the end of the unpack plus this margin (a file
+# copied or unpacked here with its old modification time kept: cp -p, tar x, rsync -a). A file so copied within this margin of the end of the unpack is not seen; nothing can act that early
+CTIME_MARGIN = 120
+
+def unpack_end():
+    # When the image was unpacked on this computer: the change time of the two files the image marks itself with. The earlier of the two, so that a later change of one of them moves nothing
+    times = []
+    for path in (BUILT, BASELINE):
+        try:
+            times.append(os.stat(real(path)).st_ctime)
+        except OSError:
+            pass
+    return min(times)
+
+def newer_than(info, built_at, unpacked_at):
+    # True when a file was written or changed after the image: see CTIME_MARGIN
+    return info.st_mtime > built_at or info.st_ctime > unpacked_at + CTIME_MARGIN
 
 def plain(path, folder):
     # None when nothing is there; True when it is what it should be (a real folder, or a real file); False for anything else, a link above all
@@ -1554,6 +1570,7 @@ def prepack():
         total = 0
         if os.path.exists(real(BUILT)):
             reference = os.stat(real(BUILT)).st_mtime
+            unpacked = unpack_end()
             for root in ROOTS:
                 for current, dirs, names in os.walk(real(root), followlinks=False):
                     if logical(current).startswith("/usr/local/share/universe"):
@@ -1568,9 +1585,9 @@ def prepack():
                             info = os.lstat(real(path))
                         except OSError:
                             continue
-                        # A file the image did not have: written or changed here after the image was built. Its change time too, because a file that was
-                        # copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
-                        if not newer_than(info, reference):
+                        # A file the image did not have: written or changed here after the image was built. Its change time too (later than the unpack of the image on this computer, with a
+                        # margin), because a file that was copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
+                        if not newer_than(info, reference, unpacked):
                             continue
                         if not utf8_ok(path):
                             blocked = "outside_name_not_utf8"

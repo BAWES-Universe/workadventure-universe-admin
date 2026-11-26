@@ -139,7 +139,7 @@ describe('restoring a copy on a computer', () => {
     }
   });
 
-  it('counts a file as outside the image when its change time is newer than the image, even if it kept an old modification time', () => {
+  it('counts a file as outside the image when its change time is later than the end of the unpack (plus the margin), even if it kept an old modification time', () => {
     // cp -p, tar x and rsync -a keep the old modification time; the change time is the day the file arrived
     const file = path.join(dir, 'kept-old-time');
     fs.writeFileSync(file, 'a tool unpacked into /opt');
@@ -156,7 +156,7 @@ describe('restoring a copy on a computer', () => {
           'module = importlib.util.module_from_spec(spec)',
           'loader.exec_module(module)',
           'info = os.lstat(sys.argv[2])',
-          'print(info.st_mtime < float(sys.argv[3]), module.newer_than(info, float(sys.argv[3])))',
+          'print(info.st_mtime < float(sys.argv[3]), module.newer_than(info, float(sys.argv[3]), float(sys.argv[3])))',
         ].join('\n'),
         path.join(scripts, 'universe-cold'),
         file,

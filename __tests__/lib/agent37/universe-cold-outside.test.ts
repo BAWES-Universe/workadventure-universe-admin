@@ -739,6 +739,63 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(stagedNames(path.join(w.fsB, 'opt/tool'))).toEqual([]);
   });
 
+  /** A computer made from the image the way a real one is: the image's files keep the image's old modification times, but every one of them has the time of the unpack as its change time (measured on a real Agent37 computer). */
+  function unpacked(w: World, count: number) {
+    const old = new Date('2019-06-01T00:00:00Z');
+    for (let i = 0; i < count; i++) {
+      const folder = ['etc', 'opt', 'usr/local/lib', 'root'][i % 4];
+      fs.mkdirSync(path.join(w.fsA, folder, 'image'), { recursive: true });
+      const file = path.join(w.fsA, folder, 'image', `file-${i}`);
+      fs.writeFileSync(file, `image ${i}`);
+      fs.utimesSync(file, old, old);
+      if (i % 5 === 0) {
+        const link = path.join(w.fsA, folder, 'image', `link-${i}`);
+        fs.symlinkSync(`file-${i}`, link);
+        fs.lutimesSync(link, old, old);
+      }
+    }
+    // The marker files are the last of the unpack (the same change time as the files, a moment later)
+    for (const name of ['built', 'manual-packages.txt']) {
+      const marker = path.join(w.fsA, 'usr/local/share/universe', name);
+      fs.writeFileSync(marker, name === 'built' ? 'built' : 'baseline1\n');
+      const date = new Date('2020-01-01T00:00:00Z');
+      fs.utimesSync(marker, date, date);
+    }
+  }
+
+  it('a real computer: every file of the image has the unpack time as its change time and the image\'s old modification time, and none of them is taken for something the agent added (found on a real Agent37 computer: 88,000 files counted as new)', () => {
+    const w = world();
+    unpacked(w, 400);
+    const done = cold(w, 'prepack', w.fsA);
+    const out = printed(done.stdout);
+    expect(out.blocked).toBeNull();
+    // Only what was written here: the three files of the test (their modification time is later than the image's)
+    expect(listOf(w, out).files.map((entry) => entry[1]).sort()).toEqual(['/etc/app.conf', '/opt/tool/latest', '/opt/tool/run.sh']);
+    expect(out.outside_files).toBe(3);
+  });
+
+  it('a file copied here with its old modification time kept (cp -p, tar x) is still found, by its change time: it is later than the end of the unpack by more than the margin', () => {
+    const w = world();
+    unpacked(w, 40);
+    // The margin is set to nothing here (a real computer waits 120 s, which a test cannot): what changes after the unpack ended is new, what was unpacked with it is not
+    const seen = (patch: string) => patched(w, w.fsA, 'prepack', patch);
+    fs.mkdirSync(path.join(w.fsA, 'opt/copied'), { recursive: true });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1300);
+    const probe = path.join(w.fsA, 'opt/copied/probe');
+    fs.writeFileSync(probe, 'copied with cp -p');
+    const old = new Date('2018-01-01T00:00:00Z');
+    fs.utimesSync(probe, old, old);
+    const withMargin = printed(seen('').stdout);
+    // With the real margin it is not seen yet (only the three files written with a new modification time)
+    expect(withMargin.outside_files).toBe(3);
+    const done = seen('mod.CTIME_MARGIN = 0');
+    const list = printed(done.stdout);
+    expect(list.blocked).toBeNull();
+    const names = listOf(w, list).files.map((entry) => entry[1]);
+    expect(names).toContain('/opt/copied/probe');
+    expect(names.filter((name) => name.includes('/image/'))).toEqual([]);
+  });
+
   it('a staging folder name that is already taken is never used or removed: another is tried', () => {
     const w = world();
     const manifest = packed(w);
