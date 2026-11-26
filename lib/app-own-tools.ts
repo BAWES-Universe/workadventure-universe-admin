@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOwnApp } from '@/lib/app-same';
 import { acceptSorterPick } from '@/lib/app-actions/sort';
+import { lockGrant } from '@/lib/app-actions/grant';
 import type { Heading } from '@/lib/mcp-tool-policy';
 
 /**
@@ -49,7 +50,7 @@ export async function universeSortsTools(serverId: string, db: Db = prisma): Pro
  * Sorts and confirms the tools of one grant when it is on the person's own App. Cheap when nothing is left to do. Returns true when a tool was
  * written (the policy revision went up with it, so a card or a remembered approval made before can be told apart).
  */
-export async function settleOwnAppTools(serverId: string, db?: Db): Promise<boolean> {
+export async function settleOwnAppTools(serverId: string, db?: Prisma.TransactionClient): Promise<boolean> {
   const work = async (tx: Db) => {
     if (!(await universeSortsTools(serverId, tx))) return null;
     const server = await tx.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: { legacyText: true } });
@@ -67,10 +68,10 @@ export async function settleOwnAppTools(serverId: string, db?: Db): Promise<bool
       return tool.confirmedAt && tool.heading === heading ? [] : [{ tool, heading }];
     });
   };
-  const run = async (tx: Db): Promise<boolean> => {
-    // One writer of a grant's tools at a time (the same lock the bot server's save of the list takes), so a read that settles and a save never
-    // lock the same rows in two orders
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp-tools:${serverId}`}, 0))`;
+  const run = async (tx: Prisma.TransactionClient): Promise<boolean> => {
+    // One writer of a grant's tools at a time: the grant is held first, as every other write of its tools does (lockGrant), so a read that
+    // settles and a save of the list never take the same rows in two orders. Held twice in one write (a save that settles) is one hold.
+    await lockGrant(tx, serverId);
     const todo = await work(tx);
     if (!todo || todo.length === 0) return false;
     const now = new Date();

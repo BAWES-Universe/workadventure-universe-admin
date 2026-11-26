@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import type { Heading, Setting } from '@/lib/mcp-tool-policy';
 import { ensureAppActions, noteUnknownAction } from '@/lib/app-actions/catalog';
-import { effectiveSetting, nameRule } from '@/lib/app-actions/sort';
+import { effectiveSetting, nameRule, stricterHeading } from '@/lib/app-actions/sort';
 
 /**
  * A Brick's grant of a ready-made App holds the App's actions as its tool rows (`BotMcpTool`), not the provider's four meta tools:
@@ -16,7 +16,7 @@ import { effectiveSetting, nameRule } from '@/lib/app-actions/sort';
  * brought over (`appActionsVersion` set), its heading settings stay, the meta tool rows go, and nothing a person chose for an action
  * is lost when the list is read again: a row with its own choice is kept even when the App's list no longer holds it.
  *
- * A grant holds the first 500 actions in the App's order (MAX_TOOLS_PER_SERVER); any other action is judged from the App's list and
+ * A grant holds the first 500 actions in the App's order (MAX_ACTION_ROWS); any other action is judged from the App's list and
  * its heading's setting, never refused for being missing.
  */
 
@@ -42,69 +42,107 @@ export const holdsAppActions = (server: { appActionsVersion: number | null; conn
 class StaleRows extends Error {}
 
 const TOOL_SELECT = { id: true, name: true, title: true, description: true, fingerprint: true, heading: true, suggestedHeading: true, suggestionSource: true, confirmedAt: true, movedById: true, confirmedById: true, setting: true } as const;
+type ToolRow = Prisma.BotMcpToolGetPayload<{ select: typeof TOOL_SELECT }>;
+
+const SETTING_ORDER: readonly Setting[] = ['rightAway', 'asksFirst', 'off'];
+/** The stricter of two choices for one action (Off over Asks first over Right away); none is no choice. */
+export function stricterSetting(a: Setting | null, b: Setting | null): Setting | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return SETTING_ORDER.indexOf(b) > SETTING_ORDER.indexOf(a) ? b : a;
+}
+
+/**
+ * Holds one grant (its row in `bot_mcp_servers`) until the transaction ends. Bringing a grant over to App actions, the bot server's
+ * list of tools and a person's change to a tool all take it first, so each sees the grant wholly before or wholly after another.
+ */
+export async function lockGrant(tx: Prisma.TransactionClient, serverId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS one FROM "bot_mcp_servers" WHERE "id" = ${serverId} FOR UPDATE`;
+}
+
+interface ListedAction {
+  slug: string;
+  title: string;
+  description: string | null;
+  heading: Heading;
+}
 
 /**
  * Brings a ready-made App's grant over to the App's actions, and keeps its rows matching the App's list. Cheap when the list did not
  * change since the last call (one small read). True when something changed. Does nothing (false) for a grant that is not a ready-made
- * App's, or while the App's list was never read (the grant keeps the rows it had). Two calls at once are safe: a row is written only
- * while it holds what was read, and the loser reads again.
+ * App's, or while the App's list was never read (the grant keeps the rows it had).
+ *
+ * One action is one row: names that differ only in case, dashes or spaces (`slugKey`) are the same action, in the App's list and on
+ * the grant. The row takes the name the App's list uses now, and when two rows were one action the strictest choice a person made
+ * for it stays (Off is never lost to a new spelling).
+ *
+ * `force` runs the sync even when the grant already follows the App's list: for a grant found holding two rows for one action.
+ *
+ * The grant is held for the whole write (`lockGrant`), and the App's list too (read under a share lock, so a read of the provider
+ * can't save between the rows, their count and the version stamped on the grant).
  */
-export async function ensureAppActionTools(serverId: string, attempt = 0): Promise<boolean> {
+export async function ensureAppActionTools(serverId: string, attempt = 0, force = false): Promise<boolean> {
   const head = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
   if (!head || !isAppActionsConnection(head.connection)) return false;
   const toolkit = head.connection.providerToolkit.toLowerCase();
   const catalog = await ensureAppActions(toolkit, attempt === 0 && head.appActionsVersion === null ? FIRST_READ_WAIT_MS : 0);
   // Never read (or Orbit could not check): the grant stays as it is, and the next read tries again
   if (!catalog?.refreshedAt) return false;
-  if (head.appActionsVersion === catalog.version) return false;
-
-  const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, legacyText: true, toolsCut: true, toolsSeen: true, tools: { select: TOOL_SELECT } } });
-  if (!server) return false;
-  const [actions, total] = await Promise.all([
-    prisma.appAction.findMany({ where: { toolkit }, select: { slug: true, title: true, description: true, heading: true }, orderBy: [{ position: 'asc' }, { slug: 'asc' }], take: MAX_ACTION_ROWS }),
-    prisma.appAction.count({ where: { toolkit } }),
-  ]);
-  // A row a person chose for stays a row even past the first 500: it is matched to the App's list when the list still has it
-  const chosen = server.tools.filter((tool) => tool.setting !== null && !actions.some((action) => action.slug === tool.name));
-  const chosenListed = chosen.length > 0 ? await prisma.appAction.findMany({ where: { toolkit, slug: { in: chosen.map((tool) => tool.name) } }, select: { slug: true, title: true, description: true, heading: true } }) : [];
-  const wanted = [...actions, ...chosenListed].map((action) => ({
-    name: action.slug,
-    title: action.title,
-    description: action.description,
-    heading: action.heading,
-    fingerprint: actionFingerprint(toolkit, action.slug),
-  }));
-  const byName = new Map(server.tools.map((tool) => [tool.name, tool]));
-  const matches = (entry: (typeof wanted)[number]) => {
-    const row = byName.get(entry.name);
-    return (
-      !!row &&
-      row.fingerprint === entry.fingerprint &&
-      row.title === entry.title &&
-      row.description === entry.description &&
-      row.heading === entry.heading &&
-      row.suggestedHeading === entry.heading &&
-      row.suggestionSource === 'builtIn' &&
-      !!row.confirmedAt &&
-      row.confirmedById === null &&
-      row.movedById === null
-    );
-  };
-  const names = new Set(wanted.map((entry) => entry.name));
-  // A row the App's list no longer holds goes, unless a person chose for it: that choice stays (the action may come back)
-  const gone = server.tools.filter((tool) => !names.has(tool.name) && tool.setting === null);
-  const cut = total > MAX_ACTION_ROWS;
-  const seen = cut ? total : null;
-  const rowsUpToDate = gone.length === 0 && wanted.every(matches);
+  if (!force && head.appActionsVersion === catalog.version) return false;
 
   try {
-    await prisma.$transaction(
+    return await prisma.$transaction(
       async (tx) => {
+        await lockGrant(tx, serverId);
+        const listLock = await tx.$queryRaw<{ version: number; refreshed: boolean }[]>`
+          SELECT "version", "refreshed_at" IS NOT NULL AS refreshed FROM "app_action_catalogs" WHERE "toolkit" = ${toolkit} FOR SHARE`;
+        const version = listLock[0]?.version;
+        if (version === undefined || !listLock[0].refreshed) return false;
+        const server = await tx.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, tools: { select: TOOL_SELECT } } });
+        // Gone, or brought up to this list by another call while this one waited for the grant
+        if (!server || (!force && server.appActionsVersion === version)) return false;
+
+        // The App's list, one entry per action: the first spelling in the App's order names it, and it goes under the strictest heading any spelling has
+        const order = await tx.appAction.findMany({ where: { toolkit }, select: { slug: true, heading: true }, orderBy: [{ position: 'asc' }, { slug: 'asc' }] });
+        const firstSlug = new Map<string, string>();
+        const headingOf = new Map<string, Heading>();
+        for (const row of order) {
+          const key = slugKey(row.slug);
+          if (!firstSlug.has(key)) firstSlug.set(key, row.slug);
+          const before = headingOf.get(key);
+          headingOf.set(key, before ? stricterHeading(before, row.heading as Heading) : (row.heading as Heading));
+        }
+        const keys = [...firstSlug.keys()];
+        const groups = new Map<string, ToolRow[]>();
+        for (const tool of server.tools) {
+          const key = slugKey(tool.name);
+          groups.set(key, [...(groups.get(key) ?? []), tool]);
+        }
+        // The first 500, and past them any action a person chose for (its choice stays a row)
+        const held = keys.slice(0, MAX_ACTION_ROWS);
+        const chosenPast = keys.slice(MAX_ACTION_ROWS).filter((key) => groups.get(key)?.some((tool) => tool.setting !== null));
+        const wantedKeys = [...held, ...chosenPast];
+        const details = await tx.appAction.findMany({ where: { toolkit, slug: { in: wantedKeys.map((key) => firstSlug.get(key)!) } }, select: { slug: true, title: true, description: true } });
+        const detailOf = new Map(details.map((row) => [row.slug, row]));
+        const wanted: (ListedAction & { key: string; fingerprint: string })[] = wantedKeys.map((key) => {
+          const slug = firstSlug.get(key)!;
+          const detail = detailOf.get(slug);
+          return { key, slug, title: detail?.title ?? slug, description: detail?.description ?? null, heading: headingOf.get(key)!, fingerprint: actionFingerprint(toolkit, slug) };
+        });
+
         const now = new Date();
         const fresh: Prisma.BotMcpToolCreateManyInput[] = [];
+        const drop: string[] = [];
+        let rowsUpToDate = true;
+        const wantedSet = new Set(wantedKeys);
         for (const entry of wanted) {
-          if (matches(entry)) continue;
+          const rows = groups.get(entry.key) ?? [];
+          // The row that stays: the one already named as the App names it now, else the one with the strictest choice
+          const keeper = rows.find((tool) => tool.name === entry.slug) ?? rows.reduce<ToolRow | undefined>((best, tool) => (!best || stricterSetting(best.setting as Setting | null, tool.setting as Setting | null) !== best.setting ? tool : best), undefined);
+          const setting = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
+            name: entry.slug,
             fingerprint: entry.fingerprint,
             title: entry.title,
             description: entry.description,
@@ -114,36 +152,70 @@ export async function ensureAppActionTools(serverId: string, attempt = 0): Promi
             movedById: null,
             confirmedById: null,
           };
-          const before = byName.get(entry.name);
-          if (!before) {
-            fresh.push({ serverId, name: entry.name, ...data, confirmedAt: now });
-          } else {
-            // The person's own choice (`setting`) is never touched here: only what Universe says the action is
-            const written = await tx.botMcpTool.updateMany({
-              where: { id: before.id, fingerprint: before.fingerprint, heading: before.heading, confirmedAt: before.confirmedAt },
-              data: { ...data, confirmedAt: before.confirmedAt ?? now },
-            });
-            if (written.count !== 1) throw new StaleRows();
+          if (!keeper) {
+            fresh.push({ serverId, ...data, confirmedAt: now });
+            rowsUpToDate = false;
+            continue;
           }
+          const same =
+            rows.length === 1 &&
+            keeper.name === data.name &&
+            keeper.fingerprint === data.fingerprint &&
+            keeper.title === data.title &&
+            keeper.description === data.description &&
+            keeper.heading === data.heading &&
+            keeper.suggestedHeading === data.suggestedHeading &&
+            keeper.suggestionSource === data.suggestionSource &&
+            !!keeper.confirmedAt &&
+            keeper.confirmedById === null &&
+            keeper.movedById === null;
+          if (same) continue;
+          rowsUpToDate = false;
+          // Only what Universe says the action is, its name as the App spells it now, and the person's strictest choice for it
+          const written = await tx.botMcpTool.updateMany({
+            where: { id: keeper.id, fingerprint: keeper.fingerprint, heading: keeper.heading, confirmedAt: keeper.confirmedAt },
+            data: { ...data, setting, confirmedAt: keeper.confirmedAt ?? now },
+          });
+          if (written.count !== 1) throw new StaleRows();
         }
-        // One statement for every new row (a first read makes up to 500): another call that made one of them first fails it, and this call reads again
+        // An action the App's list no longer holds goes, unless a person chose for it: that choice stays (the action may come back), one row for it
+        for (const [key, rows] of groups) {
+          if (wantedSet.has(key)) continue;
+          const chosen = rows.filter((tool) => tool.setting !== null);
+          if (chosen.length === 0) {
+            drop.push(...rows.map((tool) => tool.id));
+            continue;
+          }
+          const setting = chosen.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          const keeper = chosen.find((tool) => tool.setting === setting)!;
+          const others = rows.filter((tool) => tool !== keeper);
+          drop.push(...others.map((tool) => tool.id));
+        }
+        if (drop.length > 0) {
+          rowsUpToDate = false;
+          await tx.botMcpTool.deleteMany({ where: { id: { in: drop } } });
+        }
+        // One statement for every new row (a first read makes up to 500)
         if (fresh.length > 0) await tx.botMcpTool.createMany({ data: fresh });
-        if (gone.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: gone.map((tool) => tool.id) }, setting: null } });
+        const cut = keys.length > MAX_ACTION_ROWS;
         const marked = await tx.botMcpServer.updateMany({
           where: { id: serverId, appActionsVersion: server.appActionsVersion },
-          data: { legacyText: false, toolsCut: cut, toolsSeen: seen, appActionsVersion: catalog.version, ...(rowsUpToDate ? {} : { policyRevision: { increment: 1 } }) },
+          data: { legacyText: false, toolsCut: cut, toolsSeen: cut ? keys.length : null, appActionsVersion: version, ...(rowsUpToDate ? {} : { policyRevision: { increment: 1 } }) },
         });
         if (marked.count !== 1) throw new StaleRows();
-        // Up to 500 rows written in one go, on a busy database: more time than the default five seconds
+        return !rowsUpToDate || server.appActionsVersion === null;
       },
+      // Up to 500 rows written in one go, on a busy database: more time than the default five seconds
       { maxWait: 15_000, timeout: 60_000 },
     );
   } catch (error) {
-    if (attempt < 3 && (error instanceof StaleRows || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'))) return ensureAppActionTools(serverId, attempt + 1);
+    if (attempt < 3 && (error instanceof StaleRows || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'))) return ensureAppActionTools(serverId, attempt + 1, force);
     throw error;
   }
-  return !rowsUpToDate || server.appActionsVersion === null;
 }
+
+/** Whether a grant holds two rows for one action (names that differ only in case, dashes or spaces). */
+export const hasDuplicateActions = (tools: readonly { name: string }[]): boolean => new Set(tools.map((tool) => slugKey(tool.name))).size !== tools.length;
 
 /* ------------------------------ judging an action ------------------------------ */
 
@@ -174,11 +246,19 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
   const grant = await prisma.botMcpServer.findFirst({ where: { botId, connectionId }, select: { id: true, appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
   if (!grant || !holdsAppActions(grant)) return null;
   await ensureAppActionTools(grant.id);
-  const server = await prisma.botMcpServer.findUnique({
-    where: { id: grant.id },
-    select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
-  });
+  const load = () =>
+    prisma.botMcpServer.findUnique({
+      where: { id: grant.id },
+      select: { ...SETTINGS_SELECT, toolsCut: true, tools: { select: { name: true, title: true, heading: true, setting: true } } },
+    });
+  let server = await load();
   if (!server) return null;
+  // Two rows for one action (never made by the sync; only data from before it): they are made one now, even with nothing new in the App's list
+  if (hasDuplicateActions(server.tools)) {
+    await ensureAppActionTools(grant.id, 0, true);
+    server = await load();
+    if (!server) return null;
+  }
   const toolkit = grant.connection!.providerToolkit!.toLowerCase();
   const settings: Record<Heading, Setting> = {
     looksUp: server.lookUpSetting as Setting,
@@ -186,11 +266,26 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     changesThings: server.changeSetting as Setting,
     deletesOrSends: server.deleteSendSetting as Setting,
   };
-  const rows = new Map(server.tools.map((tool) => [slugKey(tool.name), tool]));
+  // One action per name however it is spelled (case, dashes, spaces): when two rows or two entries of the list are the same action
+  // (a sync that has not run yet), the strictest of them judges it, so a person's Off is never lost to another spelling
+  const rows = new Map<string, { title: string; heading: Heading; setting: Setting }>();
+  for (const tool of server.tools) {
+    if (!tool.heading) continue;
+    const heading = tool.heading as Heading;
+    const verdict = { title: tool.title ?? tool.name, heading, setting: effectiveSetting(tool.setting as Setting | null, heading, settings) };
+    const key = slugKey(tool.name);
+    const before = rows.get(key);
+    rows.set(key, before ? { title: before.title, heading: stricterHeading(before.heading, heading), setting: stricterSetting(before.setting, verdict.setting)! } : verdict);
+  }
   // Past the rows: the App's own list, read only when the grant holds part of it
-  const listed = server.toolsCut
-    ? new Map((await prisma.appAction.findMany({ where: { toolkit }, select: { slug: true, title: true, heading: true } })).map((row) => [slugKey(row.slug), row]))
-    : new Map<string, { slug: string; title: string; heading: string }>();
+  const listed = new Map<string, { title: string; heading: Heading }>();
+  if (server.toolsCut) {
+    for (const row of await prisma.appAction.findMany({ where: { toolkit }, select: { slug: true, title: true, heading: true }, orderBy: [{ position: 'asc' }, { slug: 'asc' }] })) {
+      const key = slugKey(row.slug);
+      const before = listed.get(key);
+      listed.set(key, before ? { title: before.title, heading: stricterHeading(before.heading, row.heading as Heading) } : { title: row.title, heading: row.heading as Heading });
+    }
+  }
   let noted = false;
   return {
     toolkit,
@@ -201,15 +296,9 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     judge(slug: string): ActionVerdict {
       const key = slugKey(slug);
       const row = rows.get(key);
-      if (row?.heading) {
-        const heading = row.heading as Heading;
-        return { slug, title: row.title ?? slug, heading, setting: effectiveSetting(row.setting as Setting | null, heading, settings) };
-      }
+      if (row) return { slug, ...row };
       const known = listed.get(key);
-      if (known) {
-        const heading = known.heading as Heading;
-        return { slug, title: known.title, heading, setting: settings[heading] };
-      }
+      if (known) return { slug, title: known.title, heading: known.heading, setting: settings[known.heading] };
       if (!noted) {
         noted = true;
         void noteUnknownAction(toolkit);

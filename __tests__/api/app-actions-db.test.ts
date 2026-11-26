@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import type { Prisma } from '@prisma/client';
 
 const mockUser: { current: { id: string; email?: string | null } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
@@ -17,8 +18,8 @@ import { createConnection, grantToBrick } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 import { readServerTools, syncCatalog } from '@/lib/mcp-tool-policy';
-import { ensureAppActionTools, actionJudgeFor, actionFingerprint } from '@/lib/app-actions/grant';
-import { ensureAppActions, refreshAppActions, SHRINK_BELIEVED_AFTER_MS } from '@/lib/app-actions/catalog';
+import { ensureAppActionTools, actionJudgeFor, actionFingerprint, lockGrant } from '@/lib/app-actions/grant';
+import { ensureAppActions, refreshAppActions, saveSorterPicks, unsortedActions, SHRINK_BELIEVED_AFTER_MS } from '@/lib/app-actions/catalog';
 import { GET as getTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { PATCH as patchTool } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/[toolId]/route';
 import { POST as confirmTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/confirm/route';
@@ -56,6 +57,15 @@ let omar = '';
 let boss = '';
 let saraBrick = '';
 const envBefore = { service: process.env.BOT_SERVICE_TOKEN, key: process.env.ENCRYPTION_KEY };
+// Settings shared with the rest of the database: put back as they were, never deleted whole
+// 'meter' is the key lib/meter.ts keeps its ceilings under
+const SHARED_SETTINGS = ['ready-made-apps', 'meter'];
+let settingsBefore: { key: string; value: Prisma.InputJsonValue; updatedById: string | null }[] = [];
+const restoreSettings = async (keys: readonly string[]) => {
+  await prisma.appSetting.deleteMany({ where: { key: { in: [...keys] } } });
+  const kept = settingsBefore.filter((row) => keys.includes(row.key));
+  if (kept.length > 0) await prisma.appSetting.createMany({ data: kept });
+};
 
 function fake(list: () => ProviderAction[] = GMAIL_LIKE) {
   const adapter = {
@@ -73,6 +83,7 @@ function fake(list: () => ProviderAction[] = GMAIL_LIKE) {
 
 run('a ready-made App’s actions on a Brick, in a real database', () => {
   beforeAll(async () => {
+    settingsBefore = (await prisma.appSetting.findMany({ where: { key: { in: SHARED_SETTINGS } } })).map((row) => ({ key: row.key, value: row.value as Prisma.InputJsonValue, updatedById: row.updatedById }));
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
     const person = (name: string, email?: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: email ?? `${name}-${tag}@example.test`, name } });
@@ -92,13 +103,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appAction.deleteMany({ where: { toolkit: KEY } });
     await prisma.appActionCatalog.deleteMany({ where: { toolkit: KEY } });
-    await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
+    await restoreSettings(['ready-made-apps']);
   });
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
     else process.env.BOT_SERVICE_TOKEN = envBefore.service;
     if (envBefore.key === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = envBefore.key;
+    await restoreSettings(SHARED_SETTINGS);
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, boss] } } });
     await prisma.$disconnect();
   });
@@ -133,6 +145,10 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
     asSara() &&
     patchTool(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/tools/${id}`, { method: 'PATCH', body }), params({ id: saraBrick, serverId, toolId: id }));
 
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const catalogRow = () => prisma.appActionCatalog.findUniqueOrThrow({ where: { toolkit: KEY } });
+
   describe('the App’s list and a Brick’s grant', () => {
     it('makes the grant’s rows the App’s actions when it is granted: sorted, confirmed by Universe, under today’s defaults', async () => {
       const { adapter, serverId } = await granted();
@@ -156,16 +172,20 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       const adapter = fake();
       setAdapterForTests(adapter);
       // This process loses the claim to another reader, which holds it and reads the list a moment later
-      let other: Promise<boolean> | undefined;
+      // Kept from the moment it is scheduled, so the test always waits for it, however the read below ends
+      let other: Promise<boolean> = Promise.resolve(false);
       const spy = jest
         .spyOn(prisma.appActionCatalog, 'updateMany')
         .mockImplementationOnce((async () => {
           await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: new Date(Date.now() + 120_000) } });
-          setTimeout(() => (other = refreshAppActions(KEY)), 300);
+          other = new Promise((resolve) => setTimeout(resolve, 300)).then(() => refreshAppActions(KEY));
           return { count: 0 };
         }) as never)
-        // The other reader's own claim: it already holds it
-        .mockImplementationOnce((async () => ({ count: 1 })) as never);
+        // The other reader's own claim, taken as its earlier one runs out
+        .mockImplementationOnce((async (args: { data: { claimedUntil: Date } }) => {
+          await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: args.data.claimedUntil } });
+          return { count: 1 };
+        }) as never);
       try {
         const state = await ensureAppActions(KEY, 3_000);
         expect(state?.refreshedAt).toBeInstanceOf(Date);
@@ -174,6 +194,80 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
         await other;
         spy.mockRestore();
       }
+    });
+
+    it('writes nothing from a read that outlived its claim, and never clears the claim of the reader that took it over', async () => {
+      const { adapter } = await granted();
+      const before = await catalogRow();
+      const later = new Date(Date.now() + 10 * 60_000);
+      // Another reader takes the list while this one is still asking the provider (its claim ran out)
+      const takeOver = () => prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: later } });
+      adapter.actions.mockImplementationOnce(async () => {
+        await takeOver();
+        return [action('ONLY_NEW', ['readOnlyHint']), ...GMAIL_LIKE()];
+      });
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { refreshedAt: new Date(Date.now() - 25 * 60 * 60_000) } });
+      expect(await refreshAppActions(KEY)).toBe(false);
+      expect(await prisma.appAction.count({ where: { toolkit: KEY, slug: `${U}_ONLY_NEW` } })).toBe(0);
+      const after = await catalogRow();
+      expect(after).toMatchObject({ claimedUntil: later, version: before.version, retryAfter: null });
+      expect(Date.now() - after.refreshedAt!.getTime()).toBeGreaterThan(24 * 60 * 60_000);
+      // A read that fails the same way sets no wait and leaves the other reader's claim
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+      adapter.actions.mockImplementationOnce(async () => {
+        await takeOver();
+        throw new Error('down');
+      });
+      expect(await refreshAppActions(KEY)).toBe(false);
+      expect(await catalogRow()).toMatchObject({ claimedUntil: later, retryAfter: null });
+      // A claim that ran out with nobody taking it over (the read took longer than the claim): that read writes nothing either, list or wait
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+      // Only the clock moves (no timers are faked): the claim stays exactly as this reader set it
+      jest.useFakeTimers({ now: Date.now(), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] });
+      try {
+        const runOut = () => jest.setSystemTime(Date.now() + 7 * 60_000);
+        adapter.actions.mockImplementationOnce(async () => {
+          runOut();
+          return [action('ONLY_NEW', ['readOnlyHint']), ...GMAIL_LIKE()];
+        });
+        expect(await refreshAppActions(KEY)).toBe(false);
+        expect(await prisma.appAction.count({ where: { toolkit: KEY, slug: `${U}_ONLY_NEW` } })).toBe(0);
+        expect((await catalogRow()).version).toBe(before.version);
+        await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+        adapter.actions.mockImplementationOnce(async () => {
+          runOut();
+          throw new Error('down');
+        });
+        expect(await refreshAppActions(KEY)).toBe(false);
+        expect((await catalogRow()).retryAfter).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('stamps a grant with the list its rows came from, never with one a read saves in between', async () => {
+      const { serverId } = await granted();
+      // The grant is one version behind, and a read of the provider is saving a new action at this very moment
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const saving = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "app_action_catalogs" WHERE "toolkit" = ${KEY} FOR UPDATE`;
+          await tx.appAction.create({ data: { toolkit: KEY, slug: `${U}_JUST_LISTED`, title: 'Just listed', heading: 'looksUp', source: 'tags', position: 99 } });
+          await tx.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
+          locked();
+          await sleep(400);
+        },
+        { timeout: 10_000 },
+      );
+      await isLocked;
+      const synced = ensureAppActionTools(serverId);
+      await saving;
+      await synced;
+      const server = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: { appActionsVersion: true, tools: { select: { name: true } } } });
+      expect(server.appActionsVersion).toBe((await catalogRow()).version);
+      expect(server.tools.map((tool) => tool.name)).toContain(`${U}_JUST_LISTED`);
     });
 
     it('does not wait on a first read when nobody reads the list (no App provider set up)', async () => {
@@ -361,6 +455,113 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect((await patch(serverId, 'nope', { setting: 'off' })).status).toBe(404);
     });
 
+    it('lets the bot server’s list wait while the grant is being brought over, and reads a grant’s kind and rows from one moment', async () => {
+      const adapter = fake();
+      setAdapterForTests(adapter);
+      const connectionId = await readyMadeConnection();
+      const old = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Gmail', serverUrl: '', authType: 'none' } });
+      // The bot server sends the list the grant already has: nothing on the grant's row would change, so only holding the grant makes it wait
+      await prisma.botMcpTool.create({ data: { serverId: old.id, name: 'COMPOSIO_SEARCH_TOOLS', fingerprint: 'f', suggestedHeading: 'looksUp', suggestionSource: 'server' } });
+      let release!: () => void;
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const holding = prisma.$transaction(
+        async (tx) => {
+          await lockGrant(tx, old.id);
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 10_000 },
+      );
+      await isLocked;
+      let done = false;
+      const put = syncCatalog(saraBrick, old.id, { tools: [{ name: 'COMPOSIO_SEARCH_TOOLS', fingerprint: 'f', suggestedHeading: 'looksUp', suggestionSource: 'server' }] }).then((result) => {
+        done = true;
+        return result;
+      });
+      try {
+        await sleep(300);
+        expect(done).toBe(false);
+      } finally {
+        release();
+        await holding;
+        await put;
+      }
+      // Both at once end the same way whichever goes first: the App's actions, and nothing of the link's meta tools
+      await Promise.all([
+        syncCatalog(saraBrick, old.id, { tools: [{ name: 'COMPOSIO_MULTI_EXECUTE_TOOL', fingerprint: 'g', suggestedHeading: 'looksUp', suggestionSource: 'server' }] }),
+        readServerTools(saraBrick, old.id, { appActions: true }),
+      ]);
+      await readServerTools(saraBrick, old.id, { appActions: true });
+      const spy = jest.spyOn(prisma, '$transaction');
+      try {
+        const body = await readServerTools(saraBrick, old.id);
+        expect(body.kind).toBe('appActions');
+        expect(body.tools.some((tool) => tool.name.startsWith('COMPOSIO_'))).toBe(false);
+        expect(spy).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('never brings a grant over from a choice: a refused one leaves the grant exactly as it was', async () => {
+      const adapter = fake();
+      setAdapterForTests(adapter);
+      const connectionId = await readyMadeConnection();
+      const old = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Gmail', serverUrl: '', authType: 'none' } });
+      const meta = await prisma.botMcpTool.create({ data: { serverId: old.id, name: 'COMPOSIO_MULTI_EXECUTE_TOOL', fingerprint: 'f2', heading: 'looksUp', confirmedAt: new Date() } });
+      expect(await refreshAppActions(KEY)).toBe(true);
+      expect((await patch(old.id, 'nope', { setting: 'off' })).status).toBe(409);
+      expect((await patch(old.id, meta.id, { setting: 'off' })).status).toBe(409);
+      const after = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: old.id }, select: { appActionsVersion: true, policyRevision: true, tools: { select: { name: true, setting: true } } } });
+      expect(after).toMatchObject({ appActionsVersion: null, policyRevision: old.policyRevision, tools: [{ name: 'COMPOSIO_MULTI_EXECUTE_TOOL', setting: null }] });
+    });
+
+    it('keeps a person’s choice when the App spells an action another way: one row, under the new spelling', async () => {
+      let list = GMAIL_LIKE();
+      const { serverId, connectionId } = await granted(() => list);
+      expect((await patch(serverId, await toolId(serverId, 'DELETE_MESSAGE'), { setting: 'off' })).status).toBe(200);
+      list = list.map((entry) => (entry.slug === `${U}_DELETE_MESSAGE` ? { ...entry, slug: `${U}_DELETE-MESSAGE` } : entry));
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { refreshedAt: null } });
+      expect(await refreshAppActions(KEY)).toBe(true);
+      const rows = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.replace('-', '_') === `${U}_DELETE_MESSAGE`);
+      expect(rows).toEqual([expect.objectContaining({ name: `${U}_DELETE-MESSAGE`, setting: 'off', heading: 'deletesOrSends' })]);
+      const judge = await actionJudgeFor(saraBrick, connectionId);
+      expect(judge!.judge(`${U}_DELETE-MESSAGE`).setting).toBe('off');
+      expect(judge!.judge(`${U}_delete_message`.toLowerCase()).setting).toBe('off');
+    });
+
+    it('takes an action the App lists under two spellings as one, and two rows for one action never lose the stricter choice', async () => {
+      const { serverId, connectionId } = await granted(() => [...GMAIL_LIKE(), { ...action('DELETE_MESSAGE', ['readOnlyHint']), slug: `${U}_DELETE-MESSAGE` }]);
+      const rows = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.replace('-', '_') === `${U}_DELETE_MESSAGE`);
+      // The first spelling in the App's order names it, under the stricter heading of the two
+      expect(rows).toEqual([expect.objectContaining({ name: `${U}_DELETE_MESSAGE`, heading: 'deletesOrSends' })]);
+      // A second row for the same action (made before this was one row): the person's Off is on it, not on the row the App's spelling names
+      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_delete-message`, fingerprint: 'x', heading: 'looksUp', suggestedHeading: 'looksUp', suggestionSource: 'builtIn', confirmedAt: new Date(), setting: 'off' } });
+      const versionNow = (await catalogRow()).version;
+      const rowsOf = async (key: string) =>
+        (await prisma.botMcpTool.findMany({ where: { serverId }, select: { name: true, setting: true } })).filter((tool) => tool.name.toUpperCase().replace(/-/g, '_') === key);
+      // Judged at once by the strictest of the two, and made one row with the person's Off, with nothing new in the App's list
+      const judge = await actionJudgeFor(saraBrick, connectionId);
+      for (const spelling of [`${U}_DELETE_MESSAGE`, `${U}_DELETE-MESSAGE`, `${U}_delete-message`]) expect(judge!.judge(spelling).setting).toBe('off');
+      expect(await rowsOf(`${U}_DELETE_MESSAGE`)).toEqual([{ name: `${U}_DELETE_MESSAGE`, setting: 'off' }]);
+      // The same for an action the App's list no longer has, found when the Brick's tools are read: one row, the stricter choice kept
+      await prisma.botMcpTool.createMany({
+        data: [
+          { serverId, name: `${U}_GONE_ONE`, fingerprint: 'g1', heading: 'looksUp', confirmedAt: new Date(), setting: 'rightAway' },
+          { serverId, name: `${U}_gone-one`, fingerprint: 'g2', heading: 'looksUp', confirmedAt: new Date(), setting: 'off' },
+        ],
+      });
+      const gone = (await readServerTools(saraBrick, serverId)).tools.filter((tool) => tool.name.toUpperCase().replace('-', '_') === `${U}_GONE_ONE`);
+      expect(gone).toEqual([expect.objectContaining({ setting: 'off' })]);
+      expect((await catalogRow()).version).toBe(versionNow);
+      // And when the App's list changes, the sync does the same
+      await prisma.botMcpTool.create({ data: { serverId, name: `${U}_fetch-emails`, fingerprint: 'f9', heading: 'looksUp', confirmedAt: new Date(), setting: 'asksFirst' } });
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { version: { increment: 1 } } });
+      expect(await ensureAppActionTools(serverId)).toBe(true);
+      expect(await rowsOf(`${U}_FETCH_EMAILS`)).toEqual([{ name: `${U}_FETCH_EMAILS`, setting: 'asksFirst' }]);
+    });
+
     it('never moves an App’s action to another heading, and has nothing to confirm', async () => {
       const { serverId } = await granted();
       const send = await toolId(serverId, 'SEND_EMAIL');
@@ -426,6 +627,65 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       await refreshAppActions(KEY);
       expect((await prisma.appAction.findFirstOrThrow({ where: { toolkit: KEY, slug: `${U}_MYSTERY` } })).heading).toBe('looksUp');
       expect((await putUnsorted(request('/x', { method: 'PUT', token: SERVICE_TOKEN, body: { actions: [{ toolkit: KEY, slug: 'x', heading: 'maybe' }] } }))).status).toBe(400);
+    });
+
+    it('hands out unsorted actions without waiting on a sorter answer being saved for some of them', async () => {
+      await granted(() => [...GMAIL_LIKE(), action('MAKE_THING', [])]);
+      let release!: () => void;
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      // The sorter's answer for MYSTERY is being saved right now
+      const saving = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "app_actions" WHERE "toolkit" = ${KEY} AND "slug" = ${`${U}_MYSTERY`} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 10_000 },
+      );
+      await isLocked;
+      const timer = setTimeout(() => release(), 2_000);
+      try {
+        const started = Date.now();
+        const handed = (await unsortedActions(60)).filter((entry) => entry.toolkit === KEY).map((entry) => entry.slug);
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(handed).toEqual([`${U}_MAKE_THING`]);
+      } finally {
+        clearTimeout(timer);
+        release();
+        await saving;
+      }
+    });
+
+    it('saves the sorter’s picks together with the version that makes grants follow them, or neither', async () => {
+      await granted();
+      const version = (await catalogRow()).version;
+      const real = prisma.$transaction.bind(prisma) as (fn: (tx: object) => Promise<unknown>, options?: object) => Promise<unknown>;
+      // The version cannot be written this time
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: (tx: object) => Promise<unknown>, options?: object) =>
+        real(
+          (tx) =>
+            fn(
+              new Proxy(tx, {
+                get: (target, key) => {
+                  if (key === 'appActionCatalog') return { updateMany: async () => Promise.reject(new Error('down')) };
+                  const value = Reflect.get(target, key);
+                  return typeof value === 'function' ? value.bind(target) : value;
+                },
+              }),
+            ),
+          options,
+        )) as never);
+      try {
+        await expect(saveSorterPicks([{ toolkit: KEY, slug: `${U}_MYSTERY`, heading: 'looksUp' }])).rejects.toThrow('down');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.appAction.findFirstOrThrow({ where: { toolkit: KEY, slug: `${U}_MYSTERY` } })).toMatchObject({ source: 'fallback', heading: 'deletesOrSends' });
+      expect((await catalogRow()).version).toBe(version);
+      // Asked again, the pick lands with its version
+      expect(await saveSorterPicks([{ toolkit: KEY, slug: `${U}_MYSTERY`, heading: 'looksUp' }])).toBe(1);
+      expect((await catalogRow()).version).toBe(version + 1);
     });
   });
 

@@ -15,8 +15,12 @@ import { acceptSorterPick, actionTitle, sortAction, withoutProvider } from '@/li
 export const CATALOG_MAX_AGE_MS = 24 * 60 * 60_000;
 /** An action the list does not have makes it be read again, at most this often. */
 export const UNKNOWN_SLUG_RETRY_MS = 10 * 60_000;
-/** How long a reader holds an App's list before another may read it. */
-const CLAIM_MS = 2 * 60_000;
+/**
+ * How long a reader holds an App's list before another may read it. Longer than the longest read of the provider (10 pages of at
+ * most 30 seconds each, retries included), so a reader that is still working never loses its claim; a reader that died frees the
+ * list after this long. A read that ends after its claim ran out writes nothing.
+ */
+const CLAIM_MS = 6 * 60_000;
 /** After a read that failed, how long before the provider is asked again (every poll would ask it otherwise). */
 const RETRY_AFTER_FAILURE_MS = 5 * 60_000;
 /**
@@ -32,6 +36,9 @@ export const SHRINK_BELIEVED_READS = 3;
 const DESCRIPTION_MAX = 2000;
 
 const running = new Map<string, Promise<boolean>>();
+
+/** The reader's claim ran out and another reader took the App's list: what this one read is not written. */
+class ClaimLost extends Error {}
 
 /** Whether the list was read and saved now. False when another reader holds it, or the provider could not be asked (the list stays as it was). */
 export function refreshAppActions(toolkit: string): Promise<boolean> {
@@ -49,13 +56,19 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   const now = new Date();
   // Two readers making the App's row at the same moment: the one that loses finds it made
   await prisma.appActionCatalog.createMany({ data: [{ toolkit }], skipDuplicates: true });
+  // The claim's end is this reader's mark: a later claim always ends later (it is taken only once this one is over), so every write
+  // below that names it is made only while this reader still holds the list, and never over a newer reader's
+  const claim = new Date(now.getTime() + CLAIM_MS);
   const claimed = await prisma.appActionCatalog.updateMany({
     where: { toolkit, AND: [{ OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }] }, { OR: [{ retryAfter: null }, { retryAfter: { lt: now } }] }] },
-    data: { claimedUntil: new Date(now.getTime() + CLAIM_MS) },
+    data: { claimedUntil: claim },
   });
   if (claimed.count !== 1) return false;
+  // This reader's claim, as a filter: still this reader's (no one took it over) and not run out
+  const mine = () => ({ equals: claim, gt: new Date() });
   // After a failed read the provider is not asked again for a while (retry_after), so the next polls do not each ask it
-  const backOff = () => prisma.appActionCatalog.updateMany({ where: { toolkit }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
+  const backOff = () =>
+    prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
   let listed: ProviderAction[];
   try {
     listed = await adapter.actions(toolkit);
@@ -67,20 +80,27 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   const kept = await prisma.appAction.count({ where: { toolkit } });
   if (kept > 0 && (listed.length === 0 || (kept >= SHRINK_CHECK_FROM && listed.length < kept * SHRINK_LIMIT))) {
     // This read counts as one more in a row that gave the shorter list (the first one starts the clock)
-    const counted = await prisma.appActionCatalog.update({ where: { toolkit }, data: { shrunkReads: { increment: 1 } }, select: { shrunkSince: true, shrunkReads: true } }).catch(() => null);
+    const bumped = await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { shrunkReads: { increment: 1 } } }).catch(() => null);
+    // Another reader holds the list now: this read counts for nothing
+    if (bumped?.count === 0) return false;
+    const counted = bumped ? await prisma.appActionCatalog.findUnique({ where: { toolkit }, select: { shrunkSince: true, shrunkReads: true } }).catch(() => null) : null;
     const since = counted?.shrunkSince ?? null;
     if (!counted || !since || Date.now() - since.getTime() < SHRINK_BELIEVED_AFTER_MS || counted.shrunkReads < SHRINK_BELIEVED_READS) {
       console.error(`[AppActions] The provider listed ${listed.length} actions for an App that had ${kept}: the list is kept as it was for now`);
-      if (counted && !since) await prisma.appActionCatalog.updateMany({ where: { toolkit, shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
+      if (counted && !since) await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine(), shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
       await backOff();
       return false;
     }
     console.error(`[AppActions] The provider has listed ${listed.length} actions for an App that had ${kept}, on ${counted.shrunkReads} reads in a row since ${since.toISOString()}: the shorter list is taken`);
   }
   try {
-    await save(toolkit, listed);
+    await save(toolkit, listed, claim);
     return true;
   } catch (error) {
+    if (error instanceof ClaimLost) {
+      console.error('[AppActions] A read of an App’s actions ended after its claim ran out: nothing of it is written');
+      return false;
+    }
     Sentry.captureException(error, { tags: { area: 'app-actions' } });
     console.error('[AppActions] Could not save the actions of an App:', error instanceof Error ? error.message : 'unknown');
     await backOff();
@@ -88,9 +108,12 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   }
 }
 
-async function save(toolkit: string, listed: readonly ProviderAction[]): Promise<void> {
+async function save(toolkit: string, listed: readonly ProviderAction[], claim: Date): Promise<void> {
   await prisma.$transaction(
     async (tx) => {
+      // Only while this reader still holds the list: the row stays locked to the end, so no other reader can take it in between
+      const held = await tx.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: { equals: claim, gt: new Date() } }, data: { claimedUntil: claim } });
+      if (held.count !== 1) throw new ClaimLost();
       const before = await tx.appAction.findMany({ where: { toolkit }, select: { id: true, slug: true, title: true, description: true, heading: true, source: true, catalogVersion: true, position: true } });
       const bySlug = new Map(before.map((row) => [row.slug, row]));
       const fresh: { toolkit: string; slug: string; title: string; description: string | null; heading: string; source: string; catalogVersion: string | null; position: number }[] = [];
@@ -123,8 +146,8 @@ async function save(toolkit: string, listed: readonly ProviderAction[]): Promise
       const gone = before.filter((row) => !kept.has(row.slug)).map((row) => row.id);
       if (gone.length > 0) await tx.appAction.deleteMany({ where: { id: { in: gone } } });
       changed ||= fresh.length > 0 || gone.length > 0;
-      await tx.appActionCatalog.update({
-        where: { toolkit },
+      await tx.appActionCatalog.updateMany({
+        where: { toolkit, claimedUntil: claim },
         data: { refreshedAt: new Date(), claimedUntil: null, retryAfter: null, shrunkSince: null, shrunkReads: 0, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
       });
     },
@@ -205,15 +228,15 @@ export interface UnsortedAction {
 
 /** Actions nothing has sorted yet (no tag, no name rule): the bot server's small model sorts them, a batch at a time. */
 export async function unsortedActions(limit: number): Promise<UnsortedAction[]> {
-  const rows = await prisma.appAction.findMany({
-    where: { source: 'fallback' },
-    select: { id: true, toolkit: true, slug: true, title: true, description: true },
-    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
-    take: limit,
+  return prisma.$transaction(async (tx) => {
+    // Rows the sorter's answer is being saved on right now are passed over (SKIP LOCKED): this read never waits on that write, so the two never deadlock
+    const rows = await tx.$queryRaw<{ id: string; toolkit: string; slug: string; title: string; description: string | null }[]>`
+      SELECT "id", "toolkit", "slug", "title", "description" FROM "app_actions"
+      WHERE "source" = 'fallback' ORDER BY "updated_at" ASC, "id" ASC LIMIT ${limit} FOR UPDATE SKIP LOCKED`;
+    // Handed out: they go to the back of the line, so a batch the sorter never answers does not hold up the ones behind it
+    if (rows.length > 0) await tx.appAction.updateMany({ where: { id: { in: rows.map((row) => row.id) } }, data: { updatedAt: new Date() } });
+    return rows.map(({ id: _id, ...row }) => row);
   });
-  // Handed out: they go to the back of the line, so a batch the sorter never answers does not hold up the ones behind it
-  if (rows.length > 0) await prisma.appAction.updateMany({ where: { id: { in: rows.map((row) => row.id) } }, data: { updatedAt: new Date() } });
-  return rows.map(({ id: _id, ...row }) => row);
 }
 
 /**
@@ -221,18 +244,28 @@ export async function unsortedActions(limit: number): Promise<UnsortedAction[]> 
  * only for an action Universe knows stays private, else Changes things. Answers how many changed.
  */
 export async function saveSorterPicks(picks: readonly { toolkit: string; slug: string; heading: Heading }[]): Promise<number> {
-  let changed = 0;
-  const touched = new Set<string>();
-  for (const pick of picks) {
-    const toolkit = pick.toolkit.toLowerCase();
-    const done = await prisma.appAction.updateMany({
-      where: { toolkit, slug: pick.slug, source: 'fallback' },
-      data: { heading: acceptSorterPick(toolkit, pick.slug, pick.heading), source: 'sorter' },
-    });
-    changed += done.count;
-    if (done.count > 0) touched.add(toolkit);
-  }
-  // Each Brick's grant of these Apps follows at its next read
-  for (const toolkit of touched) await prisma.appActionCatalog.updateMany({ where: { toolkit }, data: { version: { increment: 1 } } });
-  return changed;
+  // One write: the picks and the versions that make each grant follow them land together, or neither does (a pick saved without its
+  // version would never reach a grant, and asking again would not help: it is no longer waiting for the sorter)
+  return prisma.$transaction(
+    async (tx) => {
+      // The Apps' lists are held first, as a read of the provider holds them before it writes their actions: the two never wait on each other
+      const toolkits = [...new Set(picks.map((pick) => pick.toolkit.toLowerCase()))].sort();
+      if (toolkits.length > 0) await tx.$queryRaw`SELECT 1 AS one FROM "app_action_catalogs" WHERE "toolkit" = ANY(${toolkits}) ORDER BY "toolkit" FOR UPDATE`;
+      let changed = 0;
+      const touched = new Set<string>();
+      for (const pick of picks) {
+        const toolkit = pick.toolkit.toLowerCase();
+        const done = await tx.appAction.updateMany({
+          where: { toolkit, slug: pick.slug, source: 'fallback' },
+          data: { heading: acceptSorterPick(toolkit, pick.slug, pick.heading), source: 'sorter' },
+        });
+        changed += done.count;
+        if (done.count > 0) touched.add(toolkit);
+      }
+      // Each Brick's grant of these Apps follows at its next read
+      for (const toolkit of touched) await tx.appActionCatalog.updateMany({ where: { toolkit }, data: { version: { increment: 1 } } });
+      return changed;
+    },
+    { maxWait: 15_000, timeout: 60_000 },
+  );
 }

@@ -563,6 +563,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       const found: ProviderAction[] = [];
       const seen = new Set<string>();
       let cursor: string | null = null;
+      const cursors = new Set<string>();
       for (let page = 0; page < ACTION_PAGES; page += 1) {
         const query = `toolkit_slug=${encodeURIComponent(toolkit)}&limit=${ACTION_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
         const json = await call(`/tools?${query}`, null);
@@ -581,7 +582,10 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
           });
         }
         const next = str(json.next_cursor);
-        if (!next || next === cursor) return found;
+        if (!next) return found;
+        // A page that points back to one already read would end the list early: a cut list is never taken for all of an App's actions
+        if (cursors.has(next)) throw new AdapterError('provider', 'The list of actions points back to a page already read');
+        cursors.add(next);
         cursor = next;
       }
       throw new AdapterError('provider', 'The list of actions has more pages than are read');
