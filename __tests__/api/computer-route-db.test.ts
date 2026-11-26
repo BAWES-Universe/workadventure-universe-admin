@@ -117,6 +117,22 @@ run('choosing the way by expected cost, in a real database', () => {
       await useUpLimit(person);
       expect(await startJob({ botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } }, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
     });
+
+    it('never takes an own copy the bot server saw fail (a refused key, or no answer) over a working ready-made one', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
+      const plan = { botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } };
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+      // Its key refused: the ready-made one is the way again
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'Exa' });
+      // Mended, then its server stops answering on this Brick: the same
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: null, signInLostStatus: null } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+      await prisma.botMcpServer.updateMany({ where: { botId: person.brickId, connection: { source: 'link' } }, data: { noAnswerAt: NOW } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'Exa' });
+  });
   });
 
   it('sends the job to the computer when the App is the cheaper way but its spending stop would refuse the step: the month\u2019s Limit used up, this person\u2019s own, or no Limit set', async () => {

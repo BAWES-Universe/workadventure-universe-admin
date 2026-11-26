@@ -3,7 +3,7 @@ import { RATE_MICROS, tierOf } from '@/lib/composio-rates';
 import { connectedState } from '@/lib/app-connections';
 import { appUseHasRoom } from '@/lib/app-use-cap';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
-import { isOwnApp, isReadyMade, sameApp } from '@/lib/app-same';
+import { isOwnApp, isReadyMade, ownCopyWorks, sameApp } from '@/lib/app-same';
 import { BRICK_SHAPE, awakeMicrosPerMinute as publishedAwakeMicrosPerMinute, keptDiskMonthMicros } from '@/lib/agent37/rates';
 
 /**
@@ -93,7 +93,10 @@ export async function connectedApp(botId: string, name: string): Promise<{ name:
   const found = await prisma.botMcpServer.findMany({ where: { botId, enabled: true, NOT: { connectionId: null } }, include: { connection: true }, orderBy: { createdAt: 'asc' } });
   // Two Apps of the same name (the person's own Exa and the ready-made one): the person's own is weighed first (lib/app-same.ts), at what it costs
   // Universe (nothing), never the ready-made one's price
-  const grants = [...found.filter((grant) => !isReadyMade(grant.connection)), ...found.filter((grant) => isReadyMade(grant.connection))];
+  // An own copy the bot server saw fail (ownCopyWorks) is weighed after the ready-made one, so a broken own copy never takes the place of a working way
+  const works = (grant: (typeof found)[number]) => !!grant.connection && ownCopyWorks(connectedState(grant.connection).connected, grant.connection, grant);
+  const own = found.filter((grant) => !isReadyMade(grant.connection));
+  const grants = [...own.filter(works), ...found.filter((grant) => isReadyMade(grant.connection)), ...own.filter((grant) => !works(grant))];
   for (const grant of grants) {
     const connection = grant.connection;
     if (!connection || !connectedState(connection).connected) continue;
@@ -101,8 +104,8 @@ export async function connectedApp(botId: string, name: string): Promise<{ name:
     if (!names.includes(wanted)) continue;
     // The ready-made one was named but the person has their own copy of it here under another name ("Exa Search" by its link): theirs is the way
     if (isReadyMade(connection)) {
-      const own = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && connectedState(other.connection).connected && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
-      if (own) return { name: own.name, stepMicros: 0 };
+      const ownCopy = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && works(other) && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
+      if (ownCopy) return { name: ownCopy.name, stepMicros: 0 };
     }
     // Only a ready-made app is paid for by us at the provider's rate; any other connected app costs us no call (its step is still a model turn)
     if (connection.source !== 'ready_made' || !connection.providerToolkit) return { name: grant.name, stepMicros: connection.source === 'ready_made' ? null : 0 };

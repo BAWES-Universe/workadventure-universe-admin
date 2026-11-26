@@ -97,12 +97,26 @@ export interface OwnGrant {
   serverUrl: string | null;
 }
 
+interface SeenByBotServer {
+  signInLostAt?: Date | null;
+  noAnswerAt?: Date | null;
+}
+
 /**
- * The Brick owner's own Apps that are switched on for their Brick and work: what a ready-made copy of the same App gives way to. None for a
- * room bot (an App lent to a universe, or a universe's own, is not a person's own copy there) and none for an own App whose sign-in or key
- * stopped working. `works` is the caller's `connectedState(...).connected` (lib/app-connections.ts), passed in so this file needs nothing of it.
+ * The ONE rule for "the person's own copy works", used by every place that lets a ready-made copy give way to it: it is connected
+ * (`connectedState(...).connected`, lib/app-connections.ts, passed in so this file needs nothing of it) and the bot server has not seen it
+ * fail since (a refused sign-in or key, or a server that did not answer), on the App or on its grant on the Brick. A link App with a key
+ * counts as connected whatever its key does, so what the bot server saw is what tells a broken one: the Brick is never left with neither.
  */
-export async function ownGrantsOf(botId: string, works: (connection: AppConnection) => boolean): Promise<OwnGrant[]> {
+export const ownCopyWorks = (connected: boolean, ...seen: (SeenByBotServer | null | undefined)[]): boolean =>
+  connected && seen.every((one) => !one?.signInLostAt && !one?.noAnswerAt);
+
+/**
+ * The Brick owner's own Apps that are switched on for their Brick and work (ownCopyWorks): what a ready-made copy of the same App gives
+ * way to. None for a room bot (an App lent to a universe, or a universe's own, is not a person's own copy there) and none for an own App
+ * whose sign-in or key stopped working or whose server stopped answering. `connected` is the caller's `connectedState(...).connected`.
+ */
+export async function ownGrantsOf(botId: string, connected: (connection: AppConnection) => boolean): Promise<OwnGrant[]> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
   if (!bot?.ownerId || bot.roomId !== null || bot.deletedAt !== null) return [];
   const rows = await prisma.botMcpServer.findMany({
@@ -111,7 +125,7 @@ export async function ownGrantsOf(botId: string, works: (connection: AppConnecti
     orderBy: { createdAt: 'asc' },
   });
   return rows.flatMap((row) =>
-    row.connection && isOwnApp(row.connection) && works(row.connection) ? [{ serverId: row.id, name: row.connection.name || row.name, serverUrl: row.connection.serverUrl }] : [],
+    row.connection && isOwnApp(row.connection) && ownCopyWorks(connected(row.connection), row.connection, row) ? [{ serverId: row.id, name: row.connection.name || row.name, serverUrl: row.connection.serverUrl }] : [],
   );
 }
 

@@ -5,7 +5,7 @@ import { getAdapter } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { getGitHubApp } from '@/lib/github/app';
 import { GITHUB_BLURB, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
-import { sameApp } from '@/lib/app-same';
+import { ownCopyWorks, sameApp } from '@/lib/app-same';
 
 /** One app on the list as the bot server needs it to tell a Brick what it may offer its owner. Never the link or the sign-in. */
 export interface OfferableApp {
@@ -53,10 +53,11 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
   ]);
   // The Apps the person added themselves, by their link or with their key, that work: a listed or ready-made App that is the same App (lib/app-same.ts) is
   // never suggested, so the Brick never pushes another copy (one Universe may pay for) of an App the person already has
-  // Only one that works counts: a signed-out link or a key the service stopped taking never hides a working way to the same App
+  // Only one that works counts (ownCopyWorks): a signed-out link, a key the service stopped taking or a server that stopped answering
+  // never hides a working way to the same App
   // A listed App they connected counts against a ready-made copy too, the same own copies the bot server's list gives way to (lib/app-same.ts
   // isOwnApp); a listed entry is only checked against their links and keys, since their listed connections are already shown as theirs
-  const added = (await prisma.appConnection.findMany({ where: { ownerId, OR: [{ kind: 'direct' }, { kind: 'mcp', source: { in: ['link', 'listed'] } }] } })).filter((own) => connectedState(own).connected);
+  const added = (await prisma.appConnection.findMany({ where: { ownerId, OR: [{ kind: 'direct' }, { kind: 'mcp', source: { in: ['link', 'listed'] } }] } })).filter((own) => ownCopyWorks(connectedState(own).connected, own));
   const alreadyAdded = (app: { key: string; name: string }, withListed = false) => added.some((own) => (withListed || own.source !== 'listed') && sameApp(own, app));
   // Only the connections this answer can show are asked about: a ready-made one whose app is off, or any while the adapter is
   // off, never makes the owner wait for the provider (or fail on its answer)

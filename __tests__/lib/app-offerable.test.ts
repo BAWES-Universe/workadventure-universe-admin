@@ -24,7 +24,7 @@ const state = {
   /** What reading the asked connections again finds */
   reread: [] as Row[],
   /** The Apps the person added themselves, by their link or with their key */
-  added: [] as { name: string; serverUrl: string; connected: boolean; source?: string }[],
+  added: [] as { name: string; serverUrl: string; connected: boolean; source?: string; signInLostAt?: Date; noAnswerAt?: Date }[],
 };
 
 jest.mock('@/lib/db', () => ({
@@ -208,6 +208,11 @@ describe('offerableForBrick', () => {
     it('still suggests the App when their own copy does not work (signed out, or the key stopped working)', async () => {
       state.readyMade = [{ key: 'exa', name: 'Exa', enabled: true }];
       state.added = [{ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', connected: false }];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['exa']);
+      // A link App with a key counts as connected whatever its key does: what the bot server saw (a refused key, no answer) tells a broken one
+      state.added = [{ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', connected: true, signInLostAt: new Date() }];
+      expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['exa']);
+      state.added = [{ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', connected: true, noAnswerAt: new Date() }];
       expect((await offerableForBrick('brick', 'u'))!.map((app) => app.key)).toEqual(['exa']);
     });
 

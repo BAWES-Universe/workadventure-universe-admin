@@ -288,6 +288,29 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-1` })).toMatchObject({ allowed: true });
     });
 
+    it('never lets an own link App the bot server saw fail hide the ready-made one: a refused key, or a server that did not answer', async () => {
+      const ready = await readyMade('exa', 'Exa');
+      // An own Exa added by its link with a key in it: connected whatever its key does, so only what the bot server saw tells it is broken
+      const own = await ownApp('My search', 'https://mcp.exa.ai/mcp');
+      const grant = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: own } });
+      expect((await list()).find((row) => row.id === ready)?.ownCopyServerId).toBe(own);
+      const cases: [string, () => Promise<unknown>, () => Promise<unknown>][] = [
+        ['the key is refused (on the App)', () => prisma.appConnection.update({ where: { id: grant.connectionId! }, data: { signInLostAt: new Date(), signInLostStatus: 401 } }), () => prisma.appConnection.update({ where: { id: grant.connectionId! }, data: { signInLostAt: null, signInLostStatus: null } })],
+        ['the server does not answer (on the App)', () => prisma.appConnection.update({ where: { id: grant.connectionId! }, data: { noAnswerAt: new Date() } }), () => prisma.appConnection.update({ where: { id: grant.connectionId! }, data: { noAnswerAt: null } })],
+        ['the key is refused (on the grant)', () => prisma.botMcpServer.update({ where: { id: own }, data: { signInLostAt: new Date(), signInLostStatus: 403 } }), () => prisma.botMcpServer.update({ where: { id: own }, data: { signInLostAt: null, signInLostStatus: null } })],
+        ['the server does not answer (on the grant)', () => prisma.botMcpServer.update({ where: { id: own }, data: { noAnswerAt: new Date() } }), () => prisma.botMcpServer.update({ where: { id: own }, data: { noAnswerAt: null } })],
+      ];
+      let call = 0;
+      for (const [why, broken, mended] of cases) {
+        await broken();
+        expect({ why, ownCopy: (await list()).find((row) => row.id === ready)?.ownCopyServerId }).toEqual({ why, ownCopy: null });
+        expect({ why, use: await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-broken-${call++}` }) }).toMatchObject({ why, use: { allowed: true } });
+        expect({ why, instant: [...(await brickApps(saraBrick))] }).toEqual({ why, instant: ['exa'] });
+        await mended();
+        expect((await list()).find((row) => row.id === ready)?.ownCopyServerId).toBe(own);
+      }
+    });
+
     it('refuses a use of the ready-made copy while the own copy is on, whatever the bot server asks', async () => {
       const ready = await readyMade('exa', 'Exa');
       expect(await checkAppUse(saraBrick, ready, { forOwner: true, callId: `c-${tag}-2` })).toMatchObject({ allowed: true });
