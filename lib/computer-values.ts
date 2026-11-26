@@ -36,6 +36,10 @@ export type EndedBy = (typeof ENDED_BY)[number];
 export const FINISH_CAUSES = ['ours', 'agent'] as const;
 export type FinishCause = (typeof FINISH_CAUSES)[number];
 
+/** What a failure the runner calls ours rests on, for Orbit to check itself (GPT audit finding 5): `browser_shared` = Orbit kept answering the job's hand-over `browser_shared` until the runner gave up. */
+export const FINISH_BASES = ['browser_shared'] as const;
+export type FinishBasis = (typeof FINISH_BASES)[number];
+
 /**
  * A job that ended on our side, so none of what it ran is the person's: Orbit itself saw it break (the machine would not start or could
  * not be reached, the worker was lost and its room lapsed) or the runner said the cause was ours. Those are written `ended_by = 'error'`. A job our own pool or envelope cut off mid-run (`ended_by = 'pool'`) is ours too, and kept as `pool` so the person is told it was our computers that were busy.
@@ -57,6 +61,13 @@ export const continuableEnding = (status: string, endedBy: string | null | undef
 /** What a job waits for: the person's step. */
 export const WAITING_FOR = ['details', 'signin', 'upload', 'pay', 'submit', 'answer'] as const;
 export type WaitingFor = (typeof WAITING_FOR)[number];
+
+/**
+ * The waits that put the person's own things into the browser or onto the disk (their details, a sign-in, a file, a payment, a form sent in their name): the job asking for one must have
+ * the computer to itself, or another job beside it could read what the person put in. Only `answer`, a question in words, is left out (GPT audit finding 5, Opus design 26 Nov).
+ */
+export const BROWSER_ALONE: readonly WaitingFor[] = ['details', 'signin', 'upload', 'pay', 'submit'];
+export const needsBrowserAlone = (waitingFor: WaitingFor): boolean => BROWSER_ALONE.includes(waitingFor);
 
 /** What a job can do outside its own computer. */
 export const EFFECT_KINDS = ['send', 'publish', 'details', 'upload', 'pay', 'submit'] as const;

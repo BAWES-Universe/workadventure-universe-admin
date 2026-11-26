@@ -68,6 +68,8 @@ import {
   NOT_PAUSED,
   type PausedWhy,
   CLEAN_CLAIM_STALE_MS,
+  needsBrowserAlone,
+  type FinishBasis,
 } from '@/lib/computer-values';
 import {
   clearParkPending,
@@ -1553,9 +1555,12 @@ async function claimMachineFor(job: { id: string; botId: string; writes: boolean
   for (;;) {
     const decided = await prisma.$transaction(
       async (tx) => {
-        const rows = await tx.$queryRaw<Array<{ claimed: Date | null }>>`SELECT "clean_claimed_at" AS claimed FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
+        const rows = await tx.$queryRaw<Array<{ claimed: Date | null; control: string }>>`SELECT "clean_claimed_at" AS claimed, "control_state" AS control FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
         const got = await tx.$queryRaw<Array<{ got: boolean }>>`SELECT pg_try_advisory_xact_lock(hashtextextended(${`computer:line:${job.botId}`}, 0)) AS got`;
         if (!got[0]?.got) return 'line_busy' as const;
+        // The computer is changing hands, or is the person's: nothing joins them on it (the start looked before, this is the same look under the row a take over writes first). A take over's keyboard rule
+        // counted the jobs on the machine under this row; a job claimed after it would be a second one in the person's hands (GPT audit finding 5, rule K)
+        if (rows[0] && rows[0].control !== 'agent') return { ok: false as const, why: 'turn' as const };
         const claimed = rows[0]?.claimed ?? null;
         if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const, why: 'busy' as const };
         const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true, writes: true } });
@@ -2489,6 +2494,8 @@ interface Said {
   cause?: FinishCause | null;
   turns?: number[] | null;
   run?: string | null;
+  /** What a failure as ours rests on, checked by Orbit itself (see `sharedBasisHolds`). */
+  basis?: FinishBasis | null;
 }
 
 /** What the runner's kept intent says, as a finish says it. */
@@ -2528,7 +2535,7 @@ async function finishWith(
       // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
       const ours = mine.outcome === 'failed' && mine.cause === 'ours';
       // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
-      const runner = mine.outcome !== 'failed' ? null : { turns: mine.turns ?? null, run: mine.run ?? null, hint: ours ? ('ours' as const) : mine.cause === 'agent' ? ('agent' as const) : ('none' as const) };
+      const runner = mine.outcome !== 'failed' ? null : { turns: mine.turns ?? null, run: mine.run ?? null, hint: ours ? ('ours' as const) : mine.cause === 'agent' ? ('agent' as const) : ('none' as const), basis: ours ? (mine.basis ?? null) : null };
       // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
       await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, advance, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, owner: round === 0 ? guard.owner : undefined, note, startNextAt: guard.startNextAt }, report);
     }
@@ -2555,6 +2562,8 @@ export async function finishJobUnder(
   turns?: number[] | null,
   run?: string | null,
   epoch?: EpochSaid,
+  /** What a failure as ours rests on (GPT audit finding 5): `browser_shared`, checked by Orbit itself before it counts for anything. */
+  basis?: FinishBasis | null,
 ): Promise<{ stale: boolean; /** Stale because another worker owns the job (not the control generation). */ superseded?: boolean; job: JobView | null }> {
   const intent = await prisma.computerFinishIntent.findUnique({ where: { jobId } });
   // A kept intent is the committed word that stands whoever sends the finish (a replacement, a worker that never claimed): it is completed as it said, so it is never turned away by the epoch
@@ -2567,7 +2576,7 @@ export async function finishJobUnder(
     if (current && current.controlGeneration !== generation) return { stale: true, job: (await getJob(jobId)) ?? null };
   }
   const at = now ?? new Date();
-  const said: Said = intent ? saidByIntent(intent, at) : { outcome, now: at, why, cause, turns, run };
+  const said: Said = intent ? saidByIntent(intent, at) : { outcome, now: at, why, cause, turns, run, basis };
   const done = await finishWith(jobId, said, { generation, intentFirst: !intent, owner: intent ? undefined : { epoch: epoch ?? null } });
   return { stale: done.stale, ...(done.superseded ? { superseded: true } : {}), job: done.job };
 }
@@ -2873,7 +2882,7 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null, finish = false, guard: EndGuard = {}, report: EndReport = {}): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none'; /** What a failure as ours rests on, checked here before it counts (see `sharedBasisHolds`). */ basis?: FinishBasis | null } | null = null, finish = false, guard: EndGuard = {}, report: EndReport = {}): Promise<void> {
   // A finish reported by the runner honors a committed pool cutoff (Orbit decided to end this job for its own capacity: its keys were ended and the runner's own failure, or "done", follows from that). It is ended as
   // `pool` instead (stopped, ours: its time given back, never counted, with the words the person is told). The decision is read first; and again under the cutoff lock in the very transaction that writes the ending,
   // because a cutoff that commits between the two would otherwise lose to a finish that has already read "not decided". A cutoff takes the same lock and only decides for a job that is still on
@@ -3047,7 +3056,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         }
         if (judging && (runnerJudged || hintJudged)) {
           await lockPerson(tx, ref.personId);
-          verdict = await decideRunnerFinish(tx, limits, ref, judging.turns, now, { run: judging.run ?? null, hint: judging.hint });
+          // The runner gave up because Orbit kept the computer from the person (another job was on it): Orbit's own doing, given back and never counted, once Orbit's records confirm it. Otherwise judged as any failure of ours
+          verdict = runnerJudged && judging.basis === 'browser_shared' && (await sharedBasisHolds(tx, { id: jobId, botId }, now)) ? SHARED_VERDICT : await decideRunnerFinish(tx, limits, ref, judging.turns, now, { run: judging.run ?? null, hint: judging.hint });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
@@ -3782,8 +3792,37 @@ async function windDownBrick(botId: string, now: Date): Promise<void> {
 // ---------- Watching, taking over and handing back ----------
 
 /**
+ * How far back a job beside counts for a `browser_shared` ending: the runner gives up 10 minutes after Orbit first answered its hand-over `browser_shared`, and at that answer another job was on the computer.
+ * Two minutes more for the runner's own waits and the finish on its way.
+ */
+const SHARED_BASIS_WINDOW_MS = 12 * 60_000;
+
+/** The decision for a confirmed `browser_shared` ending: Orbit kept the computer from the person, so the try is given back as Orbit's own fault and never counted against the person's give-backs. */
+const SHARED_VERDICT: Verdict = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'browser_shared', route: null };
+
+/**
+ * Whether Orbit's own records bear out a runner that gave up on `browser_shared` (GPT audit finding 5). Both must hold, read in the transaction that ends the job:
+ *   - the job never became a writer: a writer has the computer to itself, so its hand-over is never refused as shared (and a hand-over that landed made it one);
+ *   - another job of the same Brick was on the computer during the wait: running or waiting now, or ended within the window.
+ * One that does not hold is judged as any failure of ours (bounded goodwill), never given back on the runner's word alone.
+ */
+async function sharedBasisHolds(tx: Prisma.TransactionClient, job: { id: string; botId: string }, now: Date): Promise<boolean> {
+  const own = await tx.computerJob.findUnique({ where: { id: job.id }, select: { writes: true } });
+  if (!own || own.writes) return false;
+  const since = new Date(now.getTime() - SHARED_BASIS_WINDOW_MS);
+  const beside = await tx.computerJob.count({
+    where: { botId: job.botId, id: { not: job.id }, startedAt: { not: null, lte: now }, OR: [{ status: { in: ['running', 'waiting'] } }, { endedAt: { gte: since } }] },
+  });
+  return beside > 0;
+}
+
+/**
  * The job needs its person: before it sends their details, signs in, uploads, pays or submits. It waits, holding the machine for
  * them, and the person's Take over appears. Asked by the bot server.
+ *
+ * The computer to itself (GPT audit finding 5, Opus design 26 Nov): every wait but `answer` puts the person's own things into the browser or onto the disk. A job that only reads (`writes` false) and asks
+ * for one becomes a writer in the SAME write that lands the wait, so every job asked for after it waits in line (the one-writer rule) until it ends and its browser is cleared. A job that is not alone on the
+ * computer is refused with `browser_shared` and nothing is written: the runner asks again later, and neither the agent nor the person is told which job is beside it.
  */
 export async function requestHandoverAs(
   jobId: string,
@@ -3792,7 +3831,11 @@ export async function requestHandoverAs(
   ready?: { what: string; where: string } | null,
   /** Who asks: the epoch the worker owns the job by, the control generation it acts under and the turn it was on (`responseId`: when named, the write lands only while that is the job's turn). Left out, as a worker that knows none (only for a job nobody claimed). */
   owner: { epoch?: EpochSaid; generation?: number | null; responseId?: string | null } = {},
-): Promise<{ job: JobView | null; /** `superseded`: another worker owns the job; `stale`: the control generation moved; `not_current`: the turn named is not the job's. Nothing was written. */ refused: 'superseded' | 'stale' | 'not_current' | null }> {
+): Promise<{
+  job: JobView | null;
+  /** `superseded`: another worker owns the job; `stale`: the control generation moved; `not_current`: the turn named is not the job's; `browser_shared`: the wait needs the computer to itself and another job is on it. Nothing was written. */
+  refused: 'superseded' | 'stale' | 'not_current' | 'browser_shared' | null;
+}> {
   const readyData = waitingFor === 'details' && ready ? { readyWhat: cleanDetail(ready.what) || null, readyWhere: cleanDetail(ready.where) || null } : { readyWhat: null, readyWhere: null };
   // The write that lands the wait names everything the worker says it acts under: the owner, the control generation, the turn, and no ending decided (the finalizer owns the ending then)
   const acts = {
@@ -3801,35 +3844,59 @@ export async function requestHandoverAs(
     ...(typeof owner.responseId === 'string' ? { agentResponseId: owner.responseId } : {}),
     ...noEndingWhere,
   };
+  const alone = needsBrowserAlone(waitingFor);
   // The job's row is locked FIRST and everything is read and written under that lock: a finish intent that was kept while this waited for the row is seen by the write (it refuses), and the stretch read here is the
   // stored one. The write names the very `secondsRun` and `stretchStarted` it read, so a delayed handover can never land over a newer one (a second asking, a note that put the job back to running) or count seconds twice
-  const found = await prisma.$transaction(async (tx) => {
-    if (!(await lockJobRow(tx, jobId))) return null;
-    const job = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId } });
-    let landed = 0;
-    if (job.status === 'running') {
-      // The stretch so far is counted, and the machine stays awake for them
-      const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-      const done = await tx.computerJob.updateMany({
-        where: { id: jobId, status: 'running', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts },
-        // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
-        data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: job.stretchStarted ? now : null, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData },
-      });
-      landed = done.count;
-    } else if (job.status === 'waiting') {
-      const done = await tx.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts }, data: { waitingFor, ...readyData } });
-      landed = done.count;
-    }
-    return { landed };
-  });
+  let found: { landed: number; shared: boolean } | null;
+  try {
+    found = await prisma.$transaction(
+      async (tx) => {
+        const row = await lockJobRow(tx, jobId);
+        if (!row) return null;
+        // A wait that needs the computer to itself also holds the computer's row (FOR SHARE) to the end of this write: the claim that puts a job on the machine holds it FOR UPDATE, so the two are one after the
+        // other. A claim that came first is seen in the count below (this job is refused); one that comes after sees this job as a writer and waits in line. Job row first, then the computer's row: the order a pause
+        // and an ending take them in (they lock the job, then write the computer's row), so this never waits in a cycle with them; the claim holds only the computer's row and its own queued job, never this one
+        if (alone) await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${row.botId} FOR SHARE`;
+        const job = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+        const promote = alone && !job.writes;
+        let where: Prisma.ComputerJobWhereInput | null = null;
+        let data: Prisma.ComputerJobUpdateManyMutationInput = {};
+        if (job.status === 'running') {
+          // The stretch so far is counted, and the machine stays awake for them
+          const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+          where = { id: jobId, status: 'running', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts };
+          // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
+          data = { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: job.stretchStarted ? now : null, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData };
+        } else if (job.status === 'waiting') {
+          // Already waiting (for an answer, say) and now asking for a sign-in: it needs the computer to itself from here too
+          where = { id: jobId, status: 'waiting', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts };
+          data = { waitingFor, ...readyData };
+        }
+        if (!where) return { landed: 0, shared: false };
+        if (promote) {
+          const beside = await tx.computerJob.count({ where: { botId: row.botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
+          // Refused only where the wait would otherwise have landed: a worker that no longer owns the job, or a job whose ending is decided, is told that instead (below), never to ask again later
+          if (beside > 0) return { landed: 0, shared: (await tx.computerJob.count({ where })) === 1 };
+        }
+        const done = await tx.computerJob.updateMany({ where, data: promote ? { ...data, writes: true } : data });
+        return { landed: done.count, shared: false };
+      },
+      rowLockWait(),
+    );
+  } catch (error) {
+    // Never expected (the claim's lock and the count above keep a second writer out), but the one-writer index is the last word: a second writer is refused as shared, nothing written
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
+    found = { landed: 0, shared: true };
+  }
   if (!found) return { job: null, refused: null };
   const landed = found.landed;
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
-  let refused: 'superseded' | 'stale' | 'not_current' | null = null;
+  let refused: 'superseded' | 'stale' | 'not_current' | 'browser_shared' | null = null;
   if (landed === 0 && after && (after.status === 'running' || after.status === 'waiting')) {
     if (!epochMatches(after.ownerEpoch, owner.epoch)) refused = 'superseded';
     else if (owner.generation !== undefined && owner.generation !== null && owner.generation !== after.controlGeneration) refused = 'stale';
     else if (typeof owner.responseId === 'string' && owner.responseId !== after.agentResponseId) refused = 'not_current';
+    else if (found.shared) refused = 'browser_shared';
   }
   return { job: after ? jobView(after) : null, refused };
 }
@@ -3969,7 +4036,8 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
   }
 }
 
-export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' | 'still_running' | 'not_offered' };
+/** `shared` (GPT audit finding 5, rule K): more than one job is on the computer, so the person cannot have the keyboard; nothing was moved and control stayed Brick's. No job, title or person is named. */
+export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' | 'still_running' | 'not_offered' | 'shared' };
 
 /** `anyway` is never shown: it is only the person's choice to go on with a program running, kept from the moment they made it until the fence ends (it becomes `running`, or nothing). */
 type TakeOverCheck = 'blocked' | 'restarting' | 'running' | 'anyway';
@@ -4106,7 +4174,46 @@ async function secureMachine(botId: string, stillLeader?: StillLeader, anyway = 
   return 'proved';
 }
 
-type Fenced = 'ready' | 'idle' | 'unproved' | 'lost' | 'blocked';
+type Fenced = 'ready' | 'idle' | 'unproved' | 'lost' | 'blocked' | 'shared';
+
+/**
+ * The keyboard rule (GPT audit finding 5, rule K): the person gets the keyboard only when ONE job is on the computer. A sign-in or anything else they type while they have it must never be in a browser another job
+ * works in. Decided before anything moves:
+ *   - more than one job on the computer: `shared`, nothing is written (the take over is refused);
+ *   - exactly one: it becomes a writer (if it only read) in a write that holds its row and then the computer's row (the order a pause, an ending and a hand-over take them in), so every job asked for after it
+ *     waits in line until it ends and its browser is cleared;
+ *   - none, or a job already in the person's hands (a fence another request began, or a job that joined them before this rule): `go`, as before.
+ * No job can be claimed onto the machine once the fence began (the claim reads the computer's control under the row it writes), so the count read here is final.
+ */
+async function keyboardRule(botId: string): Promise<'go' | 'shared'> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const live = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true, control: true } });
+    if (live.length === 0 || live.some((job) => job.control === 'person')) return 'go';
+    try {
+      const decided = await prisma.$transaction(
+        async (tx) => {
+          if (live.length === 1 && !(await lockJobRow(tx, live[0].id))) return 'again' as const;
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR SHARE`;
+          const now = await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true, control: true, writes: true } });
+          if (now.length === 0 || now.some((job) => job.control === 'person')) return 'go' as const;
+          if (now.length > 1) return 'shared' as const;
+          // One job, but not the one whose row this holds: looked at again
+          if (live.length !== 1 || now[0].id !== live[0].id) return 'again' as const;
+          if (!now[0].writes) await tx.computerJob.updateMany({ where: { id: now[0].id, status: { in: ['running', 'waiting'] } }, data: { writes: true } });
+          return 'go' as const;
+        },
+        rowLockWait(),
+      );
+      if (decided !== 'again') return decided;
+    } catch (error) {
+      // The one-writer index is the last word: a second writer means a second job
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return 'shared';
+      throw error;
+    }
+  }
+  // The jobs on the computer kept changing under the look: the person is told to try again rather than given a keyboard nobody counted
+  return 'shared';
+}
 
 /**
  * The take over's stages, led by one request (or finished by the next after a leader that died). Every stage is safe to run again:
@@ -4119,6 +4226,14 @@ type Fenced = 'ready' | 'idle' | 'unproved' | 'lost' | 'blocked';
  */
 async function leadFence(botId: string, epoch: number | null, now: Date, anyway = false): Promise<Fenced> {
   const mine = async () => epoch === null || (await renewTransition(botId, 'fencing', epoch));
+  // The keyboard rule, before anything moves: more than one job on the computer and nobody's work becomes the person's. Control goes back to Brick in the write that ends the fence (only while this leader holds it)
+  if ((await keyboardRule(botId)) === 'shared') {
+    if (epoch === null) {
+      await setTakeOverCheck(botId, null);
+      return 'shared';
+    }
+    return (await finishTransition(botId, 'fencing', epoch, 'agent', null)) ? 'shared' : 'lost';
+  }
   let rounds = 0;
   // The person chose to go on with a program still running (the fence could not stop it): said on the computer's row before they have the screen
   let accepted = false;
@@ -4196,6 +4311,8 @@ async function afterTakeOver(botId: string): Promise<Control> {
  *
  * `still_running` (post 0.5.0, 1B): the fence ran and a program the agent left behind is still running, which the fence could not stop. Nothing was stopped; the
  * person is asked (see `restartComputer`), or says `anyway`, which goes on with it running and says so on the computer until the hand back.
+ *
+ * `shared` (GPT audit finding 5, rule K): more than one job is on the computer. The person gets the keyboard only when one job is on it (see `keyboardRule`); nothing moved and Brick keeps working.
  */
 export async function takeOver(botId: string, ownerId: string, now: Date = new Date(), options: { anyway?: boolean } = {}): Promise<Control> {
   const anyway = options.anyway === true;
@@ -4205,7 +4322,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
     const row = await readControl(botId);
     // A Brick with no computer row has no machine to fence: its jobs still become the person's
     if (!row) {
-      await leadFence(botId, null, now, anyway);
+      if ((await leadFence(botId, null, now, anyway)) === 'shared') return { ok: false, reason: 'shared' };
       break;
     }
     const t = Date.now();
@@ -4217,6 +4334,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       const done = await leadFence(botId, epoch, now, goOn);
       if (done === 'unproved') return { ok: false, reason: 'not_secured' };
       if (done === 'blocked') return { ok: false, reason: 'still_running' };
+      if (done === 'shared') return { ok: false, reason: 'shared' };
       if (done === 'lost') continue;
       break;
     }
@@ -4229,6 +4347,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
         const done = await leadFence(botId, resumed, now, anyway || (await anywayChosen(botId)));
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
         if (done === 'blocked') return { ok: false, reason: 'still_running' };
+        if (done === 'shared') return { ok: false, reason: 'shared' };
       } else {
         await finishReturnOf(botId, resumed);
       }

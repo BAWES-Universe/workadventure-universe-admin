@@ -245,6 +245,13 @@ describe('the owner’s calls', () => {
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
   });
 
+  it('the keyboard rule (GPT audit finding 5): more than one job on the computer is a 409 `shared` that names no job, title or person', async () => {
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'shared' });
+    const shared = await takeOverRoute(call('/x'), params);
+    expect(shared.status).toBe(409);
+    expect(await shared.json()).toEqual({ error: 'Brick is doing more than one job on this computer right now. You can take over once it is doing one.', reason: 'shared', shared: true });
+  });
+
   it('the honest check (1B): a program still running is a 409 that says so and whether a restart is offered, with no program named; "anyway" is only taken as the boolean true', async () => {
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'still_running' });
     lib.restartOffered.mockResolvedValue(true);
@@ -757,7 +764,7 @@ describe('the bot server’s calls', () => {
     const late = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', run: 'r1' } }), jobParams);
     expect(late.status).toBe(200);
     expect(await late.json()).toMatchObject({ ok: false, reason: 'stale', run: 'superseded' });
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', undefined, undefined);
   });
 
   it('claims a job by the epoch it last saw (GPT round 5): an owner gets its epoch, a worker that saw an older one is told `superseded` with the epoch to claim again from; a kept intent, a cutoff or an over job take no ownership; a claim names a number', async () => {
@@ -802,7 +809,8 @@ describe('the bot server’s calls', () => {
     lib.requestHandoverAs.mockResolvedValueOnce({ job: { id: JOB }, refused: 'superseded' } as never);
     expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 2, generation: 0, responseId: 'resp-1' } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded', job: { id: JOB } });
     expect(lib.requestHandoverAs).toHaveBeenLastCalledWith(JOB, 'signin', expect.any(Date), undefined, { epoch: 2, generation: 0, responseId: 'resp-1' });
-    for (const refused of ['stale', 'not_current'] as const) {
+    // `browser_shared` (GPT audit finding 5): HTTP 200 `{ ok: false, reason }`, the asking job's own view and nothing about the job beside it
+    for (const refused of ['stale', 'not_current', 'browser_shared'] as const) {
       lib.requestHandoverAs.mockResolvedValueOnce({ job: { id: JOB }, refused } as never);
       expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 3 } }), jobParams)).json()).toEqual({ ok: false, reason: refused, job: { id: JOB } });
     }
@@ -810,7 +818,11 @@ describe('the bot server’s calls', () => {
     expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 3 } }), jobParams)).json()).toEqual({ job: { id: JOB } });
     lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: false } as never);
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', run: 'r1', epoch: 3 } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', 3);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', 3, undefined);
+    // A failure as ours that rests on `browser_shared` (GPT audit finding 5) carries the basis to Orbit's own check; no other word is taken
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', why: 'The computer stayed busy with other work.', basis: 'browser_shared', run: 'r1', epoch: 3 } }), jobParams);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The computer stayed busy with other work.', 'ours', undefined, 'r1', 3, 'browser_shared');
+    expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', basis: 'trust_me', run: 'r1', epoch: 3 } }), jobParams)).status).toBe(400);
     lib.recordFinishIntent.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' } as never);
     await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done', epoch: 3 } }), jobParams);
     expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, expect.objectContaining({ epoch: 3 }));
@@ -850,19 +862,19 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandoverAs).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' }, { epoch: undefined, generation: undefined, responseId: undefined });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined, undefined, undefined);
     // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined, undefined, undefined);
     // ...with the turns the runner judged failed: Orbit decides from the relay's rows for them (the cause is only a hint)
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [3, 4, 5] } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined, undefined, undefined);
     // ...and the run those turns were numbered in (a restart makes a new run that numbers turns again), up to 40 characters
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1, 2, 3], run: 'mi8x3k2a1b2c3d4e' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e', undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e', undefined, undefined);
     for (const run of ['x'.repeat(41), '', 'has space', 5]) {
       expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1], run } }), jobParams)).status).toBe(400);
     }
@@ -925,7 +937,7 @@ describe('the bot server’s calls', () => {
     const stale = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: 1 } }), jobParams);
     expect(stale.status).toBe(200);
     expect(await stale.json()).toEqual({ ok: false, reason: 'stale', job: { id: JOB } });
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, 1, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, 1, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined, undefined);
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: -1 } }), jobParams)).status).toBe(400);
   });
 
