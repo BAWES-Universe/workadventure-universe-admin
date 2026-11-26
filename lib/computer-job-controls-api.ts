@@ -16,6 +16,7 @@ const REFUSAL_WORDS: Record<Exclude<ControlRefusal, 'not_found'>, string> = {
   not_ready: 'Its browser could not be brought back yet. It will carry on by itself in a few minutes.',
   command_reused: 'That control was already used for something else. Try again.',
   not_ended: 'It has not ended yet. Ask again in a moment.',
+  started: 'That job started after you were asked, so nothing was cancelled.',
 };
 
 /** The words for a control that came without its command id (or with one that is not a uuid). */
