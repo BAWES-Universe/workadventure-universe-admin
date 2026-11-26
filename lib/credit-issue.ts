@@ -189,6 +189,8 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
     skipDuplicates: true,
   });
   if (count === 0) return { skipped: null };
+  // Given after all (the rollout budget was raised this month): no longer among the people it left out
+  await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
   const lot = await tx.creditLot.findUniqueOrThrow({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
   // Credit for Instant Apps arrived (a gift or a renewal): what the person asked for before now is answered, so a later ask is a new one
   if (rule.covers.includes('instant_apps') && rule.share === 'each') {

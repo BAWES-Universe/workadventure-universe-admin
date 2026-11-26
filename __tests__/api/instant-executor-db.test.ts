@@ -1291,12 +1291,17 @@ run('the bounded Instant executor, in a real database', () => {
         expect(await readyToUseFor(person)).toBe(404);
         // The Limits screen counts them among the people the budget left out this month: once, however often they ask
         const { rolloutThisMonth } = await import('@/lib/credit-funding');
-        expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget', programId: (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id } })).toBe(1);
-        expect((await rolloutThisMonth()).notGivenPeople).toBeGreaterThanOrEqual(1);
+        const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
+        expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget', programId: program } })).toBe(1);
+        const leftOut = (await rolloutThisMonth()).notGivenPeople;
+        expect(leftOut).toBeGreaterThanOrEqual(1);
         // Raised: the same person is given their $2 on the next look and is offered research again
         await setBudget(1_000_000_000_000);
         expect((await listFor(bot)).tools.map((tool) => tool.name)).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);
         expect(await readyToUseFor(person)).toBe(200);
+        // ...and is no longer counted among the people the budget left out this month
+        expect(await prisma.creditIssueSkip.count({ where: { personId: person, programId: program } })).toBe(0);
+        expect((await rolloutThisMonth()).notGivenPeople).toBe(leftOut - 1);
         const { forgetToolSchemas } = await import('@/lib/instant/tools');
         forgetToolSchemas();
       });
