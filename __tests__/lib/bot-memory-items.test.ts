@@ -261,8 +261,7 @@ describe('taking out what was said plainly (favorites and short words)', () => {
         ]),
         'pizza (favorite food)',
       ),
-      // As for any long value here, the person's earlier lines stay when the line it came from was noted (the game drops them again on load)
-    ).toEqual(['my favorite food is pizza', 'I walk a lot']);
+    ).toEqual(['I walk a lot']);
     expect(
       forget(
         memoryWith('tea (favorite drink)', [
@@ -303,5 +302,66 @@ describe('taking out what was said plainly (favorites and short words)', () => {
     };
     const after = withoutItems(data, new Set([memoryItemKey('fact', 'dislike_tea_x', 'tea')])).data as typeof data;
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['I like steam rooms']);
+  });
+});
+
+describe('taking out every line that says a thing, said once or twice', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+  const after = (data: unknown, key: string) => (withoutItems(data, new Set([key])).data as { conversationHistory: Array<{ message: string }> }).conversationHistory.map((line) => line.message);
+
+  it('takes the first line of a long value said twice, for a name, a favorite and a dislike', () => {
+    const name = {
+      personalInfo: { name: 'Sara', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is Sara', 1000], ['bot', 'Hi Sara!', 1500], ['person', 'I walk a lot', 2000], ['person', 'call me Sara', 3000]]),
+    };
+    expect(after(name, memoryItemKey('name', null, 'Sara'))).toEqual(['I walk a lot']);
+    const dislike = {
+      personalInfo: { preferences: [], facts: [['dislike_coffee_x', 'coffee']], heard: {}, drawnFrom: { 'fact:dislike_coffee_x': 3000 } },
+      conversationHistory: chat([['person', 'I hate coffee', 1000], ['person', 'I walk a lot', 2000], ['person', 'honestly I hate coffee', 3000]]),
+    };
+    expect(after(dislike, memoryItemKey('fact', 'dislike_coffee_x', 'coffee'))).toEqual(['I walk a lot']);
+  });
+
+  it('finds a name written with a capital only as written, so "I will travel" stays when "Will" is forgotten', () => {
+    const data = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is Will', 1000], ['person', 'I will travel soon', 2000], ['bot', 'I will remember that', 2500], ['person', 'call me Will', 3000]]),
+    };
+    expect(after(data, memoryItemKey('name', null, 'Will'))).toEqual(['I will travel soon', 'I will remember that']);
+  });
+
+  it('forgetting a short name takes the lines that give it and say it back, and keeps a longer name that starts like it', () => {
+    const data = {
+      personalInfo: { name: 'Ali', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([
+        ['person', 'my name is Ali', 1000],
+        ['bot', 'Nice to meet you, Ali!', 1500],
+        ['person', 'I like Alice in Wonderland', 2000],
+        ['bot', 'Ali, how was your day?', 2500],
+        ['person', "I'm Ali, as I said", 3000],
+      ]),
+    };
+    expect(after(data, memoryItemKey('name', null, 'Ali'))).toEqual(['I like Alice in Wonderland']);
+  });
+
+  it("forgetting another short value takes the bot's reply right after its line", () => {
+    const data = {
+      personalInfo: { facts: [['current_state', 'ill'], ['ill_mentioned_at', '1000']], heard: {}, drawnFrom: { 'fact:current_state': 1000 } },
+      conversationHistory: chat([['person', "I'm ill", 1000], ['bot', 'Sorry you are ill, rest well', 1500], ['person', 'what is the weather', 2000], ['bot', 'Sunny', 2500]]),
+    };
+    expect(after(data, memoryItemKey('fact', 'current_state', 'ill'))).toEqual(['what is the weather', 'Sunny']);
+  });
+
+  it("forgetting a short like said twice takes the bot's reply after the first line, and finds \"I avoid tea\" and \"sick of tea\"", () => {
+    const like = {
+      personalInfo: { preferences: ['tea'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Tea it is!', 1500], ['person', 'I like steam rooms', 2000], ['bot', 'Steam rooms are great', 2500], ['person', 'I like tea a lot', 3000]]),
+    };
+    expect(after(like, memoryItemKey('pref', null, 'tea'))).toEqual(['I like steam rooms', 'Steam rooms are great']);
+    const dislike = {
+      personalInfo: { preferences: [], facts: [['dislike_tea_x', 'tea']], heard: {}, drawnFrom: { 'fact:dislike_tea_x': 3000 } },
+      conversationHistory: chat([['person', 'I avoid tea', 1000], ['person', "I'm sick of tea", 2000], ['bot', 'Noted, no tea', 2200], ['person', 'I hate tea', 3000]]),
+    };
+    expect(after(dislike, memoryItemKey('fact', 'dislike_tea_x', 'tea'))).toEqual([]);
   });
 });
