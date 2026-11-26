@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
-import { currentRules, usableLots, poolOpenTo, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, usableLots, poolOpenTo, peopleFacts, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
 import { budgetOf, issuedInMonth, platformAccount, getFundingAccount, monthKeyOf, PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
@@ -267,11 +267,9 @@ async function clearSkipsFor(tx: Tx, rule: RuleFacts, personId: string, now: Dat
   await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey } });
   if (rule.share !== 'shared') return;
   const others = await tx.creditIssueSkip.findMany({ where: { programId: rule.programId, monthKey }, select: { personId: true } });
-  const reached: string[] = [];
-  for (const { personId: other } of others) {
-    const facts = await personFacts(tx, other);
-    if (facts && reaches(rule, facts)) reached.push(other);
-  }
+  // Everyone left out read at once (two reads, however long the list), so a long backlog cannot hold the locks for long
+  const facts = await peopleFacts(tx, others.map((row) => row.personId));
+  const reached = others.map((row) => row.personId).filter((other) => { const f = facts.get(other); return !!f && reaches(rule, f); });
   if (reached.length > 0) await tx.creditIssueSkip.deleteMany({ where: { personId: { in: reached }, programId: rule.programId, monthKey } });
 }
 

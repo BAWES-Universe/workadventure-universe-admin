@@ -1103,22 +1103,48 @@ run('the bounded Instant executor, in a real database', () => {
       const { saveDefault } = await import('@/lib/credit-rules');
       const program = (await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).id;
       const asIs = await snapshotDefault(program);
-      // A default that waits to take over tomorrow: the $2 one goes on until then
-      const tomorrow = new Date(Date.now() + 24 * 60 * MIN);
-      await saveDefault({ categoryId: 'instant_apps', amount: 1_000_000, schedule: 'monthly', recipients: { kind: 'all' }, claimStartsAt: tomorrow }, { userId: sara, superAdmin: true });
-      const scheduled = await snapshotDefault(program);
-      expect(scheduled.rules.filter((rule) => rule.state === 'superseded' && rule.supersededAt?.getTime() === tomorrow.getTime())).toHaveLength(1);
-      // Another save now cuts that wait to now; putting the scheduled state back gives it its whole wait again
-      await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true });
-      await restoreDefault(scheduled, program);
-      const back = await snapshotDefault(program);
-      for (const rule of scheduled.rules) expect(back.rules.find((r) => r.id === rule.id)).toEqual(rule);
-      expect(back.rules.filter((rule) => !scheduled.rules.some((r) => r.id === rule.id)).every((rule) => rule.state === 'superseded')).toBe(true);
-      // And the suite's own default is in force again, as it was
-      await restoreDefault(asIs, program);
+      try {
+        // A default that waits to take over tomorrow: the $2 one goes on until then
+        const tomorrow = new Date(Date.now() + 24 * 60 * MIN);
+        await saveDefault({ categoryId: 'instant_apps', amount: 1_000_000, schedule: 'monthly', recipients: { kind: 'all' }, claimStartsAt: tomorrow }, { userId: sara, superAdmin: true });
+        const scheduled = await snapshotDefault(program);
+        expect(scheduled.rules.filter((rule) => rule.state === 'superseded' && rule.supersededAt?.getTime() === tomorrow.getTime())).toHaveLength(1);
+        // Another save now cuts that wait to now; putting the scheduled state back gives it its whole wait again
+        await saveDefault({ categoryId: 'instant_apps', amount: 2_000_000, schedule: 'monthly', recipients: { kind: 'all' } }, { userId: sara, superAdmin: true });
+        await restoreDefault(scheduled, program);
+        const back = await snapshotDefault(program);
+        for (const rule of scheduled.rules) expect(back.rules.find((r) => r.id === rule.id)).toEqual(rule);
+        expect(back.rules.filter((rule) => !scheduled.rules.some((r) => r.id === rule.id)).every((rule) => rule.state === 'superseded')).toBe(true);
+      } finally {
+        // The suite's own default is in force again, as it was, whatever happened above
+        await restoreDefault(asIs, program);
+      }
       const again = await snapshotDefault(program);
       for (const rule of asIs.rules) expect(again.rules.find((r) => r.id === rule.id)).toEqual(rule);
       expect(again.rules.filter((rule) => rule.state === 'current')).toHaveLength(1);
+    });
+
+    it('people read together are read as one at a time would read them: guests and people who do not exist are left out, universes kept', async () => {
+      const { personFacts, peopleFacts } = await import('@/lib/credit-store');
+      const guest = (await prisma.user.create({ data: { uuid: `guest-pf-${tag}`, email: `guest-pf-${tag}@example.test`, name: 'guest', isGuest: true } })).id;
+      const universe = await prisma.universe.create({ data: { slug: `pf-${tag}`, name: 'PF', ownerId: sara } });
+      await prisma.universeMember.create({ data: { universeId: universe.id, userId: omar } as never });
+      try {
+        const ids = [sara, omar, guest, `missing-${tag}`];
+        const together = await peopleFacts(prisma, ids);
+        expect([...together.keys()].sort()).toEqual([sara, omar].sort());
+        for (const id of ids) {
+          const alone = await personFacts(prisma, id);
+          if (!alone) expect(together.has(id)).toBe(false);
+          else expect({ ...together.get(id)!, universeIds: [...together.get(id)!.universeIds].sort() }).toEqual({ ...alone, universeIds: [...alone.universeIds].sort() });
+        }
+        expect(together.get(omar)!.universeIds.has(universe.id)).toBe(true);
+        expect((await peopleFacts(prisma, [])).size).toBe(0);
+      } finally {
+        await prisma.universeMember.deleteMany({ where: { universeId: universe.id } });
+        await prisma.universe.delete({ where: { id: universe.id } });
+        await prisma.user.delete({ where: { id: guest } });
+      }
     });
 
     const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name);

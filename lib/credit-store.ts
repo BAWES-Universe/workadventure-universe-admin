@@ -110,6 +110,19 @@ export async function personFacts(db: Pick<Db, 'user' | 'universeMember'>, perso
   return { id: user.id, createdAt: user.createdAt, universeIds: new Set(memberships.map((m) => m.universeId)) };
 }
 
+/** `personFacts` for many people in two reads (not two per person), keyed by id; guests and people who do not exist are left out. */
+export async function peopleFacts(db: Pick<Db, 'user' | 'universeMember'>, personIds: readonly string[]): Promise<Map<string, PersonFacts>> {
+  const out = new Map<string, PersonFacts>();
+  if (personIds.length === 0) return out;
+  const users = await db.user.findMany({ where: { id: { in: [...personIds] }, isGuest: false }, select: { id: true, createdAt: true } });
+  if (users.length === 0) return out;
+  const memberships = await db.universeMember.findMany({ where: { userId: { in: users.map((user) => user.id) } }, select: { userId: true, universeId: true } });
+  const universes = new Map<string, Set<string>>();
+  for (const m of memberships) universes.set(m.userId, (universes.get(m.userId) ?? new Set<string>()).add(m.universeId));
+  for (const user of users) out.set(user.id, { id: user.id, createdAt: user.createdAt, universeIds: universes.get(user.id) ?? new Set<string>() });
+  return out;
+}
+
 /** The people a rule reaches by id, for a clash check or a preview: the saved ids, or a changing universe's members now. */
 export async function idsReached(db: Pick<Db, 'universeMember'>, rule: Pick<RuleFacts, 'recipient' | 'recipientIds'>): Promise<Set<string>> {
   const recipient = rule.recipient;
