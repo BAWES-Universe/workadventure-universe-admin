@@ -20,6 +20,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { computerView, getJob, giveComputer, handBack, requestHandover, restartComputer, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { CONTROL_TIMING, readControl } from '@/lib/computer-control';
 import { screenTicket } from '@/lib/computer-screen';
+import { isFenceCheckCommand, isFenceCommand } from '@/lib/computer-fence-script';
 import { mintJobToken } from '@/lib/computer-token';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -66,7 +67,7 @@ const CLEAR = { stdout: 'remaining=0\n' };
 let leftAfter: { still: boolean } = { still: true };
 const stillRunning = () => {
   leftAfter = { still: true };
-  fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? (leftAfter.still ? LEFT : CLEAR) : {});
+  fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? (leftAfter.still ? LEFT : CLEAR) : {});
 };
 const until = async (ok: () => boolean | Promise<boolean>, ms = 4000) => {
   const end = Date.now() + ms;
@@ -78,7 +79,7 @@ const until = async (ok: () => boolean | Promise<boolean>, ms = 4000) => {
 };
 const machineOf = async (botId: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId } })).machine;
 const jobOf = (id: string) => prisma.computerJob.findUniqueOrThrow({ where: { id } });
-const fences = () => fake.commands.filter((entry) => entry.command === 'universe-fence').length;
+const fences = () => fake.commands.filter((entry) => isFenceCommand(entry.command) && !isFenceCheckCommand(entry.command)).length;
 const stops = () => fake.calls.filter((call) => call.name === 'stop').length;
 
 run('the honest check before a take over (1B)', () => {
@@ -121,7 +122,7 @@ run('the honest check before a take over (1B)', () => {
 
     it('says nothing when the check passes: no mark on the computer, and the person has the screen', async () => {
       const { sara } = await waitingForSignIn();
-      fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? CLEAR : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? CLEAR : {});
       expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true, job: { control: 'person' } });
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
       expect((await readControl(sara.brickId))?.state).toBe('human_ready');
@@ -152,7 +153,7 @@ run('the honest check before a take over (1B)', () => {
 
     it('a fence that could not run at all is still not a block: the machine is stopped, as before', async () => {
       const { sara } = await waitingForSignIn();
-      fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? { stdout: 'unmarked=1\n', exitCode: 3 } : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? { stdout: 'unmarked=1\n', exitCode: 3 } : {});
       expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
       expect(await machineOf(sara.brickId)).toBe('stopped');
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
@@ -186,7 +187,7 @@ run('the honest check before a take over (1B)', () => {
 
     it('a passed check says nothing even when the person said anyway', async () => {
       const { sara } = await waitingForSignIn();
-      fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? CLEAR : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? CLEAR : {});
       expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
     });
@@ -204,13 +205,13 @@ run('the honest check before a take over (1B)', () => {
       const gate = new Promise<void>((resolve) => (release = resolve));
       // The first fence command stalls (the leader is in the middle of the fence); later ones answer at once
       fake.execAnswer = async (command) => {
-        if (command === 'universe-fence' && !held) {
+        if (isFenceCommand(command) && !isFenceCheckCommand(command) && !held) {
           held = true;
           atFence();
           await gate;
           return {};
         }
-        return command.startsWith('universe-fence --check') ? LEFT : {};
+        return isFenceCheckCommand(command) ? LEFT : {};
       };
       const leader = takeOver(sara.brickId, sara.id, NOW, { anyway: true });
       await reached;

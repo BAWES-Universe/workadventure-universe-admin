@@ -3398,6 +3398,11 @@ model BrickComputer {
   parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
   /// The wake ticket (round 8, B1): every write that sets the machine waking or restoring takes the next number, and an external stop or a late success counts only while its own number is still the Brick's.
   wakeEpoch         Int       @default(0) @map("wake_epoch")
+  /// The take-over fence's starting mark, held here and not on the computer (root-agent item 3A): this boot's id, the kernel's clock reading when the computer was made ready (ticks since boot), the computer's own parts (pid, start tick, kind) and the fingerprints of Agent37's command runner. Taken once per boot; the parts are saved again after each restart Orbit does itself.
+  markBootId        String?   @map("mark_boot_id") @db.VarChar(36)
+  markTicks         BigInt?   @map("mark_ticks")
+  markParts         Json?     @map("mark_parts")
+  markRunners       Json?     @map("mark_runners")
   /// Set when a second pause lands while one still waits for its browser to be put away: the browser is then emptied, never put away under either job's name (CodeRabbit on #1025). Cleared with the pointer.
   parkPendingWipe   Boolean   @default(false) @map("park_pending_wipe")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again

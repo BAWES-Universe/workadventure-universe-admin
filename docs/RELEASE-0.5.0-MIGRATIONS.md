@@ -291,5 +291,6 @@ the statements it sends keep working against the new columns, which are all null
 201. `20261123070000_computer_round8_stretch_check`
 202. `20261123080000_computer_round8_stretch_check_validate`
 203. `20261124000000_computer_round9_columns`
-204. `20261125100000_computer_take_over_check`
+204. `20261125000000_computer_mark_in_orbit`
+205. `20261125100000_computer_take_over_check`
 <!-- migrations:end -->
