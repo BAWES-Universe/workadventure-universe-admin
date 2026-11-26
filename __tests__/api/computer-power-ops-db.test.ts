@@ -60,6 +60,16 @@ class HeldStops extends FakeComputerProvider {
     }
     return super.rest(ref);
   }
+  /** The next readiness checks that are held (a wake that is slow to finish). */
+  holdReady = 0;
+  readonly heldReady: Array<() => void> = [];
+  async ready(ref: string, options?: { freshBoot?: boolean }): ReturnType<FakeComputerProvider['ready']> {
+    if (this.holdReady > 0) {
+      this.holdReady--;
+      await new Promise<void>((resolve) => this.heldReady.push(resolve));
+    }
+    return super.ready(ref, options);
+  }
   async stop(ref: string): Promise<void> {
     if (this.holdNext > 0) {
       this.holdNext--;
@@ -529,6 +539,30 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
       expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
     });
+
+    it('CodeRabbit on #1040: an abandoned wake that was stopped and then RESUMES (it only missed its beats) writes nothing over the stop: the machine stays asleep and the stale wake\'s ticket is gone', async () => {
+      const sara = await owner('abandoned-resumes');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 400 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      fake.holdReady = 1;
+      // A start wakes the machine and its readiness check is slow: the wake is in flight, and misses its beats
+      const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      await until(() => fake.heldReady.length === 1);
+      const ticket = (await machineOf(sara)).wakeEpoch;
+      expect((await machineOf(sara)).machine).toBe('waking');
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      await sleep(600);
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+      expect((await machineOf(sara)).wakeEpoch).toBeGreaterThan(ticket);
+      // The original wake comes back: its ticket is no longer the Brick's, so it writes nothing over the stop (it is a replaced start: it wakes the machine again under a ticket of its own, instead of taking the machine as working)
+      fake.heldReady.splice(0).forEach((release) => release());
+      await starting;
+      expect(callNames()).toEqual(['wake', 'wake', 'stop', 'wake']);
+    }, 30_000);
 
     it('CodeRabbit on #1040: an abandoned wake that a replacement takes over between the read and the claim is never stopped under the replacement', async () => {
       const sara = await owner('abandoned-replaced');

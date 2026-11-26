@@ -418,7 +418,9 @@ async function claimStop(botId: string, ref: string, only?: string[], ticket?: n
   // An abandoned wake is stopped only under the epoch that was seen and while its beat is STILL stale, judged by the database's clock in this write (a live wake beats, a replacement takes the next ticket)
   const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : abandoned ? Prisma.sql`AND "wake_epoch" = ${abandoned.epoch} AND "updated_at" <= ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${abandoned.staleMs / 1000}))` : Prisma.empty;
   return prisma.$transaction(async (tx) => {
-    const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
+    // The stop of an abandoned wake takes the next epoch in the same write (CodeRabbit on #1040): the wake that was given up on may still resume (it only missed its beats), and its ticket then no longer matches, so its final write, its beat and its own failure stop all land on nothing
+    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1` : Prisma.empty;
+    const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC')${fence} WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
   }, rowLockWait());
 }
