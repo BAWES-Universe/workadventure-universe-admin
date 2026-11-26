@@ -17,6 +17,8 @@ import { getGitHubApp } from '@/lib/github/app';
 import { appCallIsPaused } from '@/lib/capability-pause';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
+import { actionJudgeFor } from '@/lib/app-actions/grant';
+import { actionsOfCall, offActions, offWords, refusalAnswer, withoutOffActions } from '@/lib/app-actions/link-guard';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off (no
@@ -230,8 +232,11 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
-  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
+  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, name: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
+  // What this Brick may do with each of the App's actions (lib/app-actions): read for a run and for what the App lists or looks up, so an
+  // action that is Off never runs and is never shown. Opening a session needs none of it.
+  const judge = method === 'tools/call' || method === 'tools/list' ? await actionJudgeFor(input.botId, input.connectionId) : null;
   // One route for the whole message, read once (see runReadyMade); our own version answers the link itself, never a mix of the two
   const toolkit = connection.providerToolkit;
   const route = await routeForRun(toolkit);
@@ -262,6 +267,11 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
       return { status: 'done', answer };
     }
     if (touchesSandbox(params.name, params.arguments)) return { status: 'done', answer: sandboxRefusal(input.message.id) };
+    // An action that is Off for this Brick, alone or anywhere in a batch: nothing of the call runs and nothing is counted
+    if (judge) {
+      const off = offActions(judge, actionsOfCall(params.name, params.arguments));
+      if (off.length > 0) return { status: 'done', answer: refusalAnswer(input.message.id, offWords(off, bot.name, connection.name)) };
+    }
     callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
     written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
     if (written.stopped) return { status: 'done', answer: stoppedAnswer(input.message.id) };
@@ -273,7 +283,9 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
         ? await answerFromOwnVersion(route.own, input.message, callParams, { person: input.ownerId, providerAccountId: connection.providerAccountId, callId: input.callId ?? '' })
         : await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId });
     // The list of tools: the provider's sandbox tools come out (a link made before code jobs may still list them) and the code job tools go in
-    const answer = method === 'tools/list' ? await withCodeJobTools(sent, input.message.id, !(isObject(input.message.params) && typeof (input.message.params as { cursor?: unknown }).cursor === 'string')) : sent;
+    const listed = method === 'tools/list' ? await withCodeJobTools(sent, input.message.id, !(isObject(input.message.params) && typeof (input.message.params as { cursor?: unknown }).cursor === 'string')) : sent;
+    // What the App lists and looks up never names an action that is Off for this Brick (a batch's own answer is left as it came)
+    const answer = judge && !(callParams && actionsOfCall(callParams.name, callParams.arguments).length > 0) ? withoutOffActions(listed, input.message.id, judge) : listed;
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
     // A big answer is never cut and never passed on half: the Brick is told it ran, how big it was, and what to do (already counted above)
     return { status: 'done', answer: callParams ? await boundAppAnswer(answer, input.message.id, callParams.name, callParams.arguments) : answer };
@@ -337,8 +349,16 @@ export async function runReadyMade(input: { botId: string; connectionId: string;
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
   // Not signed in at the provider yet: nothing to use, and nothing is counted
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
-  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
+  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, name: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
+  // The provider's own sandbox is never reached, here as on the link (alone or inside a batch): nothing is counted
+  if (touchesSandbox(input.tool, input.arguments)) return { status: 'done', ok: false, data: { error: 'This App does not run code itself.' } };
+  // An action that is Off for this Brick never runs, and nothing is counted
+  const judge = await actionJudgeFor(input.botId, input.connectionId);
+  if (judge) {
+    const off = offActions(judge, actionsOfCall(input.tool, input.arguments));
+    if (off.length > 0) return { status: 'done', ok: false, data: { error: offWords(off, bot.name, connection.name), off: off.map((verdict) => verdict.slug) } };
+  }
 
   // The route is read once, here, and this run keeps it to the end (a move made meanwhile applies to the next run). Our own version
   // that is not there or not ready is a refusal, never a quiet run on Composio, which could bill a second time.

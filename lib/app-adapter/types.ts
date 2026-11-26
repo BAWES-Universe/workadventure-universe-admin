@@ -133,6 +133,18 @@ export interface WorkbenchAdapter {
   nestedRuns(input: { sessionId: string; sinceMs: number }): Promise<number | null>;
 }
 
+/** One action of an App as the provider lists it. */
+export interface ProviderAction {
+  slug: string;
+  /** The provider's words for people, when it has some (else its description). */
+  description: string | null;
+  /** The provider's tags (readOnlyHint, createHint, updateHint, destructiveHint among free words). */
+  tags: string[];
+  version: string | null;
+  /** The provider marks it deprecated: it still runs, so it is kept, after the others. */
+  deprecated?: boolean;
+}
+
 export interface ReadyMadeAdapter {
   /** The code jobs' side of the provider (the bounded Workbench). Absent on an adapter that cannot run them. */
   workbench?: WorkbenchAdapter;
@@ -152,6 +164,12 @@ export interface ReadyMadeAdapter {
   callLink(input: { url: string; message: Record<string, unknown>; sessionId: string | null }): Promise<LinkAnswer>;
   /** One use of one app tool for one person. `callId` makes a retry the same call. */
   use(input: { person: string; toolkit: string; tool: string; arguments: Record<string, unknown>; providerAccountId: string | null; callId: string }): Promise<UseResult>;
+  /**
+   * Every action one App offers, as the provider lists them (every page), so Universe can sort them under the four headings
+   * (lib/app-actions). Listing is not a use and costs nothing. Deprecated actions are kept and marked. Optional: an adapter without it
+   * leaves a grant with no action rows, and every action is then judged by its name and else asks first.
+   */
+  actions?(toolkit: string): Promise<ProviderAction[]>;
   /** The provider's own count of tool calls for our project over a range (epoch milliseconds, end excluded), by tool name (`partial`: the by-tool list is cut short, so a tool missing from it is not known to be zero). Optional: the monthly check says it could not run when an adapter has none. */
   usage?(input: { fromMs: number; toMs: number }): Promise<{ toolCalls: number; groups: { key: string; count: number }[]; partial?: boolean }>;
 }

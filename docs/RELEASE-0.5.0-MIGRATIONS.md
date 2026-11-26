@@ -294,4 +294,5 @@ the statements it sends keep working against the new columns, which are all null
 204. `20261124100000_computer_power_ops`
 205. `20261125000000_computer_mark_in_orbit`
 206. `20261125100000_computer_take_over_check`
+207. `20261126000000_app_actions`
 <!-- migrations:end -->
