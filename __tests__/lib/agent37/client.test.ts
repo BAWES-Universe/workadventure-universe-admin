@@ -55,6 +55,23 @@ describe('the Agent37 client', () => {
     expect(stubborn.sleep).toHaveBeenCalledTimes(3);
   });
 
+  it('CodeRabbit on #1040: a stop or a sleep is never repeated after a gateway answer that may have reached the machine (502, 503 and 504 without Agent37\'s own word), so the caller keeps its power operation open; its own `try_again` and a 429 were not taken, and are asked again', async () => {
+    for (const status of [502, 503, 504]) {
+      for (const call of ['stopInstance', 'sleepInstance'] as const) {
+        const gateway = client([json(status, {}), json(200, { id: 'abc', status: 'stopped' })]);
+        await expect(gateway.api[call]('abc')).rejects.toMatchObject({ status });
+        expect(gateway.calls).toHaveLength(1);
+        expect(gateway.sleep).not.toHaveBeenCalled();
+      }
+    }
+    const refused = client([json(429, {}), json(503, { error: { code: 'try_again' } }), json(200, { id: 'abc', status: 'stopped' })]);
+    await expect(refused.api.stopInstance('abc')).resolves.toEqual({ id: 'abc', status: 'stopped' });
+    expect(refused.calls).toHaveLength(3);
+    // A start is still asked again after a gateway answer: a wake that lands twice is the same wake
+    const start = client([json(502, {}), json(200, { id: 'abc', status: 'running' })]);
+    await expect(start.api.startInstance('abc')).resolves.toEqual({ id: 'abc', status: 'running' });
+  });
+
   it('hands back the whole list as it comes, and refuses one that says more is to come, so a part of the machines never passes for all of them', async () => {
     const machine = { id: 'a', status: 'running', url: 'https://a.agent37.app', created: 1793794006 };
     const whole = client([json(200, { data: [machine] })]);

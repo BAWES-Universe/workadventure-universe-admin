@@ -228,6 +228,23 @@ export class Agent37Client {
     }
   }
 
+  /**
+   * For a power POST (a stop or a sleep): asked again only after an answer that says it was NOT taken (Agent37's own `try_again`, or a 429 from its edge). A gateway's 502, 503 or 504 may have come after the request reached the machine, so it is
+   * never repeated silently: it is thrown, and the caller (`stopAtProvider`) keeps the power operation open for the provider's margin, as it does for a call that got no answer. A repeat that then succeeded would have hidden the earlier attempt,
+   * and the operation would have been closed while that one could still land (CodeRabbit on #1040).
+   */
+  private async againPower<T>(run: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await run();
+      } catch (error) {
+        const last = attempt >= RETRY_WAITS_MS.length;
+        if (last || !(error instanceof Agent37Error && (error.code === 'try_again' || error.status === 429))) throw error;
+        await this.sleep(RETRY_WAITS_MS[attempt]);
+      }
+    }
+  }
+
   private account = () => ({ Authorization: `Bearer ${this.key}` });
   private own = () => ({ 'X-Agent37-Key': this.key });
 
@@ -275,12 +292,12 @@ export class Agent37Client {
 
   /** Sleeps a running instance now: memory and processes are kept, the disk is kept, only the disk is billed. */
   sleepInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.again(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account()));
+    return this.againPower(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account()));
   }
 
   /** Halts the container: memory is lost, the disk is kept, and it stays down until started. */
   stopInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.again(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account()));
+    return this.againPower(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account()));
   }
 
   /** Deletes for good, disk included. */
