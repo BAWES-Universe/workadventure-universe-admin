@@ -182,6 +182,25 @@ run('Brick reports', () => {
     }
   });
 
+  it('an App with the longest catalog key (60) is kept with its name, by key or by connection (Sentry)', async () => {
+    const [saraBrick] = await freshPair();
+    const key = `long-${tag}-`.padEnd(60, 'k');
+    expect(key).toHaveLength(60);
+    await prisma.appCatalogEntry.create({ data: { key, name: 'Long Mail', blurb: 'Test', serverUrl: 'https://example.test/mcp' } });
+    const connection = await prisma.appConnection.create({ data: { ownerId: sara, name: 'Mine', serverUrl: 'https://example.test/mcp', catalogKey: key } });
+    try {
+      const byKey = await send(note(saraBrick, 'long', { area: 'apps', operation: `app:${key}`, failure: 'failed' }));
+      expect(byKey.status).toBe(200);
+      expect(byKey.json.note).toMatchObject({ operation: `app:${key}`, title: 'Failed: Long Mail App' });
+      const byConnection = await send(note(saraBrick, 'long_connection', { area: 'apps', operation: 'app', appConnectionId: connection.id, failure: 'timed_out' }));
+      expect(byConnection.status).toBe(200);
+      expect(byConnection.json.note).toMatchObject({ operation: `app:${key}` });
+    } finally {
+      await prisma.appConnection.deleteMany({ where: { id: connection.id } });
+      await prisma.appCatalogEntry.delete({ where: { key } });
+    }
+  });
+
   it('sent again with the same reference, it answers the same receipt and keeps nothing new', async () => {
     const body = note(saraBrick, 'resend');
     const first = await send(body);

@@ -44,7 +44,7 @@ export const TEXT_MAX = 280;
 export const REPORT_FAILURES = ['failed', 'signed_out', 'timed_out', 'not_allowed', 'no_result', 'missing_ability', 'corrected', 'idea'] as const;
 export type ReportFailure = (typeof REPORT_FAILURES)[number];
 /** One of the Brick's own tools (snake_case), `app:<catalog key>`, `app` for any other App, or `none`. */
-export const OPERATION_PATTERN = /^(?:none|app|app:[a-z0-9][a-z0-9_.-]{0,55}|[a-z][a-z0-9_]{1,59})$/;
+export const OPERATION_PATTERN = /^(?:none|app|app:[a-z0-9][a-z0-9_.-]{0,59}|[a-z][a-z0-9_]{1,59})$/;
 /** Notes one Brick sends in a day (UTC), the same for its own key and Universe AI: it keeps one Brick in a loop from filling the inbox. */
 export const NOTES_PER_BRICK_PER_DAY = 10;
 /** How long the chat can take a note back. */

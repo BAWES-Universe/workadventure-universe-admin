@@ -1780,8 +1780,9 @@ model BrickReportProblem {
   kind        String            @db.VarChar(20)
   // apps | computer | pages | chat | voice | map | memory | files | credit | other
   area        String            @db.VarChar(20)
-  // The Brick's own tool, `app:<catalog key>`, `app` or `none`: what was running (see lib/brick-reports.ts)
-  operation   String            @db.VarChar(60)
+  // The Brick's own tool, `app:<catalog key>`, `app` or `none`: what was running (see lib/brick-reports.ts). 64: `app:` and a catalog key
+  // of up to 60
+  operation   String            @db.VarChar(64)
   // failed | signed_out | timed_out | not_allowed | no_result | missing_ability | corrected | idea
   failure     String            @db.VarChar(20)
   // Built from the fixed words above, never from a chat
@@ -1821,7 +1822,7 @@ model BrickReportNote {
   personKey    String?             @map("person_key") @db.VarChar(64)
   kind         String              @db.VarChar(20)
   area         String              @db.VarChar(20)
-  operation    String              @db.VarChar(60)
+  operation    String              @db.VarChar(64)
   failure      String              @db.VarChar(20)
   retried      Boolean             @default(false)
   // The person's own words, cleaned, only when they pressed Send on them

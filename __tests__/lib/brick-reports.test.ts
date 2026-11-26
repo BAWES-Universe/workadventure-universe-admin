@@ -71,8 +71,8 @@ describe('a note’s title', () => {
   });
 
   it('what ran is a tool name, an App key, app or none: never a sentence', () => {
-    for (const ok of ['none', 'app', 'app:gmail', 'app:google-calendar', 'make_artifact', 'run_command']) expect(OPERATION_PATTERN.test(ok)).toBe(true);
-    for (const bad of ['', 'Cannot open Blue Plover binder', 'app:', 'app:Gmail Inbox', 'x', 'drop table', 'a'.repeat(61), 'app:a b']) expect(OPERATION_PATTERN.test(bad)).toBe(false);
+    for (const ok of ['none', 'app', 'app:gmail', 'app:google-calendar', 'make_artifact', 'run_command', `app:${'k'.repeat(60)}`]) expect(OPERATION_PATTERN.test(ok)).toBe(true);
+    for (const bad of ['', 'Cannot open Blue Plover binder', 'app:', 'app:Gmail Inbox', 'x', 'drop table', 'a'.repeat(61), 'app:a b', `app:${'k'.repeat(61)}`]) expect(OPERATION_PATTERN.test(bad)).toBe(false);
   });
 });
 
