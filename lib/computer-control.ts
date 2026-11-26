@@ -100,9 +100,16 @@ export async function renewTransition(botId: string, state: Transition, epoch: n
   return count === 1;
 }
 
-/** The transition ends in its next state. Only the epoch it began with can end it, so a leader that was taken over cannot undo a later one. */
-export async function finishTransition(botId: string, state: Transition, epoch: number, to: 'agent' | 'human_ready'): Promise<boolean> {
-  const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: state, controlEpoch: epoch }, data: { controlState: to, controlLeaseUntil: null } });
+/**
+ * The transition ends in its next state. Only the epoch it began with can end it, so a leader that was taken over cannot undo a later one.
+ * `check` (when given) is the take-over check the row has from now on, written in the SAME update: a leader that dies cannot leave the new state with the old check
+ * (a stale `anyway` or `running` that a later fence would read as a choice nobody made).
+ */
+export async function finishTransition(botId: string, state: Transition, epoch: number, to: 'agent' | 'human_ready', check?: string | null): Promise<boolean> {
+  const { count } = await prisma.brickComputer.updateMany({
+    where: { botId, controlState: state, controlEpoch: epoch },
+    data: { controlState: to, controlLeaseUntil: null, ...(check === undefined ? {} : { takeOverCheck: check }) },
+  });
   return count === 1;
 }
 

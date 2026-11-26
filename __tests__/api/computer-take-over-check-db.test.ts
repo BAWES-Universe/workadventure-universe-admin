@@ -238,6 +238,60 @@ run('the honest check before a take over (1B)', () => {
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toMatchObject({ state: 'running' });
     });
 
+    // Opus on #1034 (F1, F2): the fence ended in two writes (the check, then control), so a leader that died between them left control and the check disagreeing
+    const writesOf = (spy: jest.SpyInstance, controlState: string) =>
+      spy.mock.calls.map((call) => call[0] as { data?: { controlState?: string; takeOverCheck?: string | null } }).filter((arg) => arg?.data?.controlState === controlState);
+
+    it('the check and the screen are one write: the update that gives the person the screen carries `running`', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany');
+      try {
+        expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
+        const gave = writesOf(spy, 'human_ready');
+        expect(gave).toHaveLength(1);
+        expect(gave[0].data?.takeOverCheck).toBe('running');
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+    });
+
+    it('the check and a take over that found nothing to take are one write: control goes back to Brick with the choice gone in the same update', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      // A leader that chose anyway died; the job was over before the sweep finished the fence
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlState: 'fencing', controlEpoch: { increment: 1 }, controlLeaseUntil: new Date(Date.now() - 1000), takeOverCheck: 'anyway' } });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done' } });
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany');
+      try {
+        await sweepComputers(NOW);
+        const back = writesOf(spy, 'agent');
+        expect(back).toHaveLength(1);
+        expect(back[0].data?.takeOverCheck).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect({ state: row.controlState, check: row.takeOverCheck }).toEqual({ state: 'agent', check: null });
+    });
+
+    it('a finished hand back clears the check in the same update that gives Brick control back', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
+      leftAfter.still = false;
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany');
+      try {
+        expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+        const back = writesOf(spy, 'agent');
+        expect(back.length).toBeGreaterThan(0);
+        expect(back.every((arg) => arg.data?.takeOverCheck === null)).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('is not kept past the end of the fence: when the program is gone by then nothing is said', async () => {
       const { sara } = await waitingForSignIn();
       stillRunning();

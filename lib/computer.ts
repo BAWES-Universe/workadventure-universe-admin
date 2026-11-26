@@ -3806,8 +3806,9 @@ async function leadFence(botId: string, epoch: number | null, now: Date, anyway 
     const held = await prisma.computerJob.count({ where: { botId, status: 'waiting', control: 'person' } });
     if (changed + moved === 0 && held === 0) {
       // Nothing was the person's to take: control stays Brick's
-      if (epoch !== null) await finishTransition(botId, 'fencing', epoch, 'agent');
-      await setTakeOverCheck(botId, null);
+      // The check goes in the same write that gives control back (a crash between two writes left a stale choice on the row), and only if this leader still finishes it
+      if (epoch !== null) await finishTransition(botId, 'fencing', epoch, 'agent', null);
+      else await setTakeOverCheck(botId, null);
       return 'idle';
     }
     if (!(await mine())) return 'lost';
@@ -3820,7 +3821,8 @@ async function leadFence(botId: string, epoch: number | null, now: Date, anyway 
     const secured = await secureMachine(botId, epoch === null ? undefined : (db) => renewTransition(botId, 'fencing', epoch, db), anyway);
     if (secured === 'lost') return 'lost';
     if (secured === 'unproved') {
-      await setTakeOverCheck(botId, null);
+      // The person's choice stands for the next try (the sweep finishes this fence again), as it does when the rounds run out below
+      await setTakeOverCheck(botId, anyway ? 'anyway' : null);
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'unproved';
     }
@@ -3845,10 +3847,13 @@ async function leadFence(botId: string, epoch: number | null, now: Date, anyway 
   }
   // From here the person has the computer: a page opened from now until it goes back is theirs, never Brick's (the record of where it browsed)
   await noteHands(botId, 'person');
-  // Said before the person can type: a screen with a program still running on it is never shown as one without
-  await setTakeOverCheck(botId, accepted ? 'running' : null);
-  if (epoch === null) return 'ready';
-  return (await finishTransition(botId, 'fencing', epoch, 'human_ready')) ? 'ready' : 'lost';
+  // Said before the person can type: a screen with a program still running on it is never shown as one without. The check and the screen are ONE write (a crash between two left
+  // `fencing` with `running`, which the next try read as no choice and asked again)
+  if (epoch === null) {
+    await setTakeOverCheck(botId, accepted ? 'running' : null);
+    return 'ready';
+  }
+  return (await finishTransition(botId, 'fencing', epoch, 'human_ready', accepted ? 'running' : null)) ? 'ready' : 'lost';
 }
 
 /** The take over's second look at a computer that is already the person's: a job that joined after the fence is not left running under Brick's hands. */
@@ -3958,9 +3963,8 @@ async function finishReturn(botId: string, epoch: number | null, restart = false
     await setTakeOverCheck(botId, null);
     return 'back';
   }
-  if (!(await finishTransition(botId, 'returning', epoch, 'agent'))) return 'lost';
-  // Control is Brick's again: what the check said about the person's time on the screen is over
-  await setTakeOverCheck(botId, null);
+  // Control is Brick's again: what the check said about the person's time on the screen is over (cleared in the same write)
+  if (!(await finishTransition(botId, 'returning', epoch, 'agent', null))) return 'lost';
   return 'back';
 }
 
