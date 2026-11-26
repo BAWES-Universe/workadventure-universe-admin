@@ -10,11 +10,16 @@ describe('the same App (lib/app-same.ts)', () => {
     expect(sameApp({ name: 'tavily', serverUrl: null }, { key: 'x', name: 'Tavily' })).toBe(true);
   });
 
-  it('knows an App by a word of its own address, never by the ending or a word every address has', () => {
+  it('knows an App by the name its own address is registered under, and by nothing else of the address', () => {
     expect(addressWords('https://mcp.exa.ai/mcp')).toEqual(['exa']);
     expect(addressWords('https://api.tavily.com')).toEqual(['tavily']);
-    expect(addressWords('https://my-notion.example.co.uk/sse')).toEqual(['mynotion', 'notion', 'example']);
+    expect(addressWords('https://my-notion.example.co.uk/sse')).toEqual(['example']);
+    expect(addressWords('https://shop.example.com.kw')).toEqual(['example']);
     expect(sameApp({ name: 'My search', serverUrl: 'https://mcp.exa.ai/mcp' }, { key: 'exa', name: 'Exa' })).toBe(true);
+    // A part of the host before the registered name, or a part of a hyphenated name, is not the App (Sentry on #1043)
+    expect(sameApp({ name: 'Bot', serverUrl: 'https://slack.mycorp.com/mcp' }, { key: 'slack', name: 'Slack' })).toBe(false);
+    expect(sameApp({ name: 'Bot', serverUrl: 'https://slack-bot.corp.internal' }, { key: 'slack', name: 'Slack' })).toBe(false);
+    expect(sameApp({ name: 'Maths', serverUrl: 'https://linear-algebra.example.com' }, { key: 'linear', name: 'Linear' })).toBe(false);
     expect(sameApp({ name: 'Search', serverUrl: 'https://mcp.search.ai/mcp' }, { key: 'mcp', name: 'MCP' })).toBe(false);
     expect(sameApp({ name: 'Search', serverUrl: 'https://search.ai' }, { key: 'ai', name: 'AI' })).toBe(false);
   });

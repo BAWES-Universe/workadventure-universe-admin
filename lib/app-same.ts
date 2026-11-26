@@ -12,9 +12,10 @@ import { prisma } from '@/lib/db';
  *
  * Two Apps are the same when:
  *  - their names are the same, read loosely ("Google Calendar", "google_calendar" and "googlecalendar" are one), or
- *  - the other App's key or name is a word of the own App's address ("https://mcp.exa.ai/mcp" is Exa, "api.tavily.com" is Tavily).
- *    The address's ending (".ai", ".com") and words every address has ("mcp", "api", "www") say nothing and are never compared, nor is any
- *    word shorter than 3 letters.
+ *  - the other App's key or name is the name the own App's address is registered under ("https://mcp.exa.ai/mcp" is Exa, "api.tavily.com" is
+ *    Tavily). Only that one whole name counts: never a part of the host before it ("slack.mycorp.com" is mycorp, not Slack), never a part of
+ *    a name with a hyphen ("linear-algebra.example.com" is example), never the address's ending, a word every address has ("mcp", "api") or a
+ *    name shorter than 3 letters.
  */
 
 /** A name read loosely: lower case, letters and digits only. */
@@ -23,7 +24,10 @@ export const looseName = (value: string | null | undefined): string => (value ??
 const SAYS_NOTHING = new Set(['www', 'api', 'apis', 'mcp', 'app', 'apps', 'server', 'servers', 'service', 'services', 'gateway', 'com', 'net', 'org', 'edge', 'remote', 'cloud']);
 const SHORTEST_WORD = 3;
 
-/** The words of an address's host that can name an App (its ending and the words every address has left out). */
+/** Endings of two parts (".co.uk", ".com.kw"): the name an address is registered under is the part before both. */
+const SECOND_LEVEL = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go']);
+
+/** The name an address is registered under, read loosely, as the only word of it that can name an App ([] when it names nothing). */
 export function addressWords(address: string | null | undefined): string[] {
   let host: string;
   try {
@@ -33,8 +37,10 @@ export function addressWords(address: string | null | undefined): string[] {
   }
   // A bare address (an IP, localhost) names nothing
   if (!host.includes('.') || /^[0-9.]+$/.test(host) || host.startsWith('[')) return [];
-  const labels = host.split('.').slice(0, -1);
-  return [...new Set(labels.flatMap((label) => [looseName(label), ...label.split('-').map(looseName)]))].filter((word) => word.length >= SHORTEST_WORD && !SAYS_NOTHING.has(word));
+  const labels = host.split('.');
+  const ending = labels.length >= 3 && labels[labels.length - 1].length === 2 && SECOND_LEVEL.has(labels[labels.length - 2]) ? 2 : 1;
+  const registered = looseName(labels[labels.length - 1 - ending]);
+  return registered.length >= SHORTEST_WORD && !SAYS_NOTHING.has(registered) ? [registered] : [];
 }
 
 export interface OwnAppLike {
