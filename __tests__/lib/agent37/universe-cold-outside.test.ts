@@ -777,6 +777,75 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(out.outside_files).toBe(3);
   });
 
+  describe('outside-check: whether an image update would wipe anything (found on a real computer: a computer behind the image lost its files outside the home folder when ready() updated it)', () => {
+    const said = (w: World, extra: Record<string, string> = {}) => {
+      const done = cold(w, 'outside-check', w.fsA, '', extra);
+      return { line: /(^|\n)(outside_check=[^\n]*)/.exec(done.stdout)?.[2] ?? null, status: done.status };
+    };
+    /** The test's own three files (made after the image) taken away: a computer that holds only what its image had. */
+    const untouched = (w: World) => {
+      unpacked(w, 60);
+      for (const name of ['etc/app.conf', 'opt/tool']) fs.rmSync(path.join(w.fsA, name), { recursive: true, force: true });
+    };
+
+    it('says any=0 for a computer that holds only what its image had (the unpack time as every file\'s change time, the image\'s old modification time), and copies and writes nothing', () => {
+      const w = world();
+      untouched(w);
+      // The stand-in lists the baseline software only
+      fs.writeFileSync(path.join(w.fsA, 'usr/local/share/universe/manual-packages.txt'), 'baseline1\nffmpeg\n');
+      expect(said(w)).toEqual({ line: 'outside_check=1 any=0', status: 0 });
+      expect(fs.existsSync(w.state)).toBe(false);
+    });
+
+    it('says any=1 for a file written after the image was built (a tool in /opt, a changed /etc file)', () => {
+      const w = world();
+      untouched(w);
+      fs.writeFileSync(path.join(w.fsA, 'usr/local/share/universe/manual-packages.txt'), 'baseline1\nffmpeg\n');
+      fs.mkdirSync(path.join(w.fsA, 'opt/tool'), { recursive: true });
+      fs.writeFileSync(path.join(w.fsA, 'opt/tool/run.sh'), 'x');
+      expect(said(w)).toEqual({ line: 'outside_check=1 any=1', status: 0 });
+      expect(fs.existsSync(w.state)).toBe(false);
+    });
+
+    it('says any=1 for software added after the image (a package) when no file is new', () => {
+      const w = world();
+      untouched(w);
+      // The stand-in apt-mark reports ffmpeg as installed by hand, and the baseline does not have it
+      expect(said(w)).toEqual({ line: 'outside_check=1 any=1', status: 0 });
+    });
+
+    it('says any=1 for a file whose name is not valid UTF-8 (it is something the update would wipe all the same)', () => {
+      const w = world();
+      untouched(w);
+      fs.writeFileSync(path.join(w.fsA, 'usr/local/share/universe/manual-packages.txt'), 'baseline1\nffmpeg\n');
+      fs.writeFileSync(Buffer.concat([Buffer.from(path.join(w.fsA, 'opt/')), Buffer.from([0xff, 0xfe])]), 'x');
+      expect(said(w)).toEqual({ line: 'outside_check=1 any=1', status: 0 });
+    });
+
+    it('says why it cannot tell, never any=0: the image marker is missing, or the software list cannot be read', () => {
+      const w = world();
+      untouched(w);
+      fs.writeFileSync(path.join(w.fsA, 'usr/local/share/universe/manual-packages.txt'), 'baseline1\nffmpeg\n');
+      const broken = path.join(dir, `broken-apt-${counter}`);
+      fs.mkdirSync(broken, { recursive: true });
+      fs.writeFileSync(path.join(broken, 'apt-mark'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      expect(said(w, { PATH: `${broken}:${process.env.PATH}` })).toEqual({ line: 'outside_check=0 reason=packages_unknown', status: 1 });
+      fs.rmSync(path.join(w.fsA, 'usr/local/share/universe/built'));
+      expect(said(w)).toEqual({ line: 'outside_check=0 reason=image_marker_missing', status: 1 });
+    });
+
+    it('looks at the same files prepack would copy: whatever prepack lists, the check says any=1, and when prepack lists nothing, any=0 (one scan for both)', () => {
+      const w = world();
+      untouched(w);
+      fs.writeFileSync(path.join(w.fsA, 'usr/local/share/universe/manual-packages.txt'), 'baseline1\nffmpeg\n');
+      expect(printed(cold(w, 'prepack', w.fsA).stdout).outside_files).toBe(0);
+      expect(said(w).line).toBe('outside_check=1 any=0');
+      fs.writeFileSync(path.join(w.fsA, 'root/new-file'), 'x');
+      expect(printed(cold(w, 'prepack', w.fsA).stdout).outside_files).toBe(1);
+      expect(said(w).line).toBe('outside_check=1 any=1');
+    });
+  });
+
   it('a file copied here with its old modification time kept (cp -p, tar x) is still found, by its change time: it is later than the end of the unpack by more than the margin', () => {
     const w = world();
     unpacked(w, 40);

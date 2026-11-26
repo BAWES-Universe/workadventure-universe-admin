@@ -22,6 +22,7 @@ let serverPort = 0;
 let archive = Buffer.alloc(0);
 const token = 'download-token';
 let served = 0;
+let liveCounter = 0;
 let altered: { from: number; body: Buffer } | null = null;
 
 function writeTree(root: string) {
@@ -137,6 +138,46 @@ describe('restoring a copy on a computer', () => {
     } finally {
       altered = null;
     }
+  });
+
+  describe('the compare leaves out the files a running computer rewrites by itself (found on a real computer: the proof failed by chance on Hermes logs, the gateway heartbeat and the browser profile)', () => {
+    const live = ['.hermes/logs/gateway.log', '.hermes/logs/agent.log', '.hermes/gateway.heartbeat', '.config/universe-chromium/Local State'];
+    /** A copy served first, and another served to the compare in which `changed` differ (and the files in `live` are rewritten as a running computer would). */
+    async function compared(changed: string[]) {
+      const base = path.join(dir, `live-${++liveCounter}`);
+      const source = path.join(base, 'a', 'home', 'node');
+      const other = path.join(base, 'b', 'home', 'node');
+      for (const root of [source, other]) {
+        fs.mkdirSync(root, { recursive: true });
+        writeTree(root);
+        for (const name of live) {
+          fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+          fs.writeFileSync(path.join(root, name), root === source ? 'before' : 'a later write');
+        }
+      }
+      for (const name of changed) fs.writeFileSync(path.join(other, name), 'a real change');
+      const target = path.join(base, 'target');
+      fs.mkdirSync(target, { recursive: true });
+      archive = makeArchive(source, 'relative', target);
+      altered = { from: served + 3, body: makeArchive(other, 'relative', target) };
+      try {
+        return await runCold(target, 'restore', { url: url(), token, sha256: sha(archive) });
+      } finally {
+        altered = null;
+      }
+    }
+
+    it('a copy whose Hermes logs, heartbeat and browser profile files were rewritten while it was compared still passes', async () => {
+      const done = await compared([]);
+      expect(done.stdout).toMatch(/restored=1 /);
+      expect(done.status).toBe(0);
+    });
+
+    it('but any other file that differs still fails it, with the number of files that differ', async () => {
+      const done = await compared(['.hermes/memory/memories.json']);
+      expect(done.stdout).toMatch(/restored=0 reason=differs_1\b/);
+      expect(done.status).toBe(1);
+    });
   });
 
   it('counts a file as outside the image when its change time is later than the end of the unpack (plus the margin), even if it kept an old modification time', () => {

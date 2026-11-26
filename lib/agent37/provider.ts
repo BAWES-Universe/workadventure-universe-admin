@@ -327,7 +327,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
    * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
    */
-  private async settle(ref: string, options: { update?: boolean } = {}): Promise<Instance> {
+  private async settle(ref: string, options: { update?: boolean | 'unless_outside' } = {}): Promise<Instance> {
     // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
     const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
@@ -341,11 +341,33 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
     const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
     if (behind && options.update !== false) {
-      await this.client.updateInstance(ref);
-      instance = await this.untilHealthy(ref, instance.url);
+      // A computer that has worked for a Brick may hold files outside its home folder (a tool in /opt, software it installed): the image update replaces the disk outside the home folder and would wipe them. So a computer
+      // moved for a job (`unless_outside`) is moved only when it is shown to hold nothing of the kind; one that holds something, or cannot say, stays on its image (told to Sentry) and is
+      // moved when it is next made from a copy, which is when its files outside the home folder are put back on a computer of the current image
+      if (options.update === 'unless_outside' && !(await this.holdsNothingOutside(ref))) {
+        console.error('[Computer] A computer behind the image was not updated: it holds files outside its home folder (or could not say)', { ref, revision: instance.template_revision, image: state.revision });
+        Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
+      } else {
+        await this.client.updateInstance(ref);
+        instance = await this.untilHealthy(ref, instance.url);
+      }
     }
     await this.budgetClosed(ref);
     return instance;
+  }
+
+  /**
+   * True only when the computer itself says it holds nothing outside its home folder that an image update would wipe: no file the image did not have and no added software (`universe-cold outside-check`,
+   * the current script sent first, as for a pack-away). Anything else (it holds something, the check could not run, the script could not be sent) is false: nothing is deleted on a guess.
+   */
+  private async holdsNothingOutside(ref: string): Promise<boolean> {
+    try {
+      await this.installCold(ref);
+      const done = await this.client.exec(ref, `python3 ${COLD_SCRIPT} outside-check`, { user: 'root', timeoutMs: 5 * 60_000 });
+      return done.exitCode === 0 && /(^|\n)outside_check=1 any=0\b/.test(done.stdout);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -354,7 +376,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * once, and `universe-up` is run again.
    */
   async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null> {
-    let instance = await this.settle(ref);
+    let instance = await this.settle(ref, { update: 'unless_outside' });
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
     // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
@@ -740,7 +762,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
     const restored = await this.client.exec(ref, `python3 ${COLD_SCRIPT} restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
     if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
-      const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
+      const reason = /restored=0 reason=([a-z0-9_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
       return { ok: false, reason, ms: this.now() - started };
     }
     // The list of what prepack copied goes to finish from here, never from the home folder (null for a copy that has none: finish then puts nothing back outside the home folder)
@@ -755,7 +777,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
     const finished = await this.client.exec(ref, `python3 ${COLD_SCRIPT} finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
     if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
-      const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
+      const reason = /finished=0 reason=([a-z0-9_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
       return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
     }
     // The script says which it did: put the list back (applied) or, for a copy with no list, nothing outside the home folder (unverified). Neither word, or the wrong one for what was sent,

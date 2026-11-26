@@ -1569,6 +1569,73 @@ def list_put():
         return 1
     return 0
 
+def scan_added(first_only=False):
+    """What this computer holds outside its home folder that the image did not have: (paths, bytes, why it stopped or None). With first_only it stops at the first file found."""
+    blocked = None
+    found = []
+    total = 0
+    if os.path.exists(real(BUILT)):
+        reference = os.stat(real(BUILT)).st_mtime
+        unpacked = unpack_end()
+        for root in ROOTS:
+            for current, dirs, names in os.walk(real(root), followlinks=False):
+                if logical(current).startswith("/usr/local/share/universe"):
+                    dirs[:] = []
+                    continue
+                # A link to a folder is listed with the folders (and never walked); it is a file of the computer like any other link, so it is looked at here
+                for name in names + [d for d in dirs if os.path.islink(os.path.join(current, d))]:
+                    path = logical(os.path.join(current, name))
+                    if skipped(path):
+                        continue
+                    try:
+                        info = os.lstat(real(path))
+                    except OSError:
+                        continue
+                    # A file the image did not have: written or changed here after the image was built. Its change time too (later than the unpack of the image on this computer, with a
+                    # margin), because a file that was copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
+                    if not newer_than(info, reference, unpacked):
+                        continue
+                    if not utf8_ok(path):
+                        blocked = "outside_name_not_utf8"
+                        break
+                    found.append(path)
+                    total += info.st_size if not statmod.S_ISLNK(info.st_mode) else 0
+                    if first_only:
+                        return found, total, None
+                    if len(found) > MAX_FILES or total > MAX_BYTES:
+                        blocked = "outside_too_big"
+                        break
+                if blocked:
+                    break
+            if blocked:
+                break
+    else:
+        blocked = "image_marker_missing"
+    return found, total, blocked
+
+def outside_check():
+    """Whether anything is held outside the home folder that an image update would wipe (a file the image did not have, or software added): printed, and never copied. Run by Orbit before it moves a computer to a newer image."""
+    if os.getuid() != 0 and not FSROOT:
+        print("outside_check=0 reason=not_root")
+        return 1
+    found, total, blocked = scan_added(True)
+    if blocked == "image_marker_missing":
+        print("outside_check=0 reason=" + blocked)
+        return 1
+    any_files = bool(found) or blocked == "outside_name_not_utf8"
+    any_packages = False
+    if not any_files:
+        try:
+            current = set(subprocess.run(["apt-mark", "showmanual"], capture_output=True, text=True, timeout=120, check=True).stdout.split())
+            with open(real(BASELINE)) as handle:
+                base = set(handle.read().split())
+            any_packages = any(PACKAGE_NAME.match(name) for name in current - base)
+        except Exception:
+            print("outside_check=0 reason=packages_unknown")
+            return 1
+    print("outside_check=1 any=%d" % (1 if any_files or any_packages else 0))
+    return 0
+
 def prepack():
     empty = {"home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": [], "manifest_bytes": None, "manifest_sha256": None}
     def stop(why):
@@ -1607,44 +1674,7 @@ def prepack():
                 os.unlink(name, dir_fd=state_fd)
             except OSError:
                 pass
-        blocked = None
-        found = []
-        total = 0
-        if os.path.exists(real(BUILT)):
-            reference = os.stat(real(BUILT)).st_mtime
-            unpacked = unpack_end()
-            for root in ROOTS:
-                for current, dirs, names in os.walk(real(root), followlinks=False):
-                    if logical(current).startswith("/usr/local/share/universe"):
-                        dirs[:] = []
-                        continue
-                    # A link to a folder is listed with the folders (and never walked); it is a file of the computer like any other link, so it is looked at here
-                    for name in names + [d for d in dirs if os.path.islink(os.path.join(current, d))]:
-                        path = logical(os.path.join(current, name))
-                        if skipped(path):
-                            continue
-                        try:
-                            info = os.lstat(real(path))
-                        except OSError:
-                            continue
-                        # A file the image did not have: written or changed here after the image was built. Its change time too (later than the unpack of the image on this computer, with a
-                        # margin), because a file that was copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
-                        if not newer_than(info, reference, unpacked):
-                            continue
-                        if not utf8_ok(path):
-                            blocked = "outside_name_not_utf8"
-                            break
-                        found.append(path)
-                        total += info.st_size if not statmod.S_ISLNK(info.st_mode) else 0
-                        if len(found) > MAX_FILES or total > MAX_BYTES:
-                            blocked = "outside_too_big"
-                            break
-                    if blocked:
-                        break
-                if blocked:
-                    break
-        else:
-            blocked = "image_marker_missing"
+        found, total, blocked = scan_added()
         # In path order, so the list (and the copy) is the same whatever order the file system reads its folders in
         found.sort()
         copied = 0
@@ -1787,7 +1817,7 @@ def restore():
     try:
         resp = fetch()
         compare = subprocess.Popen(
-            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*"],
+            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*", "--exclude=*.hermes/logs*", "--exclude=*gateway.heartbeat*", "--exclude=*.config/universe-chromium*"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         fed = {"whole": False}
         def pour():
@@ -2296,7 +2326,7 @@ def finish_apply(manifest, entries, packages, modes):
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    code = {"prepack": prepack, "restore": restore, "finish": finish, "list-piece": list_piece, "list-put": list_put}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish|list-piece|list-put") or 2))()
+    code = {"prepack": prepack, "restore": restore, "finish": finish, "list-piece": list_piece, "list-put": list_put, "outside-check": outside_check}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish|list-piece|list-put|outside-check") or 2))()
     sys.exit(code)
 `;
 

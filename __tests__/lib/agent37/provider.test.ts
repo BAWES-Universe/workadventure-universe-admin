@@ -833,23 +833,84 @@ describe('getting a machine ready for a job', () => {
     await expect(p.ready('m1')).rejects.toThrow('not ready');
   });
 
-  it('moves a machine made from an older image to the current one before it is brought up', async () => {
-    const w = world();
-    const p = provider(w, { image: async () => state({ revision: 2 }) });
-    await p.create('bot-1');
-    w.instances.get('m1')!.template_revision = 1;
-    w.setExec(() => 'ready=1 restart=0\n');
-    await p.ready('m1');
-    expect(w.calls).toContain('update:m1');
-    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
-    // a machine already on the current image is left alone
-    const again = world();
-    const q = provider(again, { image: async () => state({ revision: 2 }) });
-    await q.create('bot-1');
-    again.instances.get('m1')!.template_revision = 2;
-    again.setExec(() => 'ready=1 restart=0\n');
-    await q.ready('m1');
-    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
+  describe('a machine behind the image (the image update replaces the disk outside the home folder)', () => {
+    const CHECK = `${COLD_RUN} outside-check`;
+    /** A machine on revision 1 while the image is on 2, answering the check with `says` and everything else as a ready computer. */
+    async function behind(says: string | { stdout: string; exitCode?: number } | Error) {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec((command) => {
+        if (command === CHECK) {
+          if (says instanceof Error) throw says;
+          return says;
+        }
+        return 'ready=1 restart=0\n';
+      });
+      return { w, p };
+    }
+
+    it('moves it to the current image only after the computer says it holds nothing outside its home folder, and before it is brought up', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls).toContain('update:m1');
+      const asked = w.calls.indexOf(`exec:m1:${CHECK}`);
+      expect(asked).toBeGreaterThan(-1);
+      expect(asked).toBeLessThan(w.calls.indexOf('update:m1'));
+      expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+      // The check is the CURRENT script (sent first, as for a pack-away) run as root
+      expect(w.execs.find((entry) => entry.command === CHECK)?.options).toMatchObject({ user: 'root' });
+      expect(w.calls.findIndex((call) => /^exec:m1:.*cold-bin\/universe-cold\.new/.test(call))).toBeLessThan(asked);
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the computer holds files or software outside its home folder', 'outside_check=1 any=1\n'],
+      ['the check ended with a reason', 'outside_check=0 reason=image_marker_missing\n'],
+      ['the check said nothing a check says', 'nothing useful\n'],
+      ['the check ran but exited with an error', { stdout: 'outside_check=1 any=0\n', exitCode: 1 }],
+      ['the check could not be asked (the computer was not reached)', new Agent37Unreached('lost')],
+    ])('does NOT move it when %s: nothing outside its home folder is deleted on a guess, the job still runs, and it is told to Sentry', async (_name, says) => {
+      const { w, p } = await behind(says);
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(true);
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining('not updated'), expect.objectContaining({ level: 'warning' }));
+    });
+
+    it('does not move it when the current script could not be put on the computer (the check cannot run)', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      w.setColdInstall(false);
+      w.setColdSum(null);
+      w.setExec((command) => (command.startsWith('sha256sum') ? { stdout: '', exitCode: 1 } : command === CHECK ? 'outside_check=1 any=0\n' : 'ready=1 restart=0\n'));
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+    });
+
+    it('asks nothing of a machine already on the current image, and leaves it where it is', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 2;
+      w.setExec(() => 'ready=1 restart=0\n');
+      await p.ready('m1');
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.execs.some((entry) => entry.command.includes('outside-check'))).toBe(false);
+    });
+
+    it('a restore onto a computer behind the image still moves it first (a computer made for a restore holds nothing yet)', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec(() => 'ok');
+      await p.restoreInto('m1', { url: 'https://orbit.example/x', token: 't', sha256: 'a'.repeat(64) }).catch(() => null);
+      expect(w.calls).toContain('update:m1');
+      expect(w.execs.some((entry) => entry.command.includes('outside-check'))).toBe(false);
+    });
   });
 });
 
@@ -1476,6 +1537,16 @@ describe('cold storage operations on a computer', () => {
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_packages' });
     w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=outside_tampered\n' : 'ok'));
     await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_tampered' });
+  });
+
+  it('keeps the number in a reason (how many files differed), which a reason of letters alone lost', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=0 reason=differs_12\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'differs_12' });
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=outside_missing_2\n' : 'ok'));
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_missing_2' });
   });
 
   it('is never good on a finish that does not say it put the list back: no marker, or the wrong one for what was sent', async () => {
