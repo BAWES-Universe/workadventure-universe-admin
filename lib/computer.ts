@@ -21,6 +21,7 @@ import {
   humanHasControl,
   leaseLapsed,
   readControl,
+  readControlAndCheck,
   releaseIfUnheld,
   releaseLease,
   renewTransition,
@@ -167,6 +168,11 @@ export interface ComputerView {
    * and it is never asked again for an old job. Null for every other ending (done, stopped by the person, failed).
    */
   notice: { jobId: string; how: 'unanswered' | 'month'; endedAt: Date | null } | null;
+  /**
+   * The honest check before a take over (post 0.5.0, 1B). `blocked`: a program the agent left behind is still running and the person is asked (Restart first, if `restartOffered`, or Take over anyway);
+   * `restarting`: the computer is being restarted at their choice; `running`: they took over anyway, with such a program still running. Null when there is nothing to say. Never names a program.
+   */
+  check: { state: 'blocked' | 'restarting' | 'running'; restartOffered: boolean } | null;
 }
 
 /** The endings the person is told about; every other way a job ends says nothing. */
@@ -290,6 +296,7 @@ export async function computerView(botId: string, ownerId: string, now: Date = n
     olderCopyUsed: !!row && row.olderCopyUsed,
     packedAt: row?.machine === 'cold' ? (row.packedAt ?? null) : null,
     notice: await noticeOf(botId, row?.noticeDismissedJobId ?? null),
+    check: row?.takeOverCheck === 'blocked' || row?.takeOverCheck === 'restarting' || row?.takeOverCheck === 'running' ? { state: row.takeOverCheck, restartOffered: await restartOffered(botId) } : null,
   };
 }
 
@@ -3842,6 +3849,8 @@ async function cancelAgentTurn(botId: string, responseId: string): Promise<void>
 
 /** What the fence's check prints when nothing the agent started is left running. The fence is sent by Orbit with every call (lib/computer-fence-script.ts) together with the mark Orbit holds. */
 const FENCE_CLEAR = /(^|\n)remaining=0\s*$/;
+/** What it prints when something the agent started is left and the fence could not stop it (a program with more rights than the fence has). Only a count above 0 matches. */
+const FENCE_LEFT = /(^|\n)remaining=([1-9]\d*)\s*$/;
 const FENCE_TRIES = 3;
 
 /**
@@ -3849,8 +3858,13 @@ const FENCE_TRIES = 3;
  * the agent is running is cancelled, every process it started is stopped (the fence keeps what Orbit's mark names: the desktop, the screen
  * and the agent's gateway), and a second look proves none is left. A computer with no mark for its boot is not fenced and nothing is proved. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
+ *
+ * One answer is different for the take over (post 0.5.0, 1B, `tolerateRunning`): the fence RAN and its last look says a program is left that it could not stop (the agent has
+ * administrator rights, so it can start one the fence has no right to end). That is not a failed fence: nothing is stopped, the answer is
+ * `still_running`, and the person is told and chooses (restart first, or take over anyway). The agent itself is already shut out by then:
+ * its turn is cancelled and every key it held has ended.
  */
-export async function fenceMachine(botId: string, stillLeader?: StillLeader): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
+export async function fenceMachine(botId: string, stillLeader?: StillLeader, options: { /** Only the take over asks this: a program that is still running is answered `still_running` and nothing is stopped. Every other caller (a turn that could not be cancelled) still has the machine stopped when the fence cannot be proved. */ tolerateRunning?: boolean } = {}): Promise<'done' | 'failed' | 'skipped' | 'lost' | 'still_running'> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
@@ -3874,8 +3888,11 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
     if (!(await untilFilesHandedOver(botId, stillLeader))) return 'lost';
     if (stillLeader && !(await stillLeader())) return 'lost';
     const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
+    // Whether the LAST try ran to its end and said something is left (a try that did not run, or a computer that has no mark to fence by, says nothing of the kind)
+    let left = false;
     for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';
+      left = false;
       try {
         // The fence's own commands are activity on the machine, so the keep-awake no-op is not due for another five minutes: it is a command of its own, started after the mark, and one that overlapped
         // a try would be stopped or counted as left running. A sweep that read the row before this write fails its claim on the time it saw (Sentry on #1033)
@@ -3883,12 +3900,14 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
         await provider.exec(ref, fenceCommand(mark), { timeoutMs: 30_000 });
         const check = await provider.exec(ref, fenceCommand(mark, true), { timeoutMs: 30_000 });
         if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
+        left = FENCE_LEFT.test(check.stdout);
       } catch (error) {
         console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
       }
     }
     // A leader whose lease was taken over while it ran does not stop a machine the new leader (or the person, once it was proved) now has
     if (stillLeader && !(await stillLeader())) return 'lost';
+    if (left && options.tolerateRunning) return 'still_running';
     // Not proved: the machine is stopped so nothing can act behind the person's back. Its files stay, and the next job wakes it. The leadership is
     // looked at again under the lock on the computer's row, together with the stop (a leader that stalls here cannot stop it after the hand-over)
     console.error('[Computer] The take-over fence could not be proved: the machine is stopped');
@@ -3950,7 +3969,34 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
   }
 }
 
-export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' };
+export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' | 'still_running' | 'not_offered' };
+
+/** `anyway` is never shown: it is only the person's choice to go on with a program running, kept from the moment they made it until the fence ends (it becomes `running`, or nothing). */
+type TakeOverCheck = 'blocked' | 'restarting' | 'running' | 'anyway';
+
+/** What the take over's check found, kept on the computer's row (null = nothing to say). */
+async function setTakeOverCheck(botId: string, check: TakeOverCheck | null, fencing?: number): Promise<boolean> {
+  // A fence's leader names its epoch: a leader that stalled past its lease (another finished or took over the fence) writes nothing, and is told so (Sentry on #1034)
+  const { count } = await prisma.brickComputer.updateMany({ where: { botId, ...(fencing === undefined ? {} : { controlState: 'fencing', controlEpoch: fencing }) }, data: { takeOverCheck: check } });
+  return fencing === undefined || count === 1;
+}
+
+/**
+ * The person's "Take over anyway" is kept on the computer's row before the fence runs, so a leader that dies in the middle does not lose it: whoever finishes the fence
+ * (the sweep, or another request) goes on with the program running instead of asking again. Only while this fence is the one in charge (control `fencing`, and its epoch).
+ */
+async function noteAnyway(botId: string, epoch: number | null): Promise<void> {
+  await prisma.brickComputer.updateMany({ where: { botId, controlState: 'fencing', ...(epoch === null ? {} : { controlEpoch: epoch }) }, data: { takeOverCheck: 'anyway' } });
+}
+
+/**
+ * Whether the person already chose to take over anyway: for the fence that is going (kept by `noteAnyway`), or for the stretch they already have the screen in with a program
+ * still running (`running`: a fence that runs again for a job that joined later goes on with it, never takes the screen back to ask again).
+ */
+async function anywayChosen(botId: string): Promise<boolean> {
+  const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck;
+  return check === 'anyway' || check === 'running';
+}
 
 /** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see leadFence). */
 async function clearFirstTurnMarks(botId: string): Promise<void> {
@@ -4042,10 +4088,12 @@ async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: nu
  * stops the machine. A stopped machine that is PROVED stopped is a closed machine (nothing can act on it, and the person has no screen
  * until it wakes); one whose stop is not proved is not: it is stopped again, and if that is not proved either, the fence is not proved.
  */
-async function secureMachine(botId: string, stillLeader?: StillLeader): Promise<'proved' | 'unproved' | 'lost'> {
-  const fenced = await fenceMachine(botId, stillLeader);
+async function secureMachine(botId: string, stillLeader?: StillLeader, anyway = false): Promise<'proved' | 'unproved' | 'lost' | 'blocked' | 'accepted'> {
+  const fenced = await fenceMachine(botId, stillLeader, { tolerateRunning: true });
   if (fenced === 'done') return 'proved';
   if (fenced === 'lost') return 'lost';
+  // A program is left that the fence could not stop: the person is told and chooses. Nothing is stopped for it. `anyway` is the person's own choice to go on with it running.
+  if (fenced === 'still_running') return anyway ? 'accepted' : 'blocked';
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider) return 'proved';
@@ -4058,7 +4106,7 @@ async function secureMachine(botId: string, stillLeader?: StillLeader): Promise<
   return 'proved';
 }
 
-type Fenced = 'ready' | 'idle' | 'unproved' | 'lost';
+type Fenced = 'ready' | 'idle' | 'unproved' | 'lost' | 'blocked';
 
 /**
  * The take over's stages, led by one request (or finished by the next after a leader that died). Every stage is safe to run again:
@@ -4069,28 +4117,43 @@ type Fenced = 'ready' | 'idle' | 'unproved' | 'lost';
  * A fence that cannot be proved leaves control in `fencing`: the person has no input and nothing is lost, and the next request or the
  * sweep tries again. `epoch` is null only for a computer with no row.
  */
-async function leadFence(botId: string, epoch: number | null, now: Date): Promise<Fenced> {
+async function leadFence(botId: string, epoch: number | null, now: Date, anyway = false): Promise<Fenced> {
   const mine = async () => epoch === null || (await renewTransition(botId, 'fencing', epoch));
   let rounds = 0;
+  // The person chose to go on with a program still running (the fence could not stop it): said on the computer's row before they have the screen
+  let accepted = false;
   for (;;) {
     const { changed, moved } = await moveJobsToPerson(botId, now);
     const held = await prisma.computerJob.count({ where: { botId, status: 'waiting', control: 'person' } });
     if (changed + moved === 0 && held === 0) {
       // Nothing was the person's to take: control stays Brick's
-      if (epoch !== null) await finishTransition(botId, 'fencing', epoch, 'agent');
+      // The check goes in the same write that gives control back (a crash between two writes left a stale choice on the row), and only if this leader still finishes it
+      if (epoch !== null) await finishTransition(botId, 'fencing', epoch, 'agent', null);
+      else await setTakeOverCheck(botId, null);
       return 'idle';
     }
     if (!(await mine())) return 'lost';
+    // The person's choice is kept before the fence runs (see noteAnyway)
+    if (anyway) await noteAnyway(botId, epoch);
     // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
     await fenceControl(botId);
     if (!(await mine())) return 'lost';
     // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-    const secured = await secureMachine(botId, epoch === null ? undefined : (db) => renewTransition(botId, 'fencing', epoch, db));
+    const secured = await secureMachine(botId, epoch === null ? undefined : (db) => renewTransition(botId, 'fencing', epoch, db), anyway);
     if (secured === 'lost') return 'lost';
     if (secured === 'unproved') {
+      // The person's choice stands for the next try (the sweep finishes this fence again), as it does when the rounds run out below
+      if (!(await setTakeOverCheck(botId, anyway ? 'anyway' : null, epoch ?? undefined))) return 'lost';
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'unproved';
     }
+    if (secured === 'blocked') {
+      // The jobs are the person's and Brick is shut out; the person has no input yet. They are asked, and the next take over (or the restart) goes on from here: the sweep leaves it alone
+      if (!(await setTakeOverCheck(botId, 'blocked', epoch ?? undefined))) return 'lost';
+      if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
+      return 'blocked';
+    }
+    if (secured === 'accepted') accepted = true;
     // A job's first turn that never said its id (marked in its row before it was sent) is NOT stopped by the fence unless the machine itself was: the
     // fence keeps the agent's gateway, the turn runs inside it, and its model calls are only paused by the keys that ended. So the mark stays, and the
     // start after the hand-back ends the job instead of opening a second first turn beside the one that runs (two charges). It goes only when the
@@ -4105,8 +4168,13 @@ async function leadFence(botId: string, epoch: number | null, now: Date): Promis
   }
   // From here the person has the computer: a page opened from now until it goes back is theirs, never Brick's (the record of where it browsed)
   await noteHands(botId, 'person');
-  if (epoch === null) return 'ready';
-  return (await finishTransition(botId, 'fencing', epoch, 'human_ready')) ? 'ready' : 'lost';
+  // Said before the person can type: a screen with a program still running on it is never shown as one without. The check and the screen are ONE write (a crash between two left
+  // `fencing` with `running`, which the next try read as no choice and asked again)
+  if (epoch === null) {
+    await setTakeOverCheck(botId, accepted ? 'running' : null);
+    return 'ready';
+  }
+  return (await finishTransition(botId, 'fencing', epoch, 'human_ready', accepted ? 'running' : null)) ? 'ready' : 'lost';
 }
 
 /** The take over's second look at a computer that is already the person's: a job that joined after the fence is not left running under Brick's hands. */
@@ -4125,23 +4193,30 @@ async function afterTakeOver(botId: string): Promise<Control> {
  *
  * Control changes hands through one durable transition (lib/computer-control.ts): this request either leads the fence or joins the one
  * already going, and it answers only when the fence is PROVED, never while it is still pending. Asked twice it is the same.
+ *
+ * `still_running` (post 0.5.0, 1B): the fence ran and a program the agent left behind is still running, which the fence could not stop. Nothing was stopped; the
+ * person is asked (see `restartComputer`), or says `anyway`, which goes on with it running and says so on the computer until the hand back.
  */
-export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
+export async function takeOver(botId: string, ownerId: string, now: Date = new Date(), options: { anyway?: boolean } = {}): Promise<Control> {
+  const anyway = options.anyway === true;
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const deadline = Date.now() + CONTROL_TIMING.joinMs;
   for (;;) {
     const row = await readControl(botId);
     // A Brick with no computer row has no machine to fence: its jobs still become the person's
     if (!row) {
-      await leadFence(botId, null, now);
+      await leadFence(botId, null, now, anyway);
       break;
     }
     const t = Date.now();
     if (row.state === 'agent' || (row.state === 'human_ready' && (await hasStragglers(botId)))) {
+      // A computer the person already has, with a program running that they chose to go on with, keeps that choice when a job joined later and the fence runs again
+      const goOn = anyway || (row.state === 'human_ready' && (await anywayChosen(botId)));
       const epoch = await beginTransition(botId, row.state, row.epoch, 'fencing');
       if (epoch === null) continue;
-      const done = await leadFence(botId, epoch, now);
+      const done = await leadFence(botId, epoch, now, goOn);
       if (done === 'unproved') return { ok: false, reason: 'not_secured' };
+      if (done === 'blocked') return { ok: false, reason: 'still_running' };
       if (done === 'lost') continue;
       break;
     }
@@ -4151,10 +4226,11 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       const resumed = await resumeTransition(botId, row);
       if (resumed === null) continue;
       if (row.state === 'fencing') {
-        const done = await leadFence(botId, resumed, now);
+        const done = await leadFence(botId, resumed, now, anyway || (await anywayChosen(botId)));
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
+        if (done === 'blocked') return { ok: false, reason: 'still_running' };
       } else {
-        await finishReturn(botId, resumed);
+        await finishReturnOf(botId, resumed);
       }
       continue;
     }
@@ -4192,13 +4268,14 @@ export async function wakeIfStopped(botId: string): Promise<void> {
  *   4. only then does control become Brick's.
  * Brick is not admitted at any point before step 4, whatever state the jobs are in.
  */
-async function finishReturn(botId: string, epoch: number | null): Promise<'back' | 'lost'> {
+async function finishReturn(botId: string, epoch: number | null, restart = false): Promise<'back' | 'lost'> {
   const mine = async () => epoch === null || (await renewTransition(botId, 'returning', epoch));
   if (epoch !== null) await drainHumanInput(botId);
   if (!(await mine())) return 'lost';
   // Asked until a pass finds none: a job that joined the person while the others were being handed back is found by the next pass
   for (let round = 0; round < 5; round++) {
-    const back = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } } });
+    // The person's own hand back ends the ask a restart was offered for (the next ask offers one again); a restart's own return keeps it, so it is offered once per ask
+    const back = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 }, ...(restart ? {} : { restartedAt: null }) } });
     if (back.count === 0) break;
   }
   if (!(await mine())) return 'lost';
@@ -4206,8 +4283,118 @@ async function finishReturn(botId: string, epoch: number | null): Promise<'back'
   // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
   await fenceControl(botId);
   await wakeIfStopped(botId);
-  if (epoch === null) return 'back';
-  return (await finishTransition(botId, 'returning', epoch, 'agent')) ? 'back' : 'lost';
+  if (epoch === null) {
+    await setTakeOverCheck(botId, null);
+    return 'back';
+  }
+  // Control is Brick's again: what the check said about the person's time on the screen is over (cleared in the same write)
+  if (!(await finishTransition(botId, 'returning', epoch, 'agent', null))) return 'lost';
+  return 'back';
+}
+
+/**
+ * "Restart first" (post 0.5.0, 1B): after the check found a program still running, the person chose to restart the computer. Everything on it closes, the job
+ * keeps its progress and its sign-ins (the disk is kept), and Brick asks the person again with the SAME ask once its page is ready. Offered once per ask.
+ *
+ * It is a hand back with a stop and a wake in the middle, led as one durable transition (`returning`, so Brick is not admitted until it is over, and a leader
+ * that died is finished by the sweep):
+ *   1. the job's open ask is kept on the job (what Brick waited for, and what it was ready to put in and where), and the restart is said on the computer;
+ *   2. the machine is stopped and PROVED asleep (only while this request still leads);
+ *   3. the jobs go back to Brick, every key made before ends, the machine is woken (its note for the new boot is written as for any wake), and control is Brick's.
+ * A machine that will not wake ends its jobs (as after any hand back, `wakeIfStopped`).
+ */
+async function restartSteps(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed'> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = providerFor(row);
+  if (row?.providerRef && provider && row.machine === 'working') {
+    // Stopped only while this request still leads (a leader that stalled cannot stop a machine another request now holds); a stop that is not proved is asked again by the wake below, which brings up a `stopping` machine too
+    if (!(await stopMachineWhileLeader(botId, row.providerRef, provider, (db) => renewTransition(botId, 'returning', epoch, db)))) return 'lost';
+  }
+  // Proved asleep: no first turn that was marked as sent and never named can still be running on this machine, so its mark goes (as after a fence that stopped it, and `settleTurnHold`).
+  // A stop that was not proved leaves the marks, and such a job ends as an unknown turn as before (CodeRabbit on 4503e0b8)
+  if (await agentCannotRun(botId)) await clearFirstTurnMarks(botId);
+  return finishReturn(botId, epoch, true);
+}
+
+/**
+ * A `returning` transition whose leader is gone, finished by whoever finds it: as the restart it is when the check says `restarting` (the machine is stopped and proved asleep
+ * first, and the job's ask is kept), otherwise as an ordinary hand back. A restart finished as an ordinary hand back would clear the ask it kept and never stop the machine.
+ */
+async function finishReturnOf(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed'> {
+  const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck ?? null;
+  return check === 'restarting' ? restartSteps(botId, epoch) : finishReturn(botId, epoch);
+}
+
+/** Whether a restart can still be offered for the ask that is open: none of the Brick's live jobs has had one since the person last had the screen. */
+export async function restartOffered(botId: string): Promise<boolean> {
+  return (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, NOT: { restartedAt: null } } })) === 0;
+}
+
+export async function restartComputer(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const deadline = Date.now() + CONTROL_TIMING.joinMs;
+  for (;;) {
+    // One read for both: a second tap that read the control just before the first tap's commit and the check just after it would otherwise match neither case below and be told "not offered"
+    const row = await readControlAndCheck(botId);
+    if (!row) return { ok: false, reason: 'not_offered' };
+    const t = Date.now();
+    const check = row.check;
+    if (row.state === 'fencing' && check === 'blocked' && leaseLapsed(row, t)) {
+      // Once per ask: a restart that was done for this ask is not offered again, and a request that asks anyway is told so
+      if (!(await restartOffered(botId))) {
+        // The restart that was seen done may be the one another tap is starting right now (its commit landed between the control read above and this count): when control has moved since that read, look again and join it
+        const now2 = await readControl(botId);
+        if (!now2 || now2.epoch !== row.epoch || now2.state !== row.state) continue;
+        return { ok: false, reason: 'not_offered' };
+      }
+      // One step: control moves to `returning`, the restart is said on the computer, and the ask is kept on the job. A second tap sees all of it or none of it (it joins the restart, never "not offered"),
+      // and a leader that dies after this is finished by the sweep with the ask already kept. The job's kind is what Brick waited for; a job the person took over in the middle of its work
+      // had no ask open, which is kept as `person` (Brick is told the person wanted the screen, not to ask a question again)
+      const epoch = await prisma.$transaction(async (tx) => {
+        const moved = await tx.brickComputer.updateMany({
+          where: { botId, controlState: 'fencing', controlEpoch: row.epoch, takeOverCheck: 'blocked' },
+          data: { controlState: 'returning', controlEpoch: row.epoch + 1, controlLeaseUntil: new Date(Date.now() + CONTROL_TIMING.leaseMs), takeOverCheck: 'restarting' },
+        });
+        if (moved.count !== 1) return null;
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE "computer_jobs" SET "restarts" = "restarts" + 1, "restarted_at" = ${now}, "restart_kind" = COALESCE("waiting_for", 'person'), "restart_what" = "ready_what", "restart_where" = "ready_where", "lease_version" = "lease_version" + 1
+          WHERE "bot_id" = ${botId} AND "status" = 'waiting' AND "control" = 'person'`);
+        return row.epoch + 1;
+      });
+      if (epoch === null) continue;
+      const done = await restartSteps(botId, epoch);
+      if (done === 'lost') continue;
+      break;
+    }
+    // A restart that is on its way (its leader is alive) is joined; one whose leader is gone is finished here
+    // Control goes back to Brick a moment before the check is cleared (two writes): a tap that reads between them sees `agent` with the check still `restarting`, which is the restart ending, so it waits for the next read
+    if (row.state === 'agent' && check === 'restarting') {
+      if (t >= deadline) return { ok: false, reason: 'in_progress' };
+      await sleep(CONTROL_TIMING.pollMs);
+      continue;
+    }
+    if (row.state === 'returning' && check === 'restarting') {
+      if (leaseLapsed(row, t)) {
+        const resumed = await resumeTransition(botId, row);
+        if (resumed !== null) await restartSteps(botId, resumed);
+        continue;
+      }
+      if (t >= deadline) return { ok: false, reason: 'in_progress' };
+      await sleep(CONTROL_TIMING.pollMs);
+      continue;
+    }
+    // Nothing is waiting on this choice: the restart was done already (it left the check and gave control back), or there was never one to offer
+    if (row.state === 'agent' && check === null && (await restartedJobOf(botId))) break;
+    return { ok: false, reason: 'not_offered' };
+  }
+  const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
+  if (!job) return { ok: false, reason: 'nothing_waiting' };
+  return { ok: true, job: jobView(job) };
+}
+
+/** Whether a live job of this Brick has been restarted for the ask that is open (so a second tap of Restart first, after the restart is over, is answered as done). */
+async function restartedJobOf(botId: string): Promise<boolean> {
+  return !(await restartOffered(botId));
 }
 
 /**
@@ -4236,7 +4423,7 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
     if (row.state === 'agent') break;
     if (row.state === 'returning' && leaseLapsed(row, t)) {
       const resumed = await resumeTransition(botId, row);
-      if (resumed !== null) await finishReturn(botId, resumed);
+      if (resumed !== null) await finishReturnOf(botId, resumed);
       continue;
     }
     if (t >= deadline) return { ok: false, reason: 'in_progress' };
@@ -4256,7 +4443,8 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
   // Two lists, each with its own bound: a transition whose leader is gone, and a computer the person holds with no job left. A computer the person
   // holds while a job still waits for them is not in either (nothing is done for it), so a page of those can never push a transition out of the sweep
   const transitions = await prisma.brickComputer.findMany({
-    where: { controlState: { in: ['fencing', 'returning'] }, OR: [{ controlLeaseUntil: null }, { controlLeaseUntil: { lte: new Date() } }] },
+    // A take over that stopped at the check (a program still running, the person is asked, still `fencing`) is the person's to go on with: the sweep leaves it alone. A restart that was begun is finished like any hand back
+    where: { controlState: { in: ['fencing', 'returning'] }, AND: [{ OR: [{ controlLeaseUntil: null }, { controlLeaseUntil: { lte: new Date() } }] }, { OR: [{ takeOverCheck: null }, { takeOverCheck: { not: 'blocked' } }, { controlState: 'returning' }] }] },
     select: { botId: true },
     orderBy: { botId: 'asc' },
     take: batch,
@@ -4267,7 +4455,14 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
       AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."bot_id" = bc."bot_id" AND j."status" IN ('running', 'waiting'))
     ORDER BY bc."bot_id" ASC
     LIMIT ${batch}`);
-  const stuck = [...transitions, ...unheld];
+  // A take over that stopped at the check, whose jobs are all over (the person stopped it, or nobody answered): nothing is left to ask, so it is finished like any other
+  const abandoned = await prisma.$queryRaw<Array<{ botId: string }>>(Prisma.sql`
+    SELECT bc."bot_id" AS "botId" FROM "brick_computers" bc
+    WHERE bc."control_state" = 'fencing' AND bc."take_over_check" = 'blocked' AND (bc."control_lease_until" IS NULL OR bc."control_lease_until" <= (NOW() AT TIME ZONE 'UTC'))
+      AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."bot_id" = bc."bot_id" AND j."status" IN ('running', 'waiting'))
+    ORDER BY bc."bot_id" ASC
+    LIMIT ${batch}`);
+  const stuck = [...transitions, ...abandoned, ...unheld];
   let finished = 0;
   for (const { botId } of stuck) {
     const row = await readControl(botId);
@@ -4280,8 +4475,8 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
     const resumed = await resumeTransition(botId, row);
     if (resumed === null) continue;
     try {
-      if (row.state === 'fencing') await leadFence(botId, resumed, now);
-      else await finishReturn(botId, resumed);
+      if (row.state === 'fencing') await leadFence(botId, resumed, now, await anywayChosen(botId));
+      else await finishReturnOf(botId, resumed);
       finished++;
     } catch (error) {
       console.error('[Computer] Could not finish a change of hands:', error instanceof Error ? error.message : 'unknown');
@@ -4548,11 +4743,11 @@ export async function runnableJobs(limit = 50): Promise<RunnableJob[]> {
   return (await runnableJobsPage(limit)).jobs;
 }
 
-export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string; /** The control generation the job is on now (it moves each time the person takes the machine and each time it is handed back): what a runner says it acts under. */ controlGeneration: number; /** Who owns the job: the epoch of the worker that last claimed it (0 = nobody ever did), and that worker's run. A runner claims with the epoch it saw here. */ ownerEpoch: number; ownerRun: string | null; /** Set only while the job is still on and its runner has committed to ending it (the finish still to be completed); null otherwise, an ended job included. */ finishPending: FinishPending | null; /** The job was paused before: its runner carries on in the same agent conversation, starting with the resume words. */ resumed: boolean; /** Its last pause took the screen back from the person in the middle of their step: on resume the runner asks the person for that step again (as a paused waiting job does). */ askAgain: boolean }) | null> {
+export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string; /** The control generation the job is on now (it moves each time the person takes the machine and each time it is handed back): what a runner says it acts under. */ controlGeneration: number; /** Who owns the job: the epoch of the worker that last claimed it (0 = nobody ever did), and that worker's run. A runner claims with the epoch it saw here. */ ownerEpoch: number; ownerRun: string | null; /** Set only while the job is still on and its runner has committed to ending it (the finish still to be completed); null otherwise, an ended job included. */ finishPending: FinishPending | null; /** The job was paused before: its runner carries on in the same agent conversation, starting with the resume words. */ resumed: boolean; /** Its last pause took the screen back from the person in the middle of their step: on resume the runner asks the person for that step again (as a paused waiting job does). */ askAgain: boolean; /** How many times the person chose to restart this job's computer, and (only while that ask is still open: until the person has had the screen and handed back) the ask that was open then: Brick gets its page ready again and asks with the same words. */ restarts: number; restartAsk: { kind: WaitingFor | 'person'; what: string | null; where: string | null } | null }) | null> {
   const row = await prisma.computerJob.findUnique({ where: { id: jobId }, include: { ...JOB_INCLUDE, finishIntent: true } });
   if (!row) return null;
   const pending = row.finishIntent && !isOver(row.status) ? pendingOf(row.finishIntent) : null;
-  return { ...jobView(row), botId: row.botId, personId: row.personId, controlGeneration: row.controlGeneration, ownerEpoch: row.ownerEpoch, ownerRun: row.ownerRun, finishPending: pending, resumed: row.pauses > 0, askAgain: row.pauses > 0 && !!(await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: row.id, n: row.pauses } }, select: { heldScreen: true } }))?.heldScreen };
+  return { ...jobView(row), botId: row.botId, personId: row.personId, controlGeneration: row.controlGeneration, ownerEpoch: row.ownerEpoch, ownerRun: row.ownerRun, finishPending: pending, resumed: row.pauses > 0, askAgain: row.pauses > 0 && !!(await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: row.id, n: row.pauses } }, select: { heldScreen: true } }))?.heldScreen, restarts: row.restarts, restartAsk: row.restartedAt && row.restartKind ? { kind: row.restartKind as WaitingFor | 'person', what: row.restartWhat, where: row.restartWhere } : null };
 }
 
 /**
