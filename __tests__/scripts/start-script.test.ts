@@ -211,6 +211,16 @@ describe('scripts/start.sh decides (stand-in migration tool)', () => {
     // The database link never goes onto the screen: it goes into a private temporary file that is removed.
     expect(runbook).toContain('ENVF=$(umask 077; mktemp)');
     expect(runbook).toContain('rm -f "$ENVF"');
+    // The exact image the container runs, not a tag that can move after a later pull.
+    expect(runbook).toContain(`IMAGE=$(docker inspect "$C" --format '{{.Image}}')`);
+    expect(runbook).not.toContain('{{.Config.Image}}');
+    // The failed container is stopped before --rolled-back, or its next restart runs the bad migration again.
+    const stop = runbook.indexOf('docker stop "$C"');
+    expect(stop).toBeGreaterThan(-1);
+    expect(stop).toBeLessThan(runbook.indexOf('migrate resolve --rolled-back <migration name>\n'));
+    // With the health check on, the failed container is gone: the runbook says which image to use then.
+    expect(runbook).toMatch(/health check ON\*\*, Coolify removes the failed new container/);
+    expect(runbook).toMatch(/image of the failed deploy/);
   });
 
   it('has no way to continue after a failed migration', () => {

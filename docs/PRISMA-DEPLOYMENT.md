@@ -128,9 +128,10 @@ reason above that line (`docker logs <container-name>`). Then:
        ```bash
        node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
        ```
-     - none of them are: `migrate resolve --rolled-back <migration name>`, and deploy an image with the
-       fixed migration;
-     - only some are: undo those by hand, then `--rolled-back`, and deploy the fixed image.
+     - none of them are: stop the failed container first, then `migrate resolve --rolled-back <migration name>`,
+       and deploy an image with the fixed migration;
+     - only some are: stop the failed container, undo those by hand, then `--rolled-back`, and deploy the
+       fixed image.
    - Never `--rolled-back` a migration whose changes are in the database: the next start would run it
      again, and it fails again or applies twice.
 
@@ -143,7 +144,8 @@ name (`docker ps -a`):
 
 ```bash
 C=<container-name>
-IMAGE=$(docker inspect "$C" --format '{{.Config.Image}}')
+# The exact image the container runs (its ID, not a tag such as :latest, which can move after a later pull).
+IMAGE=$(docker inspect "$C" --format '{{.Image}}')
 # The network the database is reached on. If this prints more than one, use the one the database container is on.
 docker inspect "$C" --format '{{range $name, $net := .NetworkSettings.Networks}}{{println $name}}{{end}}'
 NET=<network name from the line above>
@@ -152,16 +154,28 @@ ENVF=$(umask 077; mktemp)
 docker inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^DATABASE_URL=' > "$ENVF"
 
 docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate status
-# then, only after checking the database as described above, one of:
+# then, only after checking the database as described above, ONE of:
+#   all of its changes are there:
 docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
+#   none of them are (after undoing any partial ones). Stop the failed container FIRST: if it restarts
+#   after this, it runs the bad migration again, and then the fixed image refuses to start too.
+docker stop "$C"
 docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
 
 rm -f "$ENVF"
 ```
 
-This uses the image's own Prisma CLI by path, not `npx prisma`, which is not tied to that copy. Once the
-failed migration is resolved, a restarting container picks it up on its next start, and one that stopped
-starts with `docker start "$C"`; after `--rolled-back`, deploy the image with the fixed migration instead.
+This uses the image's own Prisma CLI by path, not `npx prisma`, which is not tied to that copy. After
+`--applied`, a restarting container picks it up on its next start, and one that stopped starts with
+`docker start "$C"`. After `--rolled-back`, leave that container stopped and deploy the image with the
+fixed migration.
+
+**With the Coolify health check ON**, Coolify removes the failed new container and keeps the old version
+serving, so `docker ps -a` shows only the old one. Its image does not have the new migration
+(`migrate resolve` would say the migration could not be found). Set `C` to the running old container for
+the network and `DATABASE_URL` above, but set `IMAGE` to the image of the failed deploy (the newest Orbit
+image in `docker images`). There is no failed container left to stop. After `--applied`, redeploy that
+same release; after `--rolled-back`, deploy the fixed one.
 
 ### "Prisma Client not found"
 
