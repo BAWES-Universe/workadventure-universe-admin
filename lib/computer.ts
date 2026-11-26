@@ -4433,7 +4433,8 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
   for (;;) {
     const row = await readControl(botId);
     if (!row) {
-      await finishReturn(botId, null);
+      // No transition to hold open here (no lease to let go): a return that could not wake the machine yet is answered as on its way, and the next request or the sweep asks again (Sentry on #1040)
+      if ((await finishReturn(botId, null)) === 'pending') return { ok: false, reason: 'in_progress' };
       break;
     }
     const t = Date.now();

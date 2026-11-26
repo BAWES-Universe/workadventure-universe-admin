@@ -16,6 +16,12 @@ jest.mock('@/lib/computer-browser-profile', () => {
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
 });
 
+// A wrapper that behaves as the real `readControl` unless a test says otherwise (the one test of a hand back that finds no control row)
+jest.mock('@/lib/computer-control', () => {
+  const actual = jest.requireActual('@/lib/computer-control');
+  return { ...actual, readControl: jest.fn(actual.readControl) };
+});
+
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits } from '../helpers/give-back-limits';
 import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
@@ -577,6 +583,28 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await readControl(sara.brickId)).toMatchObject({ state: 'agent' });
       expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running', control: 'brick' });
+    }, 30_000);
+
+    it('Sentry on #1040: a hand back that finds no control row to lead and cannot wake the machine yet (a stop of ours still open) answers in progress, never as done', async () => {
+      const sara = await owner('handback-norow');
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 300, waitMs: 300, pollMs: 20 });
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      if (!a.ok) throw new Error('no job');
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      let release: () => void = () => undefined;
+      const inFlight = underPowerOp(op, () => new Promise<void>((resolve) => (release = resolve)));
+      // The control row is read as missing (the path a hand back takes when it has no transition to lead)
+      (readControl as jest.Mock).mockResolvedValueOnce(null);
+      try {
+        expect(await handBack(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'in_progress' });
+        expect(await machineOf(sara)).toMatchObject({ machine: 'stopped' });
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running' });
+      } finally {
+        release();
+        await inFlight;
+        await endPowerOp(op).catch(() => undefined);
+      }
     }, 30_000);
 
     it('a stop that threw may still land: its operation stays open (beating) for the provider\'s margin after the call returned, then closes by itself, and nothing waits for it', async () => {
