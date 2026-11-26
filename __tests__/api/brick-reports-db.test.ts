@@ -279,6 +279,33 @@ run('Brick reports', () => {
     }
   });
 
+  it('a receipt confirmed after the lost notes were listed keeps its note (Sentry)', async () => {
+    const [brick] = await freshPair();
+    lostReceipt = true;
+    try {
+      const late = await send(note(brick, 'late_receipt'));
+      const created = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: late.json.id as string } })).createdAt;
+      // The bot server's word lands just after the withdrawal listed the note as lost, before it empties it
+      const list = prisma.brickReportNote.findMany.bind(prisma.brickReportNote);
+      const listed = jest.spyOn(prisma.brickReportNote, 'findMany').mockImplementationOnce((async (args: Parameters<typeof list>[0]) => {
+        const rows = await list(args);
+        await confirmReportReceipts(brick, [late.json.id as string]);
+        return rows;
+      }) as never);
+      try {
+        expect(await withdrawUndelivered(new Date(created.getTime() + RECEIPT_WAIT_MS + 1000))).toBe(0);
+      } finally {
+        listed.mockRestore();
+      }
+      const row = await prisma.brickReportNote.findUniqueOrThrow({ where: { id: late.json.id as string } });
+      expect(row.takenBackAt).toBeNull();
+      expect(row.deliveredAt).not.toBeNull();
+      expect(row.problemId).not.toBeNull();
+    } finally {
+      lostReceipt = false;
+    }
+  });
+
   it('deleting a person’s account empties the words they sent; their notes stay counted', async () => {
     const [brick] = await freshPair();
     const uuid = `leaver-${tag}`;

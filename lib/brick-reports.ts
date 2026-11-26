@@ -342,25 +342,27 @@ async function noteFor(id: string, key: string) {
  * Empties a note at once (Take it back, or withdrawn when its receipt never reached the chat). Its words, context and person go: the row
  * stays, empty, only so the Brick's count for the day still holds it (and its reference, so the same note sent again answers "taken back"
  * and is not kept again). A problem with no note left goes. A note that took a fixed problem back to New, emptied while no later note holds
- * the problem open, puts it back to Fixed: what was taken back never counts. Emptying twice changes nothing.
+ * the problem open, puts it back to Fixed: what was taken back never counts. Emptying twice changes nothing. Says whether it emptied it.
  */
-async function emptyNote(row: NoteRow, now: Date): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+async function emptyNote(row: NoteRow, now: Date, onlyUndelivered = false): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
     // The same lock as a new note of this problem: a note arriving now either sees the problem as it is after this, or holds it open itself
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${row.kind}:${row.area}:${row.operation}:${row.failure}`}, 0))`;
-    // Only a note not taken back yet: a second tap racing the first changes nothing
+    // Only a note not taken back yet: a second tap racing the first changes nothing. Withdrawn as lost: only while still unconfirmed, so a
+    // receipt confirmed after the lost notes were listed keeps its note
     const taken = await tx.brickReportNote.updateMany({
-      where: { id: row.id, takenBackAt: null },
+      where: { id: row.id, takenBackAt: null, ...(onlyUndelivered ? { deliveredAt: null } : {}) },
       data: { words: '', wordsAt: null, context: Prisma.JsonNull, personKey: null, takenBackAt: now },
     });
-    if (taken.count === 0 || !row.problemId) return;
+    if (taken.count === 0) return false;
+    if (!row.problemId) return true;
     const live = await tx.brickReportNote.findMany({ where: { problemId: row.problemId, takenBackAt: null }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
     if (live.length === 0) {
       await tx.brickReportProblem.deleteMany({ where: { id: row.problemId } });
-      return;
+      return true;
     }
     const problem = await tx.brickReportProblem.findUnique({ where: { id: row.problemId }, select: { state: true, stateAt: true, cameBack: true } });
-    if (!problem) return;
+    if (!problem) return true;
     // Back to Fixed once no note from after the fix is left, whichever of them goes last: only while it is New because a note came back
     // (its state was set by that note, at that note's time). Moved by hand since (Working on, Back to New, Fixed again) is a person's call,
     // and it stands; so does any note from after the fix still there
@@ -372,6 +374,7 @@ async function emptyNote(row: NoteRow, now: Date): Promise<void> {
       where: { id: row.problemId },
       data: { lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
     });
+    return true;
   });
 }
 
@@ -437,8 +440,9 @@ export async function withdrawUndelivered(now: Date = new Date()): Promise<numbe
     take: 200,
     select: NOTE_SELECT,
   });
-  for (const row of lost) await emptyNote(row, now);
-  return lost.length;
+  let gone = 0;
+  for (const row of lost) if (await emptyNote(row, now, true)) gone++;
+  return gone;
 }
 
 /**
