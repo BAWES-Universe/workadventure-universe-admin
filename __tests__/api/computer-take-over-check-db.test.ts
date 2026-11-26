@@ -326,6 +326,19 @@ run('the honest check before a take over (1B)', () => {
       expect({ state: row.controlState, check: row.takeOverCheck }).toEqual({ state: 'human_ready', check: 'running' });
     });
 
+    // Sentry on #1034: the person has the screen (anyway, a program still running) and a job joins; the second fence used to forget the choice and take the screen back to ask again
+    it('a job that joins after the person took over anyway does not take the screen back: the fence goes on with the program running', async () => {
+      const { sara, jobId } = await waitingForSignIn();
+      stillRunning();
+      expect(await takeOver(sara.brickId, sara.id, NOW, { anyway: true })).toMatchObject({ ok: true });
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+      // Brick's job is running again beside the person (a straggler): the take over is asked again, this time as a plain request
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'running', control: 'brick' } });
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect({ state: row.controlState, check: row.takeOverCheck }).toEqual({ state: 'human_ready', check: 'running' });
+    });
+
     it('is not kept past the end of the fence: when the program is gone by then nothing is said', async () => {
       const { sara } = await waitingForSignIn();
       stillRunning();

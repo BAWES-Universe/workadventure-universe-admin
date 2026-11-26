@@ -3677,9 +3677,13 @@ async function noteAnyway(botId: string, epoch: number | null): Promise<void> {
   await prisma.brickComputer.updateMany({ where: { botId, controlState: 'fencing', ...(epoch === null ? {} : { controlEpoch: epoch }) }, data: { takeOverCheck: 'anyway' } });
 }
 
-/** Whether the person already chose to take over anyway for the fence that is going (kept by `noteAnyway`). */
+/**
+ * Whether the person already chose to take over anyway: for the fence that is going (kept by `noteAnyway`), or for the stretch they already have the screen in with a program
+ * still running (`running`: a fence that runs again for a job that joined later goes on with it, never takes the screen back to ask again).
+ */
 async function anywayChosen(botId: string): Promise<boolean> {
-  return (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck === 'anyway';
+  const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck;
+  return check === 'anyway' || check === 'running';
 }
 
 /** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see leadFence). */
@@ -3891,9 +3895,11 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
     }
     const t = Date.now();
     if (row.state === 'agent' || (row.state === 'human_ready' && (await hasStragglers(botId)))) {
+      // A computer the person already has, with a program running that they chose to go on with, keeps that choice when a job joined later and the fence runs again
+      const goOn = anyway || (row.state === 'human_ready' && (await anywayChosen(botId)));
       const epoch = await beginTransition(botId, row.state, row.epoch, 'fencing');
       if (epoch === null) continue;
-      const done = await leadFence(botId, epoch, now, anyway);
+      const done = await leadFence(botId, epoch, now, goOn);
       if (done === 'unproved') return { ok: false, reason: 'not_secured' };
       if (done === 'blocked') return { ok: false, reason: 'still_running' };
       if (done === 'lost') continue;
