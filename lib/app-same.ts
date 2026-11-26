@@ -105,12 +105,12 @@ interface SeenByBotServer {
 }
 
 /**
- * How long a key App that did not answer gives way to the ready-made copy of the same App. Nothing but a call to it can tell it answers again
- * (the bot server does not look at a key App between calls), so after this the person's own copy is the way again: if it is still down, that
+ * How long a key App that did not answer gives way (the same 5 minutes the bot server waits before it reads a link App that did not answer again) to the ready-made copy of the same App. Nothing but a call to it can tell it answers again
+ * (the bot server does not look at a key App between calls, as it does for a link App, whose mark it clears itself), so after this the person's own copy is the way again: if it is still down, that
  * call fails, is written again (lib/tool-signin.ts reportKeyNoAnswer), and the ready-made copy takes over for another while. The Brick is never
  * moved to a copy Universe pays for for good because of one bad moment.
  */
-export const KEY_NO_ANSWER_HOLDS_MS = 15 * 60_000;
+export const KEY_NO_ANSWER_HOLDS_MS = 5 * 60_000;
 
 const stillNoAnswer = (one: SeenByBotServer, now: number): boolean =>
   !!one.noAnswerAt && (one.kind !== 'direct' || now - one.noAnswerAt.getTime() < KEY_NO_ANSWER_HOLDS_MS);

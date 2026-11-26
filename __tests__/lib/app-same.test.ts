@@ -80,6 +80,8 @@ describe('an own copy that works (ownCopyWorks)', () => {
   it('lets a key App that did not answer give way only for a while, then tries it again; a link App the bot server saw not answer gives way until it answers', () => {
     expect(ownCopyWorks(true, { kind: 'direct', noAnswerAt: ago(60_000) })).toBe(false);
     expect(ownCopyWorks(true, { kind: 'direct', noAnswerAt: ago(KEY_NO_ANSWER_HOLDS_MS + 1_000) })).toBe(true);
+    expect(KEY_NO_ANSWER_HOLDS_MS).toBe(5 * 60_000);
+    expect(ownCopyWorks(true, { kind: 'direct', noAnswerAt: ago(6 * 60_000) })).toBe(true);
     expect(ownCopyWorks(true, { kind: 'mcp', noAnswerAt: ago(10 * KEY_NO_ANSWER_HOLDS_MS) })).toBe(false);
     expect(ownCopyWorks(true, { kind: 'direct' }, { noAnswerAt: ago(10 * KEY_NO_ANSWER_HOLDS_MS) })).toBe(false);
   });
