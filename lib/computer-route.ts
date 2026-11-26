@@ -93,10 +93,10 @@ export async function connectedApp(botId: string, name: string): Promise<{ name:
   const found = await prisma.botMcpServer.findMany({ where: { botId, enabled: true, NOT: { connectionId: null } }, include: { connection: true }, orderBy: { createdAt: 'asc' } });
   // Two Apps of the same name (the person's own Exa and the ready-made one): the person's own is weighed first (lib/app-same.ts), at what it costs
   // Universe (nothing), never the ready-made one's price
-  // An own copy the bot server saw fail (ownCopyWorks) is weighed after the ready-made one, so a broken own copy never takes the place of a working way
+  // An App that is not ready-made and that the bot server saw fail (ownCopyWorks: a refused sign-in or key, or no answer) is no way at all, whatever
+  // its name: it is never weighed, so a broken copy never takes the place of a working way, and with no working way the job takes the computer
   const works = (grant: (typeof found)[number]) => !!grant.connection && ownCopyWorks(connectedState(grant.connection).connected, grant.connection, grant);
-  const own = found.filter((grant) => !isReadyMade(grant.connection));
-  const grants = [...own.filter(works), ...found.filter((grant) => isReadyMade(grant.connection)), ...own.filter((grant) => !works(grant))];
+  const grants = [...found.filter((grant) => !isReadyMade(grant.connection) && works(grant)), ...found.filter((grant) => isReadyMade(grant.connection))];
   for (const grant of grants) {
     const connection = grant.connection;
     if (!connection) continue;
@@ -105,7 +105,7 @@ export async function connectedApp(botId: string, name: string): Promise<{ name:
     // The ready-made one was named but the person has their own copy of it here under another name ("Exa Search" by its link): theirs is the
     // way, also when the ready-made one is signed out (only the own copy has to work)
     if (isReadyMade(connection)) {
-      const ownCopy = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && works(other) && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
+      const ownCopy = grants.find((other) => !isReadyMade(other.connection) && isOwnApp(other.connection) && other.connection && sameApp({ name: other.connection.name || other.name, serverUrl: other.connection.serverUrl }, { key: connection.providerToolkit, name: connection.name }));
       if (ownCopy) return { name: ownCopy.name, stepMicros: 0 };
     }
     if (!connectedState(connection).connected) continue;

@@ -129,6 +129,20 @@ run('choosing the way by expected cost, in a real database', () => {
       expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
     });
 
+    it('never weighs an own copy the bot server saw fail, also when it has the very name asked for: with no working way the job takes the computer', async () => {
+      const person = await sara();
+      await connectOwn(person.id, person.brickId, 'Exa', 'https://mcp.exa.ai/mcp');
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      // Alone: a link that is not signed in through the App's site counts as connected, but its key was refused
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
+      // With a ready-made Exa that is signed out too: neither works
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'ready_made' }, data: { signInLostAt: NOW } });
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
+      const plan = { botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } };
+      expect(await startJob(plan, NOW)).toMatchObject({ ok: true });
+    });
+
     it('never takes an own copy the bot server saw fail (a refused key, or no answer) over a working ready-made one', async () => {
       const person = await sara();
       await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
