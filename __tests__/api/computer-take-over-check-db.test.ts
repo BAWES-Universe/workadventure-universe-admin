@@ -128,6 +128,23 @@ run('the honest check before a take over (1B)', () => {
       expect((await readControl(sara.brickId))?.state).toBe('human_ready');
     });
 
+    // Sentry on #1034: a hand back on a blocked computer (control `fencing`, no lease) is answered at once, not after waiting out the join time
+    it('a hand back on a blocked computer ends the block at once: control is Brick’s again, nothing is stopped and nothing is said', async () => {
+      const { sara } = await waitingForSignIn();
+      stillRunning();
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toEqual({ ok: false, reason: 'still_running' });
+      expect((await readControl(sara.brickId))?.state).toBe('fencing');
+      const stopsBefore = stops();
+      const started = Date.now();
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+      // Well inside the time a poll would wait (joinMs is 2 s in these tests)
+      expect(Date.now() - started).toBeLessThan(CONTROL_TIMING.joinMs / 2);
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect({ state: row.controlState, check: row.takeOverCheck, machine: row.machine }).toEqual({ state: 'agent', check: null, machine: 'working' });
+      expect(stops()).toBe(stopsBefore);
+      expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
+    });
+
     it('the sweep leaves it for the person: it never runs the fence again by itself, and never gives the screen without their tap', async () => {
       const { sara } = await waitingForSignIn();
       stillRunning();
