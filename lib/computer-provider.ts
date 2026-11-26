@@ -11,6 +11,7 @@
  */
 
 import { prisma } from '@/lib/db';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import type { OutsideManifest } from '@/lib/computer-outside';
 import { Agent37Client } from '@/lib/agent37/client';
 import { Agent37ComputerProvider } from '@/lib/agent37/provider';
@@ -123,8 +124,11 @@ export interface ComputerProvider {
   diskBytes?(): number | null;
   /** Makes this Brick's one computer. Asked once for a Brick: a second ask for the same Brick is the same machine. */
   create(botId: string): Promise<MachineInfo>;
-  /** Wakes a resting or cold machine. */
-  wake(ref: string): Promise<void>;
+  /**
+   * Wakes a resting or cold machine. `stillMine`: asked right before the call that starts the machine (a start can wait minutes for the machine to be down first): it renews the start's own wake (a fenced beat) and says whether the
+   * start still owns it. When it says no, nothing is sent and `WakeReplaced` is thrown (Opus on #1040).
+   */
+  wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void>;
   /**
    * Brings a machine that was just made or woken to what a job needs: the current image, the screen and the browser, the local model
    * address. Safe to ask any number of times. Throws when it cannot be made ready (the job then does not start). Answers the mark the take-over fence
@@ -133,8 +137,10 @@ export interface ComputerProvider {
    * `freshBoot`: the computer is stopped and started first, so what it was running before is gone and the mark is the first of a boot nothing has run on. Asked for a
    * computer that has worked before and has no mark saved (made ready before marks were kept by Orbit): a mark taken on a boot that already ran jobs would name
    * their programs as the computer's own.
+   * `stillMine`: asked right before EVERY call that stops or starts the machine (each restart waits for the machine to be down in between, and a start that lost its wake must never send one after the stop that replaced it was proved): it renews
+   * the start's own wake (a fenced beat) and says whether the start still owns it. When it says no, nothing is sent and `WakeReplaced` is thrown (Opus on #1040).
    */
-  ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void>;
+  ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null | void>;
   /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
   checkup(): Promise<Check[]>;
   /** What the provider billed for a UTC day, by machine, for the daily check of our books against its bill. Reads only. Absent for a provider with no bill. */
@@ -337,10 +343,12 @@ export class FakeComputerProvider implements ComputerProvider {
   /** A test sets it to pretend a restart that does not show a new boot: a fresh boot is asked for, no mark is proved, and `ready` answers null (the job still runs). */
   freshBootUnproved = false;
 
-  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void> {
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null | void> {
     this.fail('ready');
     this.readied.push(ref);
     if (options?.freshBoot) {
+      // The pretend restart is a stop and a start: it is only sent while the start still owns its wake
+      if (options.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       this.freshBoots.push(ref);
       if (this.freshBootUnproved) return null;
       this.rebootForTests(ref);
@@ -372,9 +380,11 @@ export class FakeComputerProvider implements ComputerProvider {
     return [{ name: 'provider', ok: true, detail: 'The pretend provider (development only)' }];
   }
 
-  async wake(ref: string): Promise<void> {
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     this.note('wake', ref);
     this.fail('wake');
+    // The pretend start is only sent while the start still owns its wake
+    if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     this.awake_.add(ref);
   }
 

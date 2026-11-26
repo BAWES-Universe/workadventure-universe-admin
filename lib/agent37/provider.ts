@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_PIECE_END, LIST_READ_PIECE, LIST_SEND_PIECE, LIST_TRIES, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import * as Sentry from '@sentry/nextjs';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
@@ -389,7 +390,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null> {
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null> {
+    // Before EVERY stop or start of the machine in here (each restart waits for the machine to be down between the two, and a start that lost its wake must never send one after the stop that replaced it was proved): the wake is
+    // renewed (a fenced beat) and must still be this start's, else nothing is sent (Opus on #1040)
+    const owned = async () => {
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
+    };
     let instance = await this.settle(ref, { update: 'unless_outside' });
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
@@ -400,8 +406,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
       const read = await this.client.exec(ref, BOOT_ID_COMMAND, { timeoutMs: 15_000 }).catch(() => null);
       const seen = read && read.exitCode === 0 ? read.stdout.trim() : '';
       was = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seen) ? seen : null;
+      await owned();
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
+      await owned();
       await this.client.startInstance(ref);
       instance = await this.untilHealthy(ref, instance.url);
     }
@@ -414,8 +422,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
     };
     let up = await again(await this.up(ref));
     if (up.restart) {
+      await owned();
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
+      await owned();
       await this.client.startInstance(ref);
       await this.untilHealthy(ref, instance.url);
       up = await again(await this.up(ref));
@@ -483,7 +493,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
   }
 
-  async wake(ref: string): Promise<void> {
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     let instance = await this.client.getInstance(ref);
     // A machine that is still going down cannot be started yet: wait for it to be down (or asleep), then wake it as any other
     if (instance.status === 'stopping') instance = await this.untilDown(ref);
@@ -491,6 +501,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (gone(status)) throw new Error(`The computer is ${status}`);
     if (status === 'sleeping' || status === 'stopped') {
       await this.checkFunds();
+      // After the waits above (a machine going down, the billing call): a start that lost its wake in the meantime sends nothing (Opus on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       await this.client.startInstance(ref);
     }
     // Running, starting, waking or provisioning: it is on its way, and asking again would only queue a second wake

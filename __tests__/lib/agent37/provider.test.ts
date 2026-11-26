@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import * as Sentry from '@sentry/nextjs';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import type { ExecOptions } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
 import { asciiJson, LIST_SEND_PIECE } from '@/lib/computer-outside';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
@@ -882,6 +883,72 @@ describe('getting a machine ready for a job', () => {
     const order = w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
     expect(order).toEqual(['stop:m1', 'start:m1']);
     expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  describe('a start that lost its wake sends no power call (Opus on #1040: stillMine is asked right before EVERY stop and start)', () => {
+    const OLD_BOOT = '11111111-2222-4333-8444-555555555555';
+    const prepare = async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let ups = 0;
+      // A fresh boot AND a part that asks for a restart: all four power calls of `ready` are reached
+      w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? `${OLD_BOOT}\n` : command === 'universe-up' ? (++ups === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n') : 'ok'));
+      return { w, p };
+    };
+    const power = (w: { calls: string[] }) => w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
+
+    it.each([
+      [1, []],
+      [2, ['stop:m1']],
+      [3, ['stop:m1', 'start:m1']],
+      [4, ['stop:m1', 'start:m1', 'stop:m1']],
+    ])('ready: refused at ask %i, only the calls before it were sent, and WakeReplaced is thrown', async (refusedAt, sent) => {
+      const { w, p } = await prepare();
+      let asks = 0;
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks < refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(power(w)).toEqual(sent);
+      expect(asks).toBe(refusedAt);
+    });
+
+    it('ready: a start that still owns its wake asks before each of the four calls, and every call is sent once', async () => {
+      const { w, p } = await prepare();
+      const order: string[] = [];
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => (order.push(`ask@${power(w).length}`), true) })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+      // Asked with 0, 1, 2 and 3 calls sent so far: right before each of them
+      expect(order).toEqual(['ask@0', 'ask@1', 'ask@2', 'ask@3']);
+    });
+
+    it('ready: an Orbit that asks nothing (no stillMine) restarts as before', async () => {
+      const { w, p } = await prepare();
+      await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+    });
+
+    it('wake: refused after the waits (a machine going down, the billing call), no start is sent', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('start:m1');
+      // Still its own: started once
+      await p.wake('m1', { stillMine: async () => true });
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a machine that is already running is not asked about (nothing is sent to it)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let asks = 0;
+      await p.wake('m1', { stillMine: async () => (asks++, false) });
+      expect(asks).toBe(0);
+    });
   });
 
   it('is ready when the second ask succeeds after a part that was still coming up', async () => {

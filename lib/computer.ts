@@ -87,6 +87,8 @@ import { fenceCommand } from '@/lib/computer-fence-script';
 import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
+import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { endPowerOp, openPowerOpOf, pauseWhenRowFree, powerTiming, PROVIDER_MARGIN_MS, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
@@ -481,8 +483,12 @@ export const takeWakeTicketForTests = takeWakeTicket;
  * image update, a restart of the instance), so no fixed limit of that wait is assumed.
  */
 let wakeTiming = { beatMs: 30_000, staleMs: 2 * 60_000 };
-/** How long after the stop of an abandoned wake its turn hold is kept: a wake call that was in flight can still land at the provider inside the provider's margin, and the sweep stops the machine again each pass until that time has passed. */
-const ABANDONED_WAKE_WATCH_MS = PROVIDER_MARGIN_MS;
+/**
+ * How long after the stop of an abandoned wake its turn hold is kept: a power call that was in flight can still land at the provider, and the sweep stops the machine again each pass until that time has passed. A start sends a power call only right after
+ * a fenced beat proved it still owns its wake (`stillMine`), the stop of an abandoned wake can only be claimed `staleMs` after that beat, and a call that was retried (`again`) can reach the provider as late as the longest account call plus the provider's
+ * margin after the beat: so the watch must be at least that minus `staleMs`. It is the whole of it (Opus on #1040).
+ */
+const ABANDONED_WAKE_WATCH_MS = LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS;
 /** Test seam: the wake timings in force and the watch time, to prove a stale wake is never judged abandoned before its late call can no longer land. */
 export function wakeTimingForTests(): { beatMs: number; staleMs: number; watchMs: number } {
   return { ...wakeTiming, watchMs: ABANDONED_WAKE_WATCH_MS };
@@ -2230,6 +2236,17 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
     }, wakeTiming.beatMs);
     beat.unref?.();
     let mark: MachineMark | null = null;
+    // A fenced beat, asked right before every call that wakes, stops or restarts the machine: the start's own beat write, which lands only while it still owns its wake (its ticket is the Brick's and the row is still waking or restoring).
+    // The write itself is the proof: neither the sweep's claim of an abandoned wake nor a take-over can land for `staleMs` after it. An error is a no (nothing is sent). A start that lost its wake sends nothing (Opus on #1040)
+    const stillMine = async (): Promise<boolean> => {
+      try {
+        return (await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine} AND "machine" IN ('waking', 'restoring')`) === 1;
+      } catch {
+        return false;
+      }
+    };
+    // A start that lost its wake looks again, as one whose final write found another ticket does (it never fails its job, and never writes the row `broken` over the replacement's wake)
+    let replaced = false;
     try {
       // A computer that has worked before and has no mark saved here (made ready before Orbit kept marks) may be on a boot that already ran jobs: a machine that slept keeps its boot and its
       // programs. A mark taken now would put its clock reading AFTER whatever those jobs left running, and the fence would keep it as the computer's own. So it is started afresh before the first
@@ -2239,26 +2256,28 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       // A wake call that fails may still have started the instance (Agent37 starts it and then waits for health; a wait that runs out rejects with the instance running at full rate): it is stopped as a failed readiness is, under this
       // start's own ticket, and against the state the row has when that ticket went to a stop (the stop of an abandoned wake, Turn off computer). Nothing stops a `broken` row afterwards, so nothing is left to the sweep (Opus on #1040)
       try {
-        await provider.wake(ref);
+        await provider.wake(ref, { stillMine });
       } catch (error) {
         if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine).catch(() => false))) await stopLateWake(botId, ref, provider, mine);
-        throw error;
+        if (!(error instanceof WakeReplaced)) throw error;
+        replaced = true;
       }
       // A wake that was given up on (its beat missed, so its stop was claimed under the next epoch) can still reach the provider AFTER the stop was proved: the machine the row calls stopped is awake again. It is stopped against the
       // state the row has now, and this start looks again from the top (it wakes the machine under a ticket of its own when it still needs it) instead of waiting for readiness on a machine it no longer owns (CodeRabbit on #1040)
-      if (await stopLateWake(botId, ref, provider, mine)) {
+      if (!replaced && (await stopLateWake(botId, ref, provider, mine))) {
         // A machine that was stopped under this start (a turn-off, a take-over's stop, the stop of an abandoned wake) is woken again only while a job still needs it: with none left there is nothing to wake it for, and it stays asleep (Sentry on #1040)
         if (!(await wakeStillWanted(botId))) return;
         continue;
       }
-      try {
+      if (!replaced) try {
         // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
-        mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
+        mark = (await provider.ready(ref, { ...(freshBoot ? { freshBoot: true } : {}), stillMine })) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
         if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine))) await stopLateWake(botId, ref, provider, mine);
-        throw error;
+        if (!(error instanceof WakeReplaced)) throw error;
+        replaced = true;
       }
     } finally {
       clearInterval(beat);
@@ -2266,7 +2285,7 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
     // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
     let from: Date | null = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
     let older = cameBack?.olderCopyUsed ?? false;
-    if (!restoring && cameBack === null) {
+    if (!replaced && !restoring && cameBack === null) {
       // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
       // It is cleared only when the files were saved after the return finished: the saved-copy date that stood when the return began (the newest copy's, which an older-copy
       // return leaves in place) is not a save made since.
@@ -2278,7 +2297,7 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       }
     }
     // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
-    const wrote = await prisma.$transaction(async (tx) => {
+    const wrote = replaced ? false : await prisma.$transaction(async (tx) => {
       const held = await tx.$queryRaw<Array<{ wake_epoch: number; mark_boot_id: string | null }>>`SELECT "wake_epoch", "mark_boot_id" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if (held[0]?.wake_epoch !== mine) return false;
       await tx.brickComputer.update({
@@ -2291,7 +2310,7 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
     if (wrote) return;
     // A start whose beats failed can be in `ready` when its wake is given up on, and `ready` can restart the machine after the stop was proved: the row says stopped, nobody wants it, and the machine is awake. It is stopped against the
     // state the row has (a replacement's waking row is never stopped), as when the wake call itself lands late (Opus on #1040)
-    await stopLateWake(botId, ref, provider, mine);
+    if (!replaced) await stopLateWake(botId, ref, provider, mine);
     // Replaced: the machine is the replacement's to make ready. A job runs only on a machine that is `working`: if it is, this start has nothing more to do; if it is not (the replacement's wake is still going, or it failed and the machine
     // was stopped) the loop waits for it like any start that arrives then, and wakes it with its own ticket when no wake is in flight
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
@@ -2301,6 +2320,9 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
     }
     // The wake was given up on and the machine stopped (its ticket went to that stop): with no job left that needs it, it stays asleep instead of being woken again for nobody (Sentry on #1040)
     if ((row.machine === 'stopped' || row.machine === 'stopping') && !(await wakeStillWanted(botId))) return;
+    // A start that lost its wake before it sent a power call (stillMine) is no longer the start that just made the machine: it looks again as a start that arrives now would (it waits for a wake in flight, and takes a stale one over only when
+    // its beat is stale), and the looks are counted, so a check that keeps saying no ends the start instead of looping (Opus on #1040)
+    if (replaced) spins++;
   }
 }
 

@@ -30,6 +30,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals, wakeTimingForTests } from '@/lib/computer';
+import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
@@ -63,23 +64,27 @@ class HeldStops extends FakeComputerProvider {
   /** The next wake calls that are held BEFORE they reach the machine (a wake request that is slow to arrive). */
   holdWake = 0;
   readonly heldWake: Array<() => void> = [];
-  async wake(ref: string): Promise<void> {
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     if (this.holdWake > 0) {
       this.holdWake--;
       await new Promise<void>((resolve) => this.heldWake.push(resolve));
     }
-    await super.wake(ref);
+    await super.wake(ref, options);
+    // The start was SENT: it passed the check of the start's wake (a test reads this to see that nothing was sent)
+    this.wakeSent.push(ref);
     if (this.failWakeAfterLanding) {
       this.failWakeAfterLanding = false;
       throw new Error('The pretend provider started the machine and then did not find it healthy');
     }
   }
+  /** The wake calls that were sent to the machine (a call refused by the start's own check never gets here). */
+  readonly wakeSent: string[] = [];
   /** The next wake call reaches the machine (it is awake) and then rejects. */
   failWakeAfterLanding = false;
   /** The next readiness checks that are held (a wake that is slow to finish). */
   holdReady = 0;
   readonly heldReady: Array<() => void> = [];
-  async ready(ref: string, options?: { freshBoot?: boolean }): ReturnType<FakeComputerProvider['ready']> {
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): ReturnType<FakeComputerProvider['ready']> {
     if (this.holdReady > 0) {
       this.holdReady--;
       await new Promise<void>((resolve) => this.heldReady.push(resolve));
@@ -645,6 +650,122 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await fake.awake(sara.ref)).toBe(false);
     }, 30_000);
 
+    describe('Opus on #1040: a start sends a power call only while it still owns its wake (stillMine: a fenced beat before every call)', () => {
+      /** A computer that has worked and has no mark saved: its next wake asks for a fresh boot (the restart `ready` waits for). */
+      const freshBootReady = async (name: string, timing: { beatMs: number; staleMs: number }) => {
+        const sara = await owner(name);
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        setWakeTimingForTests(timing);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped', markBootId: null } });
+        fake.freshBoots.length = 0;
+        fake.wakeSent.length = 0;
+        return sara;
+      };
+
+      it('the restart of `ready` that comes after the stop of an abandoned wake was proved and its watch passed is never sent, and the machine stays asleep', async () => {
+        const sara = await freshBootReady('stillmine-abandoned-restart', { beatMs: 60_000, staleMs: 400 });
+        fake.holdReady = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldReady.length === 1);
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+        await sleep(600);
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        await watchPassed(sara);
+        // The sender is alive, was only slow, and now sends its restart
+        fake.heldReady.splice(0).forEach((release) => release());
+        await starting;
+        expect(fake.freshBoots).toEqual([]);
+        expect(await fake.awake(sara.ref)).toBe(false);
+        expect((await machineOf(sara)).machine).toBe('stopped');
+      }, 30_000);
+
+      it('a replacement owns the row: the start that lost its wake sends it no stop and no start, its job is NOT failed and the row is NOT written broken (it looks again)', async () => {
+        const sara = await freshBootReady('stillmine-replaced', { beatMs: 60_000, staleMs: 120_000 });
+        fake.holdReady = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldReady.length === 1);
+        const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+        // Another start took the wake over (its ticket is the next number) and is waking the machine itself
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "wake_epoch" = "wake_epoch" + 1, "machine" = 'waking', "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
+        fake.heldReady.splice(0).forEach((release) => release());
+        // The replacement finishes its wake while the old start looks again
+        await sleep(300);
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, title: 'A', status: 'failed' } })).toBe(0);
+        expect((await machineOf(sara)).machine).toBe('waking');
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
+        await expect(starting).resolves.toMatchObject({ ok: true });
+        expect(fake.freshBoots).toEqual([]);
+        expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, title: 'A', status: 'failed' } })).toBe(0);
+        expect((await machineOf(sara)).machine).toBe('working');
+      }, 30_000);
+
+      it('the start of a wake that was given up on (the stop of the abandoned wake proved, the watch passed) is never sent', async () => {
+        const sara = await freshBootReady('stillmine-abandoned-wake', { beatMs: 60_000, staleMs: 400 });
+        fake.holdWake = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldWake.length === 1);
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+        await sleep(600);
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        await watchPassed(sara);
+        fake.heldWake.splice(0).forEach((release) => release());
+        await starting;
+        expect(fake.wakeSent).toEqual([]);
+        expect(await fake.awake(sara.ref)).toBe(false);
+      }, 30_000);
+
+      it('a start that still owns its wake sends the restart once, as before', async () => {
+        const sara = await freshBootReady('stillmine-normal', { beatMs: 60_000, staleMs: 120_000 });
+        await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).resolves.toMatchObject({ ok: true });
+        expect(fake.freshBoots).toEqual([sara.ref]);
+        expect(fake.wakeSent).toEqual([sara.ref]);
+        expect((await machineOf(sara)).machine).toBe('working');
+      }, 30_000);
+
+      it('the check is a WRITE: a start whose check just landed is not claimed by the sweep for the stale time, and is claimed after it', async () => {
+        const sara = await freshBootReady('stillmine-is-a-beat', { beatMs: 60_000, staleMs: 800 });
+        fake.holdWake = 1;
+        fake.holdReady = 1;
+        const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+        await until(() => fake.heldWake.length === 1);
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+        // Its beat is stale by now (no beat has come)
+        await sleep(1000);
+        const ticket = (await machineOf(sara)).wakeEpoch;
+        // The wake call is released: the check before the start is a beat, so the wake is live again
+        fake.heldWake.splice(0).forEach((release) => release());
+        await until(() => fake.heldReady.length === 1);
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'waking', wakeEpoch: ticket });
+        // Left without a beat for the stale time, it is claimed
+        await sleep(1000);
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        expect((await machineOf(sara)).wakeEpoch).toBeGreaterThan(ticket);
+        fake.heldReady.splice(0).forEach((release) => release());
+        await starting;
+      }, 30_000);
+
+      it('a check that cannot be written (the database does not answer) is a no: nothing is sent to the machine', async () => {
+        const sara = await freshBootReady('stillmine-db-down', { beatMs: 60_000, staleMs: 120_000 });
+        const real = prisma.$executeRaw.bind(prisma);
+        const spy = jest.spyOn(prisma, '$executeRaw').mockImplementation(((strings: unknown, ...values: unknown[]) =>
+          Array.isArray(strings) && strings.join('?').includes(`"machine" IN ('waking', 'restoring')`) ? Promise.reject(new Error('The database did not answer')) : (real as (...args: unknown[]) => unknown)(strings, ...values)) as unknown as typeof prisma.$executeRaw);
+        try {
+          await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW).catch(() => undefined);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(fake.wakeSent).toEqual([]);
+        expect(fake.freshBoots).toEqual([]);
+        expect(await fake.awake(sara.ref)).toBe(false);
+      }, 30_000);
+    });
+
     it('Opus on #1040: an ordinary turn hold on a `stopped` machine lifts after one proved stop', async () => {
       const sara = await owner('hold-stopped');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
@@ -659,7 +780,9 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
     it('Opus on #1040: a wake is judged abandoned only after its late call can no longer land (stale time beyond a beat plus the provider margin)', () => {
       const { beatMs, staleMs, watchMs } = wakeTimingForTests();
       expect(staleMs).toBeGreaterThan(beatMs + PROVIDER_MARGIN_MS);
-      expect(watchMs).toBe(PROVIDER_MARGIN_MS);
+      // Opus on #1040: a power call is sent only right after a fenced beat, so the stop of an abandoned wake lands `staleMs` after it at the soonest, and a call retried by the client lands at the latest the longest account call plus the margin after it
+      expect(watchMs).toBe(LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS);
+      expect(staleMs + watchMs).toBeGreaterThanOrEqual(LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS);
     });
 
     it('CodeRabbit on #1040: an abandoned wake whose wake call reaches the provider only AFTER the stop was proved stops the machine it woke, and does not wake it again for nobody', async () => {
