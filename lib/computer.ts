@@ -425,7 +425,7 @@ async function claimStop(botId: string, ref: string, only?: string[], ticket?: n
     // The stop of an abandoned wake takes the next epoch in the same write (CodeRabbit on #1040): the wake that was given up on may still resume (it only missed its beats), and its ticket then no longer matches, so its final write, its beat and its own failure stop all land on nothing
     // The same write also pushes a turn hold out by the watch time (Opus on #1040): the wake that was given up on may still reach the provider after this stop is proved (and its sender may be dead, so nothing of its own cleans up), so the
     // hold is not lifted on this proof but only on a proof from a stop sent after the watch time has passed. In the same write as the claim: a crash between the two would leave the hole open
-    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1, "turn_unproven_since" = CASE WHEN "turn_unproven_since" IS NULL THEN NULL ELSE (NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${ABANDONED_WAKE_WATCH_MS / 1000}) END` : Prisma.empty;
+    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1, "turn_unproven_since" = CASE WHEN "turn_unproven_since" IS NULL THEN NULL ELSE (NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${(ABANDONED_WAKE_WATCH_MS + TURN_HOLD_CLOCK_SKEW_MS) / 1000}) END` : Prisma.empty;
     const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC')${fence} WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
   }, rowLockWait());
@@ -491,6 +491,11 @@ let wakeTiming = { beatMs: 30_000, staleMs: 2 * 60_000 };
  * margin after the beat: so the watch must be at least that minus `staleMs`. It is the whole of it (Opus on #1040).
  */
 const ABANDONED_WAKE_WATCH_MS = LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS;
+/**
+ * The most that this server's clock may be ahead of the database's before a turn hold is lifted late (Sentry on #1040): an ordinary hold is dated by this server's clock (a JavaScript date, with the job's end), while the lift is judged by the database's clock.
+ * `settleTurnHold` lifts a hold dated up to this much past the database's now, and the hold that the stop of an abandoned wake pushes out is dated this much further (watch + this), so the watch itself is kept whole.
+ */
+const TURN_HOLD_CLOCK_SKEW_MS = 30_000;
 /** Test seam: the wake timings in force and the watch time, to prove a stale wake is never judged abandoned before its late call can no longer land. */
 export function wakeTimingForTests(): { beatMs: number; staleMs: number; watchMs: number } {
   return { ...wakeTiming, watchMs: ABANDONED_WAKE_WATCH_MS };
@@ -4190,9 +4195,9 @@ export async function underTurnHold(botId: string): Promise<boolean> {
  */
 export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
   try {
-    // The database's clock before anything is decided: a hold lifts only on proof that is NEWER than the hold (a stop claimed after this moment and proved asleep, with the hold itself dated no later than this moment), so the hold
+    // The database's clock before anything is decided (moved on by the skew a server's clock may have): a hold lifts only on proof that is NEWER than the hold (a stop claimed after this moment and proved asleep, with the hold itself dated no later than this moment), so the hold
     // that the stop of an abandoned wake pushes out (see `claimStop`) outlasts the wake call that may still land (Opus on #1040)
-    const [{ now: t0 }] = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT (NOW() AT TIME ZONE 'UTC') AS now`;
+    const [{ now: t0 }] = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT ((NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${TURN_HOLD_CLOCK_SKEW_MS / 1000})) AS now`;
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true } });
     if (!row?.turnUnprovenSince) return true;
     const seen = row.turnUnprovenSince;

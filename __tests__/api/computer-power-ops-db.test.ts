@@ -542,6 +542,37 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       });
     });
 
+    it('Sentry on #1040: a hold dated by a server clock that is ahead of the database\'s (up to the skew) is lifted at once on proof, not left to the next sweep; one dated further ahead than that (the watch of an abandoned wake) is not', async () => {
+      const sara = await owner('skew');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      // This server's clock is 20 s ahead of the database's: its job's end dated the hold 20 s past the database's now
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working', turnUnprovenSince: new Date(Date.now() + 20_000) } });
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect((await machineOf(sara)).turnUnprovenSince).toBeNull();
+      expect(await fake.awake(sara.ref)).toBe(false);
+      // A hold dated a minute and a half ahead (inside the watch of an abandoned wake) is kept
+      await fake.wake(sara.ref);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working', turnUnprovenSince: new Date(Date.now() + 90_000) } });
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect((await machineOf(sara)).turnUnprovenSince).not.toBeNull();
+    }, 30_000);
+
+    it('Sentry on #1040: the stop of an abandoned wake still keeps its hold for the whole watch (the skew is added to what it pushes out, so the watch is not shortened)', async () => {
+      const sara = await owner('watchwhole');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 400 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
+      await sleep(600);
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      const [{ ahead }] = await prisma.$queryRaw<Array<{ ahead: number }>>`SELECT EXTRACT(EPOCH FROM ("turn_unproven_since" - (NOW() AT TIME ZONE 'UTC')))::float8 AS ahead FROM "brick_computers" WHERE "bot_id" = ${sara.brickId}`;
+      const { watchMs } = wakeTimingForTests();
+      // The hold is dated the watch plus the skew ahead, and the lift judges it a skew ahead of now: the whole watch passes before it lifts
+      expect(ahead).toBeGreaterThan((watchMs + 30_000) / 1000 - 5);
+      expect(ahead).toBeLessThan((watchMs + 30_000) / 1000 + 1);
+    }, 30_000);
+
     it('a turn hold\'s stop is claimed against the state it saw: a wake that takes its ticket AFTER the state was read and BEFORE the claim gets no stop sent under it (the interleaving is held at the provider look between the two)', async () => {
       const sara = await owner('holdclaim');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
