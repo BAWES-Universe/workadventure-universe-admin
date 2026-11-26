@@ -958,6 +958,7 @@ model Bot {
   brickItems      BrickItem[]
   template        BrickTemplate?
   madeFrom        BrickTemplateUse?
+  reportNotes     BrickReportNote[]
 
   @@unique([ownerId, createRequestKey])
   @@index([roomId])
@@ -1769,6 +1770,60 @@ model AppUseOutcome {
   @@index([appKey, recordedAt])
   @@index([recordedAt])
   @@map("app_use_outcomes")
+}
+
+// Brick reports (mock "Brick reports inbox"): a problem many Bricks hit, counted. Notes that read alike (same kind and area, close
+// titles) join one problem; nothing here says who sent them. `state` is the inbox tab it is on.
+model BrickReportProblem {
+  id          String            @id @default(uuid())
+  // problem | cant_do | friction | idea
+  kind        String            @db.VarChar(20)
+  // apps | computer | pages | chat | voice | map | memory | files | credit | other
+  area        String            @db.VarChar(20)
+  title       String            @db.VarChar(80)
+  // new | working | fixed
+  state       String            @default("new") @db.VarChar(20)
+  // A note came in after it was marked fixed: it went back to New, ranked higher
+  cameBack    Boolean           @default(false) @map("came_back")
+  stateAt     DateTime?         @map("state_at")
+  firstSeenAt DateTime          @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
+  notes       BrickReportNote[]
+
+  @@index([kind, area, lastSeenAt])
+  @@index([state])
+  @@map("brick_report_problems")
+}
+
+// One note a Brick sent to the Universe team, cleaned of emails, phone numbers, links, @names and long numbers before it is kept.
+// `botId` is kept only so the Brick can later tell its owner a fix shipped; no screen shows it, and it goes when the Brick is deleted.
+// `personKey` is a one-way hash, only to count different people. `takeBackHash` is the hash of the key the chat holds to take it back.
+model BrickReportNote {
+  id           String             @id @default(uuid())
+  problemId    String             @map("problem_id")
+  problem      BrickReportProblem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  botId        String?            @map("bot_id")
+  bot          Bot?               @relation(fields: [botId], references: [id], onDelete: SetNull)
+  personKey    String?            @map("person_key") @db.VarChar(64)
+  kind         String             @db.VarChar(20)
+  area         String             @db.VarChar(20)
+  title        String             @db.VarChar(80)
+  tried        String             @default("") @db.VarChar(280)
+  stopped      String             @default("") @db.VarChar(280)
+  idea         String             @default("") @db.VarChar(280)
+  // stopped | slowed | idea
+  effect       String             @db.VarChar(20)
+  // What the bot server already knew, with no words in it: the model, own key or not, the game version, the tools it had
+  context      Json?
+  takeBackHash String             @map("take_back_hash") @db.VarChar(64)
+  takenBackAt  DateTime?          @map("taken_back_at")
+  // The day (UTC) it was sent: a Brick sends at most so many a day
+  day          DateTime           @db.Date
+  createdAt    DateTime           @default(now()) @map("created_at")
+
+  @@index([problemId, createdAt])
+  @@index([botId, day])
+  @@map("brick_report_notes")
 }
 
 // "Asked for, not available yet": an App name a Brick looked for and did not find, counted per day and per person. ONLY the name
