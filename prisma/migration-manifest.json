@@ -175,7 +175,7 @@
   ],
   "shipping": {
     "lastMigration": "20261124000000_computer_round9_columns",
-    "count": 201,
+    "count": 202,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -363,6 +363,7 @@
       "20261120130000_computer_refund_obligations",
       "20261120140000_computer_fault_run",
       "20261120140000_page_order_long_wait_index",
+      "20261121100000_artifact_publish",
       "20261121150000_computer_start_key",
       "20261121200000_computer_late_told",
       "20261122120000_computer_finish_intent",

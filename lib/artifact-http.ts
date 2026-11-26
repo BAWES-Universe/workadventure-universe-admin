@@ -203,6 +203,9 @@ export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();
 
 export const shareSchema = z.object({ viewer: viewerSchema, openScope: z.string().optional(), changeScope: z.string().optional() }).strict();
 
+/** `version`: the one the owner was looking at when they pressed Publish; the latest when left out. */
+export const publishSchema = z.object({ viewer: viewerSchema, version: versionNumber.nullish() }).strict();
+
 export const deleteSchema = z.object({ viewer: viewerSchema }).strict();
 
 export const restoreSchema = z.object({ viewer: viewerSchema, number: versionNumber }).strict();

@@ -198,7 +198,7 @@ export function artifactTitleSql(
     values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`), scope.botId, scope.everyoneHere === true],
     sql: `
       SELECT id FROM artifacts
-      WHERE ((chat_kind = $1 AND chat_ref = $2 AND (open_scope IN ('chat', 'link') OR (NOT $6::boolean AND $3::text IS NOT NULL AND owner_id = $3::text)))
+      WHERE ((chat_kind = $1 AND chat_ref = $2 AND (open_scope IN ('chat', 'link', 'public') OR (NOT $6::boolean AND $3::text IS NOT NULL AND owner_id = $3::text)))
           OR (NOT $6::boolean AND $3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
         AND regexp_replace(title, '${ARABIC_MARKS_CLASS}', '', 'g') ILIKE ${mode === 'all' ? 'ALL' : 'ANY'} ($4::text[])`,
   };
