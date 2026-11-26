@@ -330,7 +330,9 @@ describe('GitHub row: Universe’s GitHub App', () => {
     expect(button).toHaveTextContent('Set up Universe’s GitHub App');
     // A link Orbit follows itself, not an address someone types
     expect(button.getAttribute('href')).toBe('/admin/github-app');
-    expect(within(sheet).getByTestId('apps-github-text')).toHaveTextContent('keep running on Composio');
+    expect(within(sheet).getByTestId('apps-github-text')).toHaveTextContent('keep running as they do now');
+    // The guidance names no provider: what GitHub runs on is the Runs on choice's job (operator-only)
+    expect(within(sheet).getByTestId('apps-github-text')).not.toHaveTextContent('Composio');
     expect(within(sheet).queryByTestId('apps-github-status')).not.toBeInTheDocument();
     // How GitHub runs through Composio is untouched: the Runs on choice is still there, in its old words
     expect(within(sheet).getByTestId('apps-route-composio')).toBeInTheDocument();
@@ -354,7 +356,8 @@ describe('GitHub row: Universe’s GitHub App', () => {
     expect(within(sheet).queryByTestId('apps-github-setup')).not.toBeInTheDocument();
     expect(within(sheet).getByTestId('apps-github-open').getAttribute('href')).toBe('https://github.com/apps/bawes-universe');
     expect(within(sheet).getByTestId('apps-github-open')).toHaveTextContent('bawes-universe');
-    expect(within(sheet).getByTestId('apps-github-runs-on-note')).toHaveTextContent('Only for GitHub connections made through Composio before.');
+    expect(within(sheet).getByTestId('apps-github-runs-on-note')).toHaveTextContent('Only for GitHub connections people made before.');
+    expect(within(sheet).getByTestId('apps-github-runs-on-note')).not.toHaveTextContent('Composio');
     expect(within(sheet).getByTestId('apps-route-universe')).toHaveTextContent('New connections use Universe’s GitHub App above.');
     expect(within(sheet).getByTestId('apps-route-universe')).not.toHaveTextContent('no version of our own');
     // The choice itself works as before: still Composio, still not pickable
