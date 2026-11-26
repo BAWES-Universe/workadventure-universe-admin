@@ -443,9 +443,10 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
     // An App's actions stay where Universe sorted them (Send email can never be filed under Looks things up): their own choice replaces a move
     if (kindOf(server) === 'appActions') throw new BotSettingsError(409, APP_ACTIONS_DONT_MOVE);
-    // A tool Universe placed (confirmed by nobody: sorted on a person's own App, or kept for them since it changed): a move to the heading
-    // it sits under now is still the person's choice, and is recorded as theirs (lib/app-own-tools.ts), so Universe never moves it again
-    const placedByUniverse = !!tool.confirmedAt && !tool.confirmedById;
+    // On a person's own App, a tool Universe placed (confirmed by nobody: sorted, or kept for them since it changed): a move to the heading
+    // it sits under now is still the person's choice, and is recorded as theirs (lib/app-own-tools.ts), so Universe never moves it again.
+    // Elsewhere (a key App's tested operation, also confirmed by nobody) a move to the same heading changes nothing, as before
+    const placedByUniverse = tool.heading === heading && !!tool.confirmedAt && !tool.confirmedById && (await universeSortsTools(serverId, tx));
     if (tool.heading !== heading || placedByUniverse) {
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between

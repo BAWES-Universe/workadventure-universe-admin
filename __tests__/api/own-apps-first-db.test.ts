@@ -223,6 +223,18 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       expect(later.tools[0]).toMatchObject({ heading: 'deletesOrSends', confirmedBy: { name: 'sara' }, movedBy: { name: 'sara' } });
     });
 
+    it('changes nothing on a move to the same heading of a tool confirmed by nobody on an App Universe does not sort', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('notes', 'g1', 'looksUp')] });
+      // Not the person's own App any more (Universe's GitHub): a tool confirmed by nobody there is like a key App's tested operation
+      const grant = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } });
+      await prisma.appConnection.update({ where: { id: grant.connectionId! }, data: { source: 'github' } });
+      const before = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } });
+      await moveTool(saraBrick, serverId, synced.tools[0].id, 'looksUp', sara);
+      expect((await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } })).policyRevision).toBe(before.policyRevision);
+      expect(await prisma.botMcpTool.findUniqueOrThrow({ where: { id: synced.tools[0].id } })).toMatchObject({ heading: 'looksUp', movedById: null, confirmedById: null });
+    });
+
     it('keeps a heading a person only confirmed (from before Universe sorted own Apps) when the tool changes, never looser', async () => {
       const serverId = await ownApp();
       const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp')] });
