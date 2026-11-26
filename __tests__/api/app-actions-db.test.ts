@@ -259,8 +259,14 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       await ensureAppActions(KEY, 3_000);
       expect(Date.now() - started).toBeLessThan(1_000);
       expect(adapter.actions.mock.calls.length).toBe(calls);
+      // Also in the last minutes of the wait (90 s left), which must never be taken for another reader's claim and waited out for the full 3 s
+      await prisma.$executeRaw`UPDATE app_action_catalogs SET claimed_until = claimed_until - interval '210 seconds', retry_after = retry_after - interval '210 seconds' WHERE toolkit = ${KEY}`;
+      const late = Date.now();
+      await ensureAppActions(KEY, 3_000);
+      expect(Date.now() - late).toBeLessThan(1_000);
+      expect(adapter.actions.mock.calls.length).toBe(calls);
       // Once waited out, the next reader reads it
-      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null } });
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { retryAfter: null, claimedUntil: null } });
       expect(await refreshAppActions(KEY)).toBe(true);
     });
 
