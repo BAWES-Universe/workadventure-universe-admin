@@ -191,3 +191,15 @@ export async function usableLots(
 }
 
 const reachesRow = (row: RuleRow, person: PersonFacts): boolean => reaches(ruleFacts(row), person);
+
+/**
+ * Whether a shared pool is open to a person, the way `usableLots` decides it: by the rule version the pool was issued under (the latest
+ * version when that one is gone), never a later edit.
+ */
+export async function poolOpenTo(db: Db, lot: { programId: string; ruleVersion: number | null }, personId: string): Promise<boolean> {
+  const person = await personFacts(db, personId);
+  if (!person) return false;
+  const rules = await db.grantRule.findMany({ where: { programId: lot.programId }, include: ruleInclude, orderBy: { version: 'desc' } });
+  const row = rules.find((rule) => rule.version === lot.ruleVersion) ?? rules[0];
+  return !!row && reachesRow(row, person);
+}

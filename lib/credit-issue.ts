@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
-import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, usableLots, poolOpenTo, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
 import { budgetOf, issuedInMonth, platformAccount, getFundingAccount, monthKeyOf, PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
@@ -196,10 +196,12 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
   const plan = planLot(rule, now);
   if (!plan) return { skipped: null };
   const subjectKey = subjectKeyFor(rule, personId);
-  const already = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
-  // Already there (for a shared pool, made when someone else arrived first): this person has it, so they are not among the people left out
+  const already = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true, ruleVersion: true } });
+  // Already there (for a shared pool, made when someone else arrived first): this person has it, so they are not among the people left out.
+  // A pool is theirs only when the rule version it was issued under reaches them (as spending decides it), not a later edit that added them
   if (already) {
-    await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
+    const theirs = rule.share !== 'shared' || (await poolOpenTo(tx, { programId: rule.programId, ruleVersion: already.ruleVersion }, personId));
+    if (theirs) await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
     return { skipped: null };
   }
   const account = await getFundingAccount(rule.fundingAccountId, tx);

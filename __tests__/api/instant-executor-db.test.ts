@@ -1598,6 +1598,42 @@ run('the bounded Instant executor, in a real database', () => {
         }
       });
 
+      it('a pool already there clears a "left out" row only for someone the version it was issued under reaches, as spending decides it, not a later edit that added them', async () => {
+        const { person: first } = await newOwner('nadia');
+        const { person: late } = await newOwner('fahad');
+        const { createGift, endProgram } = await import('@/lib/credit-rules');
+        const { ensureIssued } = await import('@/lib/credit-issue');
+        const { monthKeyOf } = await import('@/lib/credit-funding');
+        const gift = await createGift({ categoryId: 'instant_apps', amount: 30_000, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: [first, late] } }, { userId: sara, superAdmin: true });
+        try {
+          await setBudget(1_000_000_000_000);
+          expect((await ensureIssued(first)).issued.map((lot) => lot.programId)).toContain(gift.programId);
+          // The pool was issued under an older version that did not reach the late one (they were added by the current edit)
+          const current = await prisma.grantRule.findFirstOrThrow({ where: { programId: gift.programId }, orderBy: { version: 'desc' } });
+          const issuedUnder = current.version;
+          const copy: Record<string, unknown> = { ...current };
+          for (const key of ['id', 'createdAt', 'supersededAt', 'version', 'state']) delete copy[key];
+          expect(await prisma.creditLot.count({ where: { programId: gift.programId, ruleVersion: issuedUnder } })).toBe(1);
+          await prisma.grantRule.update({ where: { id: current.id }, data: { version: issuedUnder + 1 } });
+          await prisma.grantRule.create({ data: { ...copy, version: issuedUnder, state: 'superseded', supersededAt: new Date(), recipients: { create: [{ userId: first }] } } as never });
+          // Spending agrees: the pool is the first one's, not the late one's
+          const fromPool = async (personId: string) => (await (await import('@/lib/credit-store')).usableLots(prisma, personId, 'instant_apps', new Date())).some((lot) => lot.lot.programId === gift.programId);
+          expect(await fromPool(first)).toBe(true);
+          expect(await fromPool(late)).toBe(false);
+          const leftOut = (personId: string) => prisma.creditIssueSkip.count({ where: { personId, programId: gift.programId } });
+          for (const personId of [first, late]) await prisma.creditIssueSkip.create({ data: { personId, programId: gift.programId, monthKey: monthKeyOf(new Date()), reason: 'over_budget' } });
+          await ensureIssued(late);
+          await ensureIssued(first);
+          // Still left out: the pool there is not one they can spend from
+          expect(await leftOut(late)).toBe(1);
+          expect(await leftOut(first)).toBe(0);
+        } finally {
+          await endProgram(gift.programId, { userId: sara, superAdmin: true });
+          await prisma.creditIssueSkip.deleteMany({ where: { programId: gift.programId } });
+          await prisma.creditLot.deleteMany({ where: { programId: gift.programId } });
+        }
+      });
+
       it('an owner who spent their monthly credit is offered none until it comes back on the 1st (UTC), and gets it back as soon as room frees up', async () => {
         await setLimits();
         const { createInstantFunds } = await import('@/lib/funding/instant-funds');
