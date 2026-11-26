@@ -129,9 +129,15 @@ const MIN_PHRASE = 4;
  * (an edge that is a symbol or a space has nothing to touch). Words are matched as written, in any case (both are lower case when this is used).
  */
 function wordsIn(words: string): RegExp {
-  const escaped = words.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const before = /^[\p{L}\p{N}]/u.test(words) ? '(?<![\\p{L}\\p{N}])' : '';
-  const after = /[\p{L}\p{N}]$/u.test(words) ? '(?![\\p{L}\\p{N}])' : '';
+  const composed = words.normalize('NFC');
+  const escaped = composed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Scripts written without spaces (Chinese, Japanese, Thai, Lao, Khmer, Burmese) have no word edges: "喜欢茶" sits inside "我喜欢茶很多"
+  const joined = '[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Thai}\\p{Script=Lao}\\p{Script=Khmer}\\p{Script=Myanmar}]';
+  const first = Array.from(composed)[0] ?? '';
+  const last = Array.from(composed).pop() ?? '';
+  const edge = /^[\p{L}\p{N}]/u;
+  const before = edge.test(first) && !new RegExp(`^${joined}$`, 'u').test(first) ? '(?<![\\p{L}\\p{N}\\p{M}])' : '';
+  const after = /[\p{L}\p{N}\p{M}]$/u.test(last) && !new RegExp(`^${joined}$`, 'u').test(last) ? '(?![\\p{L}\\p{N}\\p{M}])' : '';
   return new RegExp(`${before}${escaped}${after}`, 'u');
 }
 
@@ -298,7 +304,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   }
 
   if (history && (doomedLines.size > 0 || phrases.length > 0 || shortTastes.length > 0 || shortNames.length > 0 || shortOthers.length > 0)) {
-    const textOf = (line: unknown) => (isObject(line) && typeof line.message === 'string' ? line.message : '');
+    const textOf = (line: unknown) => (isObject(line) && typeof line.message === 'string' ? line.message.normalize('NFC') : '');
     const saidAt = (line: unknown) => (isObject(line) && typeof line.timestamp === 'number' ? line.timestamp : null);
     const stillTheirs = (line: unknown, forgotAt: number | null) => {
       const said = saidAt(line);

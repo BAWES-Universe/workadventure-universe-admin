@@ -478,6 +478,19 @@ describe('a reply after a taken line, when several things are forgotten together
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
   });
 
+  it('finds a thing written without spaces (Chinese) inside a longer line, and one typed with a combining mark (Sentry)', () => {
+    const data = {
+      personalInfo: { preferences: ['喜欢喝茶加糖', 'café au lait'], facts: [], heard: {}, drawnFrom: {} },
+      conversationHistory: chat([
+        ['person', '我真的喜欢喝茶加糖呢', 1000],
+        ['person', 'I want cafe\u0301 au lait please', 1100],
+        ['person', 'I want a Chrome café', 1200],
+      ]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, '喜欢喝茶加糖'), memoryItemKey('pref', null, 'café au lait')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I want a Chrome café']);
+  });
+
   it('takes every "into" taste line, and keeps only lines where "into" follows a word for moving (Sentry)', () => {
     const goes = ["I'm into tea", "I'm really into tea", 'I am so into tea', "I'm totally into tea", "I've been into tea lately", "I'm getting into tea", 'I got into tea last year', 'I was into tea once', "I've really gotten into tea", 'I started getting into tea'];
     const stays = ['I walked into the tea room', 'Did you go into the tea room?', 'I ran into my friend at tea', 'I walked straight into a tea shop', 'We drove into town for tea', 'I looked into tea prices', 'I stepped into the tea room', 'I jumped into the tea bath'];
