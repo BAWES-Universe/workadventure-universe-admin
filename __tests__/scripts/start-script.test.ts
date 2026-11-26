@@ -157,6 +157,20 @@ describe('scripts/start.sh decides (stand-in migration tool)', () => {
     expect(stderr).toContain('The migration tool is missing');
   });
 
+  it('says plainly that the old container keeps serving only with a health check, and that without one Orbit is down', () => {
+    const comments = fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8').split('\n').filter((line) => line.startsWith('#')).join('\n');
+    expect(comments).not.toMatch(/previous container is what serves/i);
+    expect(comments).toMatch(/health check ON/);
+    expect(comments).toMatch(/OFF[^]*DOWN/);
+    for (const doc of ['docs/COOLIFY-SETUP.md', 'docs/PRISMA-DEPLOYMENT.md']) {
+      const text = fs.readFileSync(path.join(root, doc), 'utf8');
+      expect(text).not.toMatch(/harmless/i);
+      expect(text).toMatch(/health check\s+ON/i);
+      expect(text).toMatch(/OFF[^]*down/i);
+      expect(text).toMatch(/start\s+period/i);
+    }
+  });
+
   it('has no way to continue after a failed migration', () => {
     const script = fs.readFileSync(path.join(root, 'scripts/start.sh'), 'utf8');
     const code = script.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
@@ -274,6 +288,22 @@ realDb('scripts/start.sh with the real migration tool and a populated database',
     expect(again.out).toMatch(/No pending migrations to apply/i);
   });
 
+  it('production history: rows marked rolled back for migrations that were later applied do not block the start', async () => {
+    // Production holds two such rows (applied_steps_count 0, rolled_back_at set) next to the applied row of the same name
+    for (const name of ['20260106030000_add_bot_audit_fields', '20260626_fix_scope_id_unique']) {
+      expect(real()).toContain(name);
+      await db!.client.query(
+        `INSERT INTO _prisma_migrations (id, checksum, migration_name, started_at, finished_at, rolled_back_at, applied_steps_count)
+         SELECT gen_random_uuid()::text, checksum, migration_name, started_at, NULL, now(), 0 FROM _prisma_migrations WHERE migration_name = $1`,
+        [name],
+      );
+    }
+    const withHistory = start();
+    expect(withHistory.status).toBe(0);
+    expect(withHistory.started).toBe(true);
+    expect(withHistory.out).toMatch(/No pending migrations to apply/i);
+  });
+
   describe('a release whose second new migration fails on the populated database', () => {
     let rowsBefore: number;
     let failed: ReturnType<typeof start>;
@@ -325,6 +355,21 @@ realDb('scripts/start.sh with the real migration tool and a populated database',
       expect(restart.status).not.toBe(0);
       expect(restart.started).toBe(false);
       expect(restart.out).toMatch(/P3009|failed migrations/i);
+    });
+
+    it('a restart loop changes nothing: three more refused starts leave the history, the schema and the rows as they were', async () => {
+      const snapshot = async () => ({
+        history: (await db!.client.query(`SELECT migration_name, started_at, finished_at, rolled_back_at, applied_steps_count FROM _prisma_migrations ORDER BY migration_name, started_at`)).rows,
+        columns: Number((await db!.client.query(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public'`)).rows[0].n),
+        users: Number((await db!.client.query('SELECT count(*)::int AS n FROM users')).rows[0].n),
+      });
+      const before = await snapshot();
+      for (let i = 0; i < 3; i++) {
+        const again = start();
+        expect(again.status).not.toBe(0);
+        expect(again.started).toBe(false);
+      }
+      expect(await snapshot()).toEqual(before);
     });
 
     it('recovery: mark it rolled back, ship the fixed migration, and Orbit starts on the up-to-date database', async () => {

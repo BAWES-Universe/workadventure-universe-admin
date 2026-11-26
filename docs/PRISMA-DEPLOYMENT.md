@@ -7,6 +7,13 @@ only if every migration applied. If a migration fails (or the database cannot be
 `DATABASE_URL` is missing) the container exits non-zero and Orbit does NOT start, so a new image never
 serves on a database it was not written for. Nothing needs to run after a deploy.
 
+Whether users then still reach the previous version depends on the host: with Coolify's health check
+ON the old container keeps serving and the deploy is marked failed; with it OFF the old container is
+removed anyway, so Orbit is down until a fixed image is deployed, and the new container retries in a
+loop (restart policy). Each retry refuses again without changing anything (Prisma P3009, and a database
+lock while applying). The app does not listen until the migrations finish, so the health check start
+period must be longer than the longest migration. See docs/COOLIFY-SETUP.md.
+
 Do not configure a Coolify post-deploy migration command (`npx prisma migrate deploy`): the container
 already applies migrations at startup, and a post-deploy hook runs only after the new code is serving.
 `npx` is also not pinned to the Prisma CLI bundled in the image, so it could run another version, or

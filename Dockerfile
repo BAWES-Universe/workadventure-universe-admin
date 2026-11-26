@@ -93,5 +93,6 @@ EXPOSE 3333
 
 # Apply every pending database migration, then start the app (npm start, which runs the local next).
 # If the migrations do not all apply, the script exits non-zero and the app never starts, so this
-# image never serves on a database it was not written for. See scripts/start.sh.
+# image never serves on a database it was not written for. Whether the old container keeps serving
+# meanwhile depends on the host's health check (on: yes; off: no, Orbit is down). See scripts/start.sh.
 CMD ["sh", "scripts/start.sh"]

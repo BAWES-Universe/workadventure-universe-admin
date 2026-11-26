@@ -93,8 +93,19 @@ Nothing to configure. The image's CMD (`sh scripts/start.sh`) applies every pend
 `prisma migrate deploy` and starts the app only when that succeeded. If a migration fails, the
 container exits non-zero and Orbit does not start; see docs/PRISMA-DEPLOYMENT.md for recovering.
 
-Keep Coolify's health check on: a new container that never becomes healthy is then not put in front of
-users. Do not configure a post-deploy migration command (`npx prisma migrate deploy`): the container
+What happens when a migration fails depends on Coolify's health check:
+
+- **Health check ON**: the new container never becomes healthy, so Coolify keeps the old container
+  serving and marks the deploy failed. Nothing goes down.
+- **Health check OFF**: Coolify waits a fixed few seconds and removes the old container anyway, so a
+  failed migration means Orbit is **down** until a fixed image is deployed. The new container exits
+  and Docker restarts it in a loop (each attempt refuses again; it changes nothing).
+
+The app does not listen until the migrations have finished, so the health check's start period must be
+longer than the longest migration (with the check off, a long migration is a gap with nothing serving).
+`GET /` answers with a redirect to `/admin`, and `/admin` answers 200 without touching the database.
+
+Do not configure a post-deploy migration command (`npx prisma migrate deploy`): the container
 already applies migrations at startup, a post-deploy hook only runs after the new code is serving, and
 `npx` is not pinned to the Prisma CLI bundled in the image (it could run another version, or fail).
 
