@@ -155,17 +155,21 @@ export async function ensureAppActions(toolkit: string, waitMs = 0): Promise<Cat
     const run = claimed ? (running.get(key) ?? null) : refreshAppActions(key).catch(() => false);
     if (catalog?.refreshedAt || waitMs <= 0) return catalog;
     const until = Date.now() + waitMs;
+    // Done: read, waited long enough, or a read that failed is now waited out (nothing more will come)
+    const settled = (state: Awaited<ReturnType<typeof read>>) => !!state?.refreshedAt || Date.now() >= until || (!!state?.retryAfter && state.retryAfter.getTime() > Date.now());
     if (run) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([run, new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
       if (timer) clearTimeout(timer);
-      return await read();
+      const after = await read();
+      // This process may have lost the claim to another one at the same moment: that one's result is then looked for below
+      if (settled(after)) return after;
     }
     // Another process reads it: its result is looked for until the wait is over
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       const now = await read();
-      if (now?.refreshedAt || Date.now() >= until) return now;
+      if (settled(now)) return now;
     }
   } catch (error) {
     console.error('[AppActions] Could not check the list of an App:', error instanceof Error ? error.message : 'unknown');

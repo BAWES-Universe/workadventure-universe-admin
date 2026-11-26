@@ -152,6 +152,23 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       expect(JSON.stringify(body)).not.toMatch(/composio/i);
     });
 
+    it('waits on a first read for another reader that took the claim at the same moment', async () => {
+      const adapter = fake();
+      setAdapterForTests(adapter);
+      // This process loses the claim; the other reader reads the list a moment later
+      const spy = jest.spyOn(prisma.appActionCatalog, 'updateMany').mockImplementationOnce((async () => {
+        setTimeout(() => void refreshAppActions(KEY), 300);
+        return { count: 0 };
+      }) as never);
+      try {
+        const state = await ensureAppActions(KEY, 3_000);
+        expect(state?.refreshedAt).toBeInstanceOf(Date);
+        expect(adapter.actions).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('brings a grant made before over on its first read, keeps its heading settings, drops the meta tools, and is the same when read again or at once', async () => {
       const adapter = fake();
       setAdapterForTests(adapter);
