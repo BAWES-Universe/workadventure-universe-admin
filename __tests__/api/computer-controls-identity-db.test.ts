@@ -87,18 +87,6 @@ const watchPendingReads = () => {
  */
 const enteredBy = (signal: Promise<void>, request: Promise<unknown>): Promise<void> =>
   Promise.race([signal, request.then(() => Promise.reject(new Error('the first request ended before it reached the gate')))]);
-/** Whether a session is blocked (bounded wait) on this advisory lock: a barrier that proves a request reached the lock, never a delay. `ended` lets a request that ended without reaching it fail the wait. */
-const waitingOnLock = async (key: string, ended: () => Error | null = () => null): Promise<boolean> => {
-  for (let tries = 0; tries < 250; tries += 1) {
-    const failure = ended();
-    if (failure) throw failure;
-    const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`;
-    if (rows[0].n > 0) return true;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return false;
-};
-
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
   const user = await prisma.user.create({ data: { uuid: unique, email: `${unique}@example.test`, name } });
@@ -1225,14 +1213,25 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         // The moment the command has its locks (the holders it will pause were read under the line lock), the first job tries to start
         beforeLockOf(target, async () => {
           let ended: Error | null = null;
+          let reached = false;
+          const met = new Promise<void>((resolve) => {
+            controlInternals.onLineBusy = (botId) => {
+              if (botId === sara.brickId) {
+                reached = true;
+                resolve();
+              }
+            };
+          });
           late = controlInternals.tryStart(jobId, minutes(2));
           // Observed from the moment it starts: a start that ends (or fails) before it reaches the lock fails the wait, whichever way it ended
           late.then(
             () => (ended = new Error('the competing start ended without waiting on the line lock')),
             (error) => (ended = error instanceof Error ? error : new Error(String(error))),
           );
-          // The start is waiting on THIS Brick's line lock, which the command holds: only then does the command go on
-          expect(await waitingOnLock(`computer:line:${sara.brickId}`, () => ended)).toBe(true);
+          // The start finds THIS Brick's line lock held by the command and keeps trying for it (a try-lock, so it never waits while holding the computer's row): the seam says it reached the held line, and it has neither ended nor started
+          await Promise.race([met, late.then(() => undefined, () => undefined)]);
+          expect((() => ended)()).toBeNull();
+          expect(reached).toBe(true);
           seenDuring.push((await jobOf(jobId)).status);
         });
         const answer = await moveJobFirst(sara.brickId, sara.id, target, { pauseRunning: true }, minutes(2), command());
@@ -1241,6 +1240,7 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         expect(seenDuring).toEqual(['queued']);
         await late;
       } finally {
+        controlInternals.onLineBusy = () => undefined;
         await Promise.allSettled([late]);
       }
     });

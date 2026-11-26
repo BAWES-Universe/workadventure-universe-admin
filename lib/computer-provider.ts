@@ -147,6 +147,8 @@ export interface ComputerProvider {
   removeAllFor?(botId: string): Promise<void>;
   /** Whether the machine is running or on its way up (billed). A machine that is gone, stopped or asleep is not. Used to prove a stop. */
   awake(ref: string): Promise<boolean>;
+  /** The same as `awake`, from ONE request with this timeout and no asking again (a renewal must answer its worker within a few seconds, post-0.5.0 B). Absent: `awake` is used under the caller's own cap. */
+  awakeOnce?(ref: string, timeoutMs: number): Promise<boolean>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */

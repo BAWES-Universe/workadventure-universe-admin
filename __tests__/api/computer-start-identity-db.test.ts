@@ -91,6 +91,26 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     await prisma.$disconnect();
   });
 
+  it('two redeliveries of one ask that passed the lookup together: the earlier-issued key registers after the later one made its job; an ack under EITHER key confirms that job (CodeRabbit on #1032, finding 2)', async () => {
+    const sara = await owner('alias-ack');
+    const identity = randomUUID().replace(/-/g, '');
+    const KEY_B = `t${Date.now().toString(36)}-${identity}`;
+    const issuedA = new Date(Date.now() - 60_000);
+    const KEY_A = `t${issuedA.getTime().toString(36)}-${identity}`;
+    const registeredB = await registerStart(sara.brickId, sara.id, KEY_B, new Date(), new Date());
+    expect(registeredB).toHaveProperty('registration');
+    const b = await viaLib(sara, KEY_B, 'Fill the visa form');
+    expect(b).toMatchObject({ ok: true, job: { status: 'running' } });
+    if ('registration' in registeredB) await registeredB.registration.release();
+    // The earlier-issued one reaches Orbit now: answered with B's job, and it becomes the first key of the identity
+    expect(await registerStart(sara.brickId, sara.id, KEY_A, new Date(), issuedA)).toMatchObject({ answer: { ok: false, reason: 'earlier' } });
+    expect(await ackStart(sara.brickId, sara.id, KEY_A)).toBe(true);
+    expect((await jobsOf(sara))[0].startAckedAt).not.toBeNull();
+    // and under B's own key, once the job is confirmed, it is still confirmed (idempotent)
+    expect(await ackStart(sara.brickId, sara.id, KEY_B)).toBe(true);
+    expect(await jobsOf(sara)).toHaveLength(1);
+  });
+
   it('1a REPRO through the route pre-check: B gets `earlier A`; A is acknowledged and finished; B is resent with the SAME key: no second job, one reservation, B answers A’s job', async () => {
     const sara = await owner('r1a');
     const KEY_A = key();
