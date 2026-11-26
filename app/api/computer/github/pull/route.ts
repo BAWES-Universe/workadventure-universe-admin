@@ -25,7 +25,8 @@ const no = (error: string, status: number) => NextResponse.json({ ok: false, err
  * pushed through the git relay (game #2041), as its owner. Signed in with the same job key as git (HTTP Basic, the key as the password; no other sign-in is taken),
  * so it ends with the job and the take-over like git does. Only a pull request: merging, closing and the rest are the Brick's own GitHub
  * tools, never the computer's. The owner's GitHub token stays in Orbit and GitHub decides which repositories it reaches. A computer that
- * may only read cannot open one. Answers { ok: true, number, url } or { ok: false, error }.
+ * may only read cannot open one, nor one whose Brick has Open a pull request on anything but Right away (a computer can't ask its owner,
+ * lib/github/judge.ts). Answers { ok: true, number, url } or { ok: false, error }.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -33,6 +34,7 @@ export async function POST(request: NextRequest) {
     const pass = await checkGitKey(authorization);
     if (!pass) return no('A job key from Universe is needed.', 401);
     if (pass.readOnly) return no(READ_ONLY_MESSAGE, 403);
+    if (pass.stops.pullRequest) return no(pass.stops.pullRequest, 403);
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return no('Say repo (owner/name), head (the branch you pushed) and title.', 400);
     const token = await gitHubToken(pass.connectionId);
@@ -42,6 +44,7 @@ export async function POST(request: NextRequest) {
     const fresh = await recheckGitKey(authorization, pass);
     if (!fresh) return no('A job key from Universe is needed.', 401);
     if (fresh.readOnly) return no(READ_ONLY_MESSAGE, 403);
+    if (fresh.stops.pullRequest) return no(fresh.stops.pullRequest, 403);
     const made = await runGitHubTool(token.token, 'github_create_pull_request', parsed.data);
     if (made.unauthorized) await gitHubTokenRefused(pass.connectionId, token.token);
     if (made.isError) return no(made.text.slice(0, 500), 422);

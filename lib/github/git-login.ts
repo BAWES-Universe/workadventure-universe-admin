@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { orbitBase } from '@/lib/github/app';
 import { GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
+import { computerStops, gitHubJudgeFor, type ComputerStep } from '@/lib/github/judge';
 
 /**
  * A running job's git login (game #2041, the computer's half). A Brick's computer has real git, and its remote is Orbit's git relay
@@ -15,16 +16,20 @@ import { GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
  * Which repositories: the ones the owner's GitHub connection reaches, and GitHub itself decides that. A sign-in through Universe's GitHub
  * App reaches only the repositories the owner picked when they installed the App (a user token never goes beyond the App's installs),
  * so a Brick can clone, fetch and push exactly there; a key the owner pasted reaches what that key was made for.
- * What it may do: read always; push only when the job is one that may change things (`writes`) and the owner did not turn both "make"
- * and "change" off for GitHub. Whatever it may do, the relay still refuses deleting, tags and overwriting a branch.
+ * What it may do: push only when the job is one that may change things (`writes`). Each step also follows the Brick's choice for the
+ * GitHub action it stands for (lib/github/judge.ts: clone and fetch are Read a file, a push is Commit files, a new branch is Make a branch,
+ * open-pr is Open a pull request), and only Right away runs: a computer can't ask its owner, so Asks first stops the step as Off does,
+ * with words the Brick reads. Whatever it may do, the relay still refuses deleting, tags and overwriting a branch.
  */
 
 export interface GitAccess {
   botId: string;
   connectionId: string;
   ownerId: string;
-  /** False when the computer may only read (clone, fetch). */
+  /** False when the computer may only read (clone, fetch): the job is only to look. */
   mayPush: boolean;
+  /** Why each step may not run now (its GitHub action is not Right away for this Brick), or null when it may. */
+  stops: Record<ComputerStep, string | null>;
   /** Who the commits are by: the owner's GitHub name and their GitHub no-reply address, so their own email is never written into a repo. */
   name: string;
   email: string;
@@ -42,7 +47,7 @@ const live = (status: string) => status === 'running' || status === 'waiting';
 export async function jobGitAccess(jobId: string): Promise<GitAccess | null> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, personId: true, status: true, writes: true } });
   if (!job || !live(job.status)) return null;
-  const bot = await prisma.bot.findUnique({ where: { id: job.botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
+  const bot = await prisma.bot.findUnique({ where: { id: job.botId }, select: { ownerId: true, roomId: true, deletedAt: true, name: true } });
   if (!bot || !bot.ownerId || bot.roomId !== null || bot.deletedAt !== null) return null;
   // Only the owner's own jobs work as the owner
   if (job.personId !== bot.ownerId) return null;
@@ -55,8 +60,9 @@ export async function jobGitAccess(jobId: string): Promise<GitAccess | null> {
   if (!auth?.accessToken) return null;
   const who = committerOf(auth);
   if (!who) return null;
-  const turnedOff = grant.makeSetting === 'off' && grant.changeSetting === 'off';
-  return { botId: job.botId, connectionId: grant.connection.id, ownerId: bot.ownerId, mayPush: job.writes && !turnedOff, ...who };
+  const judge = await gitHubJudgeFor(job.botId, grant.connection.id);
+  if (!judge) return null;
+  return { botId: job.botId, connectionId: grant.connection.id, ownerId: bot.ownerId, mayPush: job.writes, stops: computerStops(judge, bot.name), ...who };
 }
 
 /** The pieces a shell command may carry unquoted by accident: only plain characters, or nothing is written. */

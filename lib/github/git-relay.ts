@@ -2,6 +2,7 @@ import { createGunzip } from 'zlib';
 import { gitHubToken, gitHubTokenRefused } from '@/lib/github/connection';
 import type { FetchLike } from '@/lib/github/api';
 import { jobGitAccess } from '@/lib/github/git-login';
+import type { ComputerStep } from '@/lib/github/judge';
 import { verifyJobToken } from '@/lib/computer-token';
 import { buildsOn, readPackCommits, VERIFY_MAX_BYTES } from '@/lib/github/pack-commits';
 
@@ -39,8 +40,10 @@ export interface GitPass {
   botId: string;
   connectionId: string;
   ownerId: string;
-  /** A computer's job that may only read (a job that is only to look, or GitHub turned off for changes): a push is turned down. */
+  /** A computer's job that may only read (a job that is only to look): a push is turned down. */
   readOnly: boolean;
+  /** Why each step may not run (its GitHub action is not Right away for this Brick), or null when it may (lib/github/judge.ts). */
+  stops: Record<ComputerStep, string | null>;
 }
 
 /**
@@ -60,7 +63,7 @@ export async function checkGitKey(authorization: string | null, graceSeconds = 0
   if (!verified.ok) return null;
   const access = await jobGitAccess(verified.jobId);
   if (!access || access.botId !== verified.botId) return null;
-  return { jobId: verified.jobId, generation: verified.generation, botId: access.botId, connectionId: access.connectionId, ownerId: access.ownerId, readOnly: !access.mayPush };
+  return { jobId: verified.jobId, generation: verified.generation, botId: access.botId, connectionId: access.connectionId, ownerId: access.ownerId, readOnly: !access.mayPush, stops: access.stops };
 }
 
 /**
@@ -270,19 +273,29 @@ export type RelayOutcome =
   | { status: 'reconnect' | 'unavailable' | 'too_big' | 'bad_request' | 'revoked' };
 
 /** What a computer that may only read is told when it tries to push. */
-export const READ_ONLY_MESSAGE = 'This computer may only read from GitHub for this job (the job is only to look, or GitHub is not allowed to change things for this Brick), so pushing is not allowed.';
+export const READ_ONLY_MESSAGE = 'This computer may only read from GitHub for this job (the job is only to look), so pushing is not allowed.';
 
 /**
- * The answer git shows as "remote error: …" to a push that is not allowed before it starts: git's own advertisement for the service,
- * with an error line in place of the branches.
+ * The answer git shows as "remote error: …" to a clone, fetch or push that is not allowed before it starts: git's own advertisement for
+ * the service, with an error line in place of the branches.
  */
-function readOnlyAdvertisement(): Response {
-  const text = (value: string) => Buffer.from(`${(value.length + 4).toString(16).padStart(4, '0')}${value}`, 'utf8');
-  const body = Buffer.concat([text('# service=git-receive-pack\n'), Buffer.from('0000', 'ascii'), text(`ERR ${READ_ONLY_MESSAGE}\n`)]);
-  return new Response(new Uint8Array(body), { status: 200, headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', 'Cache-Control': 'no-cache' } });
+function refusedAdvertisement(service: 'git-upload-pack' | 'git-receive-pack', message: string): Response {
+  const line = message.replace(/[\r\n]+/g, ' ');
+  const text = (value: string) => {
+    const data = Buffer.from(value, 'utf8');
+    return Buffer.concat([Buffer.from((data.length + 4).toString(16).padStart(4, '0'), 'ascii'), data]);
+  };
+  const body = Buffer.concat([text(`# service=${service}\n`), Buffer.from('0000', 'ascii'), text(`ERR ${line}\n`)]);
+  return new Response(new Uint8Array(body), { status: 200, headers: { 'Content-Type': `application/x-${service}-advertisement`, 'Cache-Control': 'no-cache' } });
 }
 
-const readOnlyPost = (): Response => new Response(`${READ_ONLY_MESSAGE}\n`, { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+const refusedPost = (message: string): Response => new Response(`${message}\n`, { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+
+/** Why this pass may not push at all now, or null: a job that may only read, or Commit files not Right away for the Brick. */
+const pushStop = (pass: GitPass): string | null => (pass.readOnly ? READ_ONLY_MESSAGE : pass.stops.push);
+
+/** A push that makes a branch that was not there needs Make a branch too: why it may not, or null. */
+const newBranchStop = (pass: GitPass, updates: RefUpdate[]): string | null => (updates.some((update) => ZERO_ID.test(update.oldId)) ? pass.stops.branch : null);
 
 /**
  * What a request may say about compressing its body: nothing (or "identity"), or exactly "gzip", the only thing git sends. Anything
@@ -323,10 +336,14 @@ export async function relayGit(
   if (target.step === 'info/refs') {
     const service = new URLSearchParams(input.search).get('service');
     if (input.method !== 'GET' || !service || !SERVICES.has(service)) return { status: 'bad_request' };
-    // A computer that may only read is told so as git starts to push, not after it has packed everything
-    if (pass.readOnly && service === 'git-receive-pack') return { status: 'refused', message: READ_ONLY_MESSAGE, response: readOnlyAdvertisement() };
-  } else if (pass.readOnly && target.step === 'git-receive-pack') {
-    return { status: 'refused', message: READ_ONLY_MESSAGE, response: readOnlyPost() };
+    // A step the computer may not take is told as git starts it, not after it has packed everything
+    const stop = service === 'git-receive-pack' ? pushStop(pass) : pass.stops.read;
+    if (stop) return { status: 'refused', message: stop, response: refusedAdvertisement(service as 'git-upload-pack' | 'git-receive-pack', stop) };
+  } else if (target.step === 'git-receive-pack' && pushStop(pass)) {
+    const stop = pushStop(pass)!;
+    return { status: 'refused', message: stop, response: refusedPost(stop) };
+  } else if (target.step === 'git-upload-pack' && pass.stops.read) {
+    return { status: 'refused', message: pass.stops.read, response: refusedPost(pass.stops.read) };
   } else if (input.method !== 'POST' || !input.body) {
     return { status: 'bad_request' };
   }
@@ -339,7 +356,7 @@ export async function relayGit(
     if (!isProbe(raw)) {
       const read = raw ? readPushCommands(raw) : null;
       if (!read) return { status: 'bad_request' };
-      const refused = refusedPush(read.updates);
+      const refused = refusedPush(read.updates) ?? newBranchStop(pass, read.updates);
       if (refused) return { status: 'refused', message: refused, response: rejectedPush(read.updates, refused, read.capabilities) };
       checkedPush = read;
     }
@@ -357,7 +374,9 @@ export async function relayGit(
   if (target.step === 'git-receive-pack' && input.recheck) {
     const fresh = await input.recheck();
     if (!fresh) return { status: 'revoked' };
-    if (fresh.readOnly) return { status: 'refused', message: READ_ONLY_MESSAGE, response: readOnlyPost() };
+    // What the Brick may do is read again too: a choice the owner changed while the push was read and checked holds for this push
+    const stop = pushStop(fresh) ?? (checkedPush ? newBranchStop(fresh, checkedPush.updates) : null);
+    if (stop) return { status: 'refused', message: stop, response: refusedPost(stop) };
   }
 
   const query = target.step === 'info/refs' ? `?service=${new URLSearchParams(input.search).get('service')}` : '';

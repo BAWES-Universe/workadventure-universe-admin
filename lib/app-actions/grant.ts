@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import type { Heading, Setting } from '@/lib/mcp-tool-policy';
 import { ensureAppActions, noteUnknownAction } from '@/lib/app-actions/catalog';
 import { effectiveSetting, nameRule, stricterHeading } from '@/lib/app-actions/sort';
+import { GITHUB_ACTIONS_KEY, startsOn } from '@/lib/github/actions';
 
 /**
  * A Brick's grant of a ready-made App holds the App's actions as its tool rows (`BotMcpTool`), not the provider's four meta tools:
@@ -30,9 +31,16 @@ export const actionFingerprint = (toolkit: string, slug: string): string => crea
 /** How a slug is matched: case, spaces and dashes never make one action two. */
 export const slugKey = (slug: string): string => slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
 
-/** Whether a grant's connection is a ready-made App's: a Brick's (or a bot's) grant that can hold an App's actions. */
-export const isAppActionsConnection = (connection: { source: string; providerToolkit: string | null } | null | undefined): connection is { source: 'ready_made'; providerToolkit: string } =>
-  !!connection && connection.source === 'ready_made' && !!connection.providerToolkit;
+/**
+ * Whether a grant's connection can hold an App's actions: a ready-made App's (its list from the provider), or Universe's own GitHub (its
+ * list from Universe, lib/github/actions.ts).
+ */
+export const isAppActionsConnection = (connection: { source: string; providerToolkit: string | null } | null | undefined): boolean =>
+  !!connection && ((connection.source === 'ready_made' && !!connection.providerToolkit) || connection.source === 'github');
+
+/** The key a connection's list of actions is kept under (`app_actions.toolkit`): the provider's App name, or Universe's own GitHub's key. */
+export const actionsKeyOf = (connection: { source: string; providerToolkit: string | null }): string =>
+  connection.source === 'github' ? GITHUB_ACTIONS_KEY : (connection.providerToolkit ?? '').toLowerCase();
 
 /** Whether a grant's rows are an App's actions now: a ready-made App's grant that was brought over. */
 export const holdsAppActions = (server: { appActionsVersion: number | null; connection: { source: string; providerToolkit: string | null } | null }): boolean =>
@@ -83,8 +91,8 @@ interface ListedAction {
  */
 export async function ensureAppActionTools(serverId: string, attempt = 0, force = false): Promise<boolean> {
   const head = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, connection: { select: { source: true, providerToolkit: true } } } });
-  if (!head || !isAppActionsConnection(head.connection)) return false;
-  const toolkit = head.connection.providerToolkit.toLowerCase();
+  if (!head?.connection || !isAppActionsConnection(head.connection)) return false;
+  const toolkit = actionsKeyOf(head.connection);
   const catalog = await ensureAppActions(toolkit, attempt === 0 && head.appActionsVersion === null ? FIRST_READ_WAIT_MS : 0);
   // Never read (or Orbit could not check): the grant stays as it is, and the next read tries again
   if (!catalog?.refreshedAt) return false;
@@ -98,7 +106,10 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           SELECT "version", "refreshed_at" IS NOT NULL AS refreshed FROM "app_action_catalogs" WHERE "toolkit" = ${toolkit} FOR SHARE`;
         const version = listLock[0]?.version;
         if (version === undefined || !listLock[0].refreshed) return false;
-        const server = await tx.botMcpServer.findUnique({ where: { id: serverId }, select: { appActionsVersion: true, tools: { select: TOOL_SELECT } } });
+        const server = await tx.botMcpServer.findUnique({
+          where: { id: serverId },
+          select: { appActionsVersion: true, lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true, tools: { select: TOOL_SELECT } },
+        });
         // Gone, or brought up to this list by another call while this one waited for the grant
         if (!server || (!force && server.appActionsVersion === version)) return false;
 
@@ -130,6 +141,26 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           return { key, slug, title: detail?.title ?? slug, description: detail?.description ?? null, heading: headingOf.get(key)!, fingerprint: actionFingerprint(toolkit, slug) };
         });
 
+        // Brought over for the first time: the rows were the tools a bot server read, judged by the headings a person or the bot server
+        // put them under. Where that judged one stricter than its new heading does, the stricter choice stays as the action's own choice,
+        // so nothing a person set gets looser by moving (a tool they had under a heading set Off stays Off)
+        const firstTime = server.appActionsVersion === null;
+        const settings: Record<Heading, Setting> = {
+          looksUp: server.lookUpSetting as Setting,
+          makesNew: server.makeSetting as Setting,
+          changesThings: server.changeSetting as Setting,
+          deletesOrSends: server.deleteSendSetting as Setting,
+        };
+        const carried = (rows: readonly ToolRow[], heading: Heading, own: Setting | null): Setting | null => {
+          if (!firstTime) return own;
+          const current = effectiveSetting(own, heading, settings);
+          const before = rows.reduce<Setting | null>((acc, tool) => {
+            const old = (tool.heading ?? tool.suggestedHeading) as Heading | null;
+            return old ? stricterSetting(acc, settings[old]) : acc;
+          }, null);
+          return before !== null && stricterSetting(current, before) !== current ? before : own;
+        };
+
         const now = new Date();
         const fresh: Prisma.BotMcpToolCreateManyInput[] = [];
         const drop: string[] = [];
@@ -139,7 +170,10 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           const rows = groups.get(entry.key) ?? [];
           // The row that stays: the one already named as the App names it now, else the one with the strictest choice
           const keeper = rows.find((tool) => tool.name === entry.slug) ?? rows.reduce<ToolRow | undefined>((best, tool) => (!best || stricterSetting(best.setting as Setting | null, tool.setting as Setting | null) !== best.setting ? tool : best), undefined);
-          const setting = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          // The person's strictest choice for it, else the choice Universe starts it on (own lists: Run a workflow asks first) when it is
+          // new to this grant, then never looser than what it was judged by before it was brought over
+          const chosen = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          const setting = carried(rows, entry.heading, chosen ?? (!keeper || firstTime ? startsOn(toolkit, entry.slug) : null));
           for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
             name: entry.slug,
@@ -153,7 +187,7 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             confirmedById: null,
           };
           if (!keeper) {
-            fresh.push({ serverId, ...data, confirmedAt: now });
+            fresh.push({ serverId, ...data, setting, confirmedAt: now });
             rowsUpToDate = false;
             continue;
           }
@@ -168,7 +202,8 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             keeper.suggestionSource === data.suggestionSource &&
             !!keeper.confirmedAt &&
             keeper.confirmedById === null &&
-            keeper.movedById === null;
+            keeper.movedById === null &&
+            (keeper.setting ?? null) === setting;
           if (same) continue;
           rowsUpToDate = false;
           // Only what Universe says the action is, its name as the App spells it now, and the person's strictest choice for it
@@ -259,7 +294,7 @@ export async function actionJudgeFor(botId: string, connectionId: string): Promi
     server = await load();
     if (!server) return null;
   }
-  const toolkit = grant.connection!.providerToolkit!.toLowerCase();
+  const toolkit = actionsKeyOf(grant.connection!);
   const settings: Record<Heading, Setting> = {
     looksUp: server.lookUpSetting as Setting,
     makesNew: server.makeSetting as Setting,
