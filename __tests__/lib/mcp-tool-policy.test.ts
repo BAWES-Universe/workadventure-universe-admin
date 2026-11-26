@@ -124,6 +124,8 @@ jest.mock('@/lib/db', () => {
     },
   };
   db.$transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+  // Holding a grant's row (lockGrant): one caller at a time here anyway
+  db.$queryRaw = async () => [];
   return { prisma: db };
 });
 

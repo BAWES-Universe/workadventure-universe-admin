@@ -1,7 +1,7 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
-import { ensureAppActionTools, holdsAppActions } from '@/lib/app-actions/grant';
+import { ensureAppActionTools, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 
@@ -241,11 +241,13 @@ async function loadServer(db: Prisma.TransactionClient | typeof prisma, botId: s
   return server;
 }
 
-async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: string): Promise<ServerToolsJson> {
-  const [server, rows] = await Promise.all([
-    db.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: SERVER_SELECT }),
-    db.botMcpTool.findMany({ where: { serverId }, select: TOOL_SELECT, orderBy: [{ name: 'asc' }] }),
-  ]);
+/**
+ * The server and its tools as one answer: its kind says how to read its rows, so both must come from the same moment. Inside a write
+ * the grant is held (`lockGrant`); a plain read takes one snapshot of the database for both (`describeNow`).
+ */
+async function describe(db: Prisma.TransactionClient, serverId: string): Promise<ServerToolsJson> {
+  const server = await db.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: SERVER_SELECT });
+  const rows = await db.botMcpTool.findMany({ where: { serverId }, select: TOOL_SELECT, orderBy: [{ name: 'asc' }] });
   const tools = rows.map(toToolJson);
   return {
     serverId,
@@ -258,6 +260,10 @@ async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: 
     totalSeen: server.toolsCut ? server.toolsSeen : null,
   };
 }
+
+/** A server and its tools read outside a write: one snapshot, so a grant brought over in between is never half seen. */
+const describeNow = (serverId: string): Promise<ServerToolsJson> =>
+  prisma.$transaction((tx) => describe(tx, serverId), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 
 const bump = { policyRevision: { increment: 1 } } as const;
 
@@ -276,7 +282,7 @@ export async function readServerTools(botId: string, serverId: string, options: 
   await ensureKeyAppTools(serverId);
   // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
   if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
-  return describe(prisma, serverId);
+  return describeNow(serverId);
 }
 
 export interface CatalogResult extends ServerToolsJson {
@@ -297,6 +303,8 @@ export interface CatalogResult extends ServerToolsJson {
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
+    // Held first: a grant brought over to App actions at the same moment is either wholly before this list or wholly after it
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     // A ready-made App's rows are its actions, made by Orbit from the App's list: what the bot server read on the App's link (the
     // provider's meta tools) never replaces them. Answered as saved, with nothing changed.
@@ -367,10 +375,12 @@ export const APP_ACTIONS_DONT_MOVE = 'An App’s actions stay under their headin
  * made under the older choice can be told apart.
  */
 export async function setToolSetting(botId: string, serverId: string, toolId: string, setting: Setting | null): Promise<ServerToolsJson> {
-  await loadServer(prisma, botId, serverId);
-  // A grant made before actions were rows is brought over first, so the id the page shows is one that exists
-  await ensureAppActionTools(serverId);
+  const before = await loadServer(prisma, botId, serverId);
+  // Kept matching the App's list first. Only a grant already brought over (by a reader that asked for App actions): a choice never
+  // brings one over itself, so a refused one (an id that is not there) leaves the grant exactly as it was
+  if (holdsAppActions(before)) await ensureAppActionTools(serverId);
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     if (kindOf(server) !== 'appActions') throw new BotSettingsError(409, 'Only an App’s actions take their own choice');
     const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { serverId: true, setting: true } });
@@ -392,6 +402,7 @@ const TOOL_CHANGED = 'This tool changed, review it again';
  */
 export async function moveTool(botId: string, serverId: string, toolId: string, heading: Heading, personId: string): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
@@ -425,6 +436,7 @@ export async function confirmTools(
   seenRevision?: number,
 ): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     // An App's actions are confirmed by Universe when they are made: there is nothing for a person to confirm (no review gate on Apps)
     if (kindOf(server) === 'appActions') return describe(tx, serverId);
@@ -471,6 +483,7 @@ export async function confirmTools(
 /** Set what a bot does under each heading on one server. Only the headings named change. */
 export async function saveServerSettings(botId: string, serverId: string, body: z.infer<typeof serverSettingsSchema>): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     const current = settingsOf(server);
     const data: Record<string, string> = {};
