@@ -3,10 +3,10 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { checkAppUse, type AppUseVerdict } from '@/lib/app-connections';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
-import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyNoAnswer, reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { operationViews, headingOf, type KeyAppOperationView } from '@/lib/app-direct/describe';
-import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/guard';
+import { guardedRequest, GuardError, serviceDidNotAnswer, type GuardDeps } from '@/lib/app-direct/guard';
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
 import { readKey } from '@/lib/app-direct/connect';
 import { scrubDeep } from '@/lib/app-direct/scrub';
@@ -20,7 +20,8 @@ import { ensureKeyAppTools, fingerprintOf, toolNameOf } from '@/lib/app-direct/p
  *    switching it off or disconnecting stops it at once, in a chat that is already open and a goal that is already running);
  *  - the definition is the one the person said yes to (`definitionHash`): a changed definition inherits no approval;
  *  - one call id is one use: a retry never sends twice;
- *  - requests an hour for the person and for everyone are Limits settings;
+ *  - the person's own key is never limited or counted against anything by Universe (Khalid, 26 Nov 2026: a person's own keys,
+ *    accounts and free plans come first and are never capped by us). Only the service itself may refuse, and its answer is passed on;
  *  - the model never picks the host, a header, a path outside the template or the key; the key is scrubbed from what comes back;
  *  - a raw error answer never reaches the model: it learns that the service said no, and its status.
  */
@@ -31,7 +32,6 @@ export type KeyAppOutcome =
   | { status: 'changed' }
   | { status: 'unknown_operation' }
   | { status: 'bad_arguments'; message: string }
-  | { status: 'limit' }
   | { status: 'already_asked' }
   | { status: 'key_rejected'; httpStatus: number }
   | { status: 'unavailable' };
@@ -77,11 +77,10 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
   }
 
   const limits = await getBrickLimits();
-  // Take the use first: under the person's lock (and a short one for everyone) the hour's count and this write happen together, so two
-  // calls at once can never both take the last request, and the same call id again is refused before anything is sent
+  // Take the use first: under the person's lock the check that this call id is new and its write happen together, so the same call id again
+  // is refused before anything is sent. Nothing here counts or caps the person's own key: no hourly allowance, no share of a platform total
   const taken = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`key-calls:${ownerId}`}, 0))`;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
     // What was read before the lock may have moved: the request was built from that key and that definition, and the grant may have been
     // switched off since the check. Read all of it again under the lock, so nothing is sent that a committed change has already ended
     const held = await tx.$queryRaw<{ id: string; keyVersion: number; definitionHash: string | null }[]>`SELECT "id", "key_version" AS "keyVersion", "definition_hash" AS "definitionHash" FROM "app_connections" WHERE "id" = ${connection.id} FOR SHARE`;
@@ -93,15 +92,6 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     if (held[0].keyVersion !== connection.keyVersion) return 'stale' as const;
     const already = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (already) return 'again' as const;
-    const since = new Date(Date.now() - 3_600_000);
-    // The platform's cap covers key calls and page checkouts together (checkout counts both, lib/app-direct/pay.ts): the orders of the last hour
-    // use part of it too, so key calls can never fill what checkouts already hold. (A checkout writes its order under this same lock.)
-    const [mine, everyone, orders] = await Promise.all([
-      tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }),
-      tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } }),
-      tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
-    ]);
-    if (mine >= limits.keyCallsPerPerson || everyone + orders >= limits.keyCallsPlatform) return 'limit' as const;
     await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId, botId: input.botId, callId: input.callId, operation: operation.id } });
     // Old rows are kept long enough for a retry to be recognised, and no longer
     const old = await tx.appKeyCall.findMany({ where: { createdAt: { lt: new Date(Date.now() - 2 * DAY_MS) } }, select: { id: true }, take: 100 });
@@ -114,7 +104,6 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
   // The key was replaced while this call was being set up: build it again once with the new key, never send the old one
   if (taken === 'stale') return again ? { status: 'refused', reason: 'gone' } : runKeyApp(input, deps, true);
   if (taken === 'again') return { status: 'already_asked' };
-  if (taken === 'limit') return { status: 'limit' };
 
   // The books: one logical use, paid for by the person (their own key, their own bill at the service), never a cost to Universe
   await recordMeterEvent({
@@ -146,6 +135,10 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
     await finish(input, 'unreachable', null);
+    // A service that did not answer is written on the App (cleared by the next good call, reportKeyWorked): a down own copy then no longer counts
+    // as working for a while (lib/app-same.ts ownCopyWorks, KEY_NO_ANSWER_HOLDS_MS), so the ready-made copy of the same App is the Brick's way
+    // meanwhile, never neither; after that while the own copy is tried again
+    if (serviceDidNotAnswer(error)) await reportKeyNoAnswer(connection.id, startedAt);
     if (error instanceof GuardError) return { status: 'unavailable' };
     throw error;
   }

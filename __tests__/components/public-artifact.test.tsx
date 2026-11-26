@@ -9,7 +9,10 @@ const app: PublicView = { title: 'Quests board', kind: 'app', makerName: 'Scout'
 describe('the public artifact page', () => {
   it('is just the artifact filling the window in a locked frame, with only the floating pill to Universe', () => {
     const html = renderToStaticMarkup(<PublicArtifact view={app} universeUrl={UNIVERSE} />);
-    expect(html).toContain('sandbox="allow-scripts allow-forms"');
+    // A link in it opens in a new tab when tapped (a booking, a map), never in place of the game or this page
+    expect(html).toContain('sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"');
+    expect(html).not.toContain('allow-same-origin');
+    expect(html).not.toContain('allow-top-navigation');
     expect(html).toContain('src="https://artifacts.example/a/v2.html"');
     expect(html).toContain('title="Quests board"');
     expect(html).toContain('Made with Universe');

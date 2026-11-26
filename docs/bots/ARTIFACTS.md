@@ -154,7 +154,8 @@ Every other artifact is served from the bucket's own address, which opens for an
   nor a passed-on address gives it. Those seconds count from the first request.
   The media beside a page are served once the page has been, for as long as the pass lasts.
 - **The lock:** a page is sent with the same policy the bucket's address puts on every artifact (`sandbox
-  allow-scripts`, no network but the common libraries, no forms), may be framed only by the game and by Orbit, and is
+  allow-scripts allow-popups allow-popups-to-escape-sandbox`, no network but the common libraries, no forms; a tapped
+  link opens in a new tab as the other site itself), may be framed only by the game and by Orbit, and is
   refused when a browser asks for it as a page of its own (`Sec-Fetch-Dest: document`). So although these addresses are
   Orbit's, a running page has no origin, and can reach neither the sign-in nor the game. One line is tighter than the
   bucket's: pictures, songs and videos load only from the pass's own folder for that version (`/af/<pass>/<version>/`),

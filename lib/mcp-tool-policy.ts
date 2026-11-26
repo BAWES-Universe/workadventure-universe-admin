@@ -1,5 +1,6 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { ensureAppActionTools, hasDuplicateActions, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
+import { keepMovedTool, settleOwnAppTools, universeSortsTools } from '@/lib/app-own-tools';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -287,6 +288,8 @@ export async function readServerTools(botId: string, serverId: string, options: 
   await ensureKeyAppTools(serverId);
   // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
   if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
+  // A person's own App is sorted and confirmed by Universe (lib/app-own-tools.ts): a grant made before that is brought up to date when read
+  await settleOwnAppTools(serverId);
   const described = await describeNow(serverId);
   // Two rows for one action (only data from before one row per action): made one before anyone sees them
   if (described.kind === 'appActions' && hasDuplicateActions(described.tools)) {
@@ -314,7 +317,8 @@ export interface CatalogResult extends ServerToolsJson {
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
-    // Held first: a grant brought over to App actions at the same moment is either wholly before this list or wholly after it
+    // Held first: a grant brought over to App actions at the same moment is either wholly before this list or wholly after it (Universe
+    // settling a person's own App on a read, lib/app-own-tools.ts, holds the same grant)
     await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     // A ready-made App's rows are its actions, made by Orbit from the App's list: what the bot server read on the App's link (the
@@ -322,9 +326,12 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (kindOf(server) === 'appActions') return { ...(await describe(tx, serverId)), added: [], changed: [], removed: [] };
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, confirmedById: true, heading: true, personHeading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
+    // On the person's own App a tool Universe confirmed (no person) keeps following the bot server's suggestion, so it is sorted again when a
+    // suggestion comes later (lib/app-own-tools.ts); one a person confirmed or moved keeps what they decided
+    const universeSorts = await universeSortsTools(serverId, tx);
     const added: string[] = [];
     const changed: string[] = [];
     // Any tool whose fingerprint is different, confirmed or not: a list a person opened before it changed is out of date
@@ -340,10 +347,20 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       if (!before) {
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
+      } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && (before.movedById || before.confirmedById) && before.heading) {
+        // On a person's own App a tool they moved or confirmed sits, once it changed, under the stricter of their own heading and the rule
+        // for the new version, confirmed by Universe (lib/app-own-tools.ts). Their own heading is kept apart, so what they decided is never
+        // lost (a tool they only confirmed, from before Universe sorted own Apps, is kept as their choice the same way)
+        const personHeading = (before.personHeading ?? before.heading) as Heading;
+        await tx.botMcpTool.update({
+          where: { id: before.id },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, personHeading, movedById: before.movedById ?? before.confirmedById, heading: keepMovedTool(tool.name, personHeading, suggestion.suggestedHeading as Heading | null, settingsOf(server)), confirmedById: null, confirmedAt: new Date() },
+        });
+        reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, movedById: null, confirmedById: null, confirmedAt: null },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, personHeading: null, movedById: null, confirmedById: null, confirmedAt: null },
         });
         reworded = true;
         if (before.confirmedAt || before.heading) changed.push(tool.name);
@@ -354,7 +371,11 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
           reworded = true;
         }
-        await tx.botMcpTool.update({ where: { id: before.id }, data: before.confirmedAt ? shown : { ...shown, ...suggestion } });
+        // A suggestion also follows the server on a tool a person moved that Universe keeps for them since it changed (confirmed by
+        // nobody): its heading is worked out again from their own heading when this write settles (lib/app-own-tools.ts keepMovedTool)
+        const keptForPerson = universeSorts && !!before.movedById && !before.confirmedById && !!before.confirmedAt;
+        const follows = !before.confirmedAt || keptForPerson || (universeSorts && !before.confirmedById && !before.movedById);
+        await tx.botMcpTool.update({ where: { id: before.id }, data: follows ? { ...shown, ...suggestion } : shown });
       }
     }
 
@@ -362,7 +383,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     // person confirmed or moved stays. A leftover nobody decided on goes, so it can't block confirming the real list.
     const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const decided = (tool: (typeof existing)[number]) => !!tool.confirmedAt || !!tool.heading || !!tool.movedById;
+    // On a person's own App, Universe's own confirmation is not a decision: only what a person confirmed or moved is kept
+    const decided = (tool: (typeof existing)[number]) => (universeSorts ? !!tool.movedById || (!!tool.confirmedAt && !!tool.confirmedById) : !!tool.confirmedAt || !!tool.heading || !!tool.movedById);
     const removed = existing.filter((tool) => !offered.has(tool.name) && !(cut && decided(tool)));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
@@ -374,6 +396,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (server.toolsCut !== cut || server.toolsSeen !== seen) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });
     }
+    // On a person's own App, every new or changed tool is sorted and confirmed by Universe in the same write (lib/app-own-tools.ts): no review gate
+    await settleOwnAppTools(serverId, tx);
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
   }, GRANT_WRITE);
 }
@@ -415,16 +439,20 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
   return prisma.$transaction(async (tx) => {
     await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
-    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true } });
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true, confirmedById: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
     // An App's actions stay where Universe sorted them (Send email can never be filed under Looks things up): their own choice replaces a move
     if (kindOf(server) === 'appActions') throw new BotSettingsError(409, APP_ACTIONS_DONT_MOVE);
-    if (tool.heading !== heading) {
+    // On a person's own App, a tool Universe placed (confirmed by nobody: sorted, or kept for them since it changed): a move to the heading
+    // it sits under now is still the person's choice, and is recorded as theirs (lib/app-own-tools.ts), so Universe never moves it again.
+    // Elsewhere (a key App's tested operation, also confirmed by nobody) a move to the same heading changes nothing, as before
+    const placedByUniverse = tool.heading === heading && !!tool.confirmedAt && !tool.confirmedById && (await universeSortsTools(serverId, tx));
+    if (tool.heading !== heading || placedByUniverse) {
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between
       const moved = await tx.botMcpTool.updateMany({
         where: { id: toolId, fingerprint: tool.fingerprint, heading: tool.heading, confirmedAt: tool.confirmedAt },
-        data: { heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
+        data: { heading, personHeading: heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
       });
       if (moved.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
@@ -502,7 +530,11 @@ export async function saveServerSettings(botId: string, serverId: string, body: 
       const value = body[heading];
       if (value !== undefined && value !== current[heading]) data[SETTING_COLUMN[heading]] = value;
     }
-    if (Object.keys(data).length > 0) await tx.botMcpServer.update({ where: { id: serverId }, data: { ...data, ...bump } });
+    if (Object.keys(data).length > 0) {
+      await tx.botMcpServer.update({ where: { id: serverId }, data: { ...data, ...bump } });
+      // On a person's own App a tool they moved that Universe keeps for them is placed again by the new settings (an Off stays off)
+      await settleOwnAppTools(serverId, tx);
+    }
     return describe(tx, serverId);
   }, GRANT_WRITE);
 }

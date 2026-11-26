@@ -5,6 +5,7 @@ import { getAdapter } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { getGitHubApp } from '@/lib/github/app';
 import { GITHUB_BLURB, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
+import { ownCopyWorks, sameApp } from '@/lib/app-same';
 
 /** One app on the list as the bot server needs it to tell a Brick what it may offer its owner. Never the link or the sign-in. */
 export interface OfferableApp {
@@ -31,7 +32,8 @@ const nameKey = (name: string) => name.trim().toLowerCase();
  * connect from the Apps page, so the chat offers exactly what "Connect another" shows there, before and after they connect it:
  *  - GitHub through Universe's own GitHub App, first, once a super admin has made that app (never before: it cannot sign anyone in);
  *  - every app of the list a super admin keeps that is on;
- *  - every ready-made app that is on, while the adapter is (none without it; it answers as if it did not exist).
+ *  - every ready-made app that is on, while the adapter is (none without it; it answers as if it did not exist);
+ *  - never an App the person already added themselves, by its link or with their key (lib/app-same.ts): their own copy comes first.
  * Each comes with the owner's own connection of it. Only for the owner of Brick `viaBrickId`; for anyone else, and for a room
  * bot, null, the same as for a Brick that does not exist.
  */
@@ -49,6 +51,14 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
       orderBy: { createdAt: 'asc' },
     }),
   ]);
+  // The Apps the person added themselves, by their link or with their key, that work: a listed or ready-made App that is the same App (lib/app-same.ts) is
+  // never suggested, so the Brick never pushes another copy (one Universe may pay for) of an App the person already has
+  // Only one that works counts (ownCopyWorks): a signed-out link, a key the service stopped taking or a server that stopped answering
+  // never hides a working way to the same App
+  // A listed App they connected counts against a ready-made copy too, the same own copies the bot server's list gives way to (lib/app-same.ts
+  // isOwnApp); a listed entry is only checked against their links and keys, since their listed connections are already shown as theirs
+  const added = (await prisma.appConnection.findMany({ where: { ownerId, OR: [{ kind: 'direct' }, { kind: 'mcp', source: { in: ['link', 'listed'] } }] } })).filter((own) => ownCopyWorks(connectedState(own).connected, own));
+  const alreadyAdded = (app: { key: string; name: string }, withListed = false) => added.some((own) => (withListed || own.source !== 'listed') && sameApp(own, app));
   // Only the connections this answer can show are asked about: a ready-made one whose app is off, or any while the adapter is
   // off, never makes the owner wait for the provider (or fail on its answer)
   const shownReadyMade = new Set(readyMade.filter((app) => app.enabled).map((app) => app.key));
@@ -105,11 +115,16 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
     addListed({ key: GITHUB_ROW_KEY, name: 'GitHub', blurb: GITHUB_BLURB, kind: 'listed', ...view(own) });
   }
   for (const entry of entries) {
-    addListed({ key: entry.key, name: entry.name, blurb: entry.blurb, kind: 'listed', ...view(byCatalogKey.get(entry.key)) });
+    const own = byCatalogKey.get(entry.key);
+    // A listed App the person already connected is shown as connected; one they only have by their own link is not suggested at all
+    if (!own && alreadyAdded(entry)) continue;
+    addListed({ key: entry.key, name: entry.name, blurb: entry.blurb, kind: 'listed', ...view(own) });
   }
   for (const app of readyMade) {
     if (!app.enabled) continue;
     if (listedKeys.has(app.key) || listedNames.has(nameKey(app.name))) continue;
+    // One they already connected is still shown as it is; one they only have by their own link or key is not suggested
+    if (!byToolkit.get(app.key) && alreadyAdded(app, true)) continue;
     out.push({ key: app.key, name: app.name, blurb: '', kind: 'readyMade', ...view(byToolkit.get(app.key)) });
   }
   return out;
