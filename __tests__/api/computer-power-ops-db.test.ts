@@ -684,6 +684,25 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
   });
 
   describe('layer 1: a sleep is a power operation too', () => {
+    it('CodeRabbit on #1036 (found on #1040): a job that starts while the machine\'s sleep is held is woken ONCE, through the wake ticket: the finished sleep\'s own look at the holders sends no second, bare wake beside the start\'s', async () => {
+      const sara = await owner('sleep-one-wake');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!started.ok) throw new Error('no job');
+      const epochBefore = (await machineOf(sara)).wakeEpoch;
+      const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+      fake.holdRest = 1;
+      const finishing = finishJob(started.job.id, 'done', at(30));
+      await until(() => fake.held.length === 1);
+      const b = startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, at(31));
+      await sleep(400);
+      fake.held.splice(0).forEach((release) => release());
+      await finishing;
+      expect(await b).toMatchObject({ ok: true, job: { status: 'running' } });
+      expect(fake.calls.filter((call) => call.name === 'wake').length - wakesBefore).toBe(1);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'working', wakeEpoch: epochBefore + 1 });
+      expect(await fake.awake(sara.ref)).toBe(true);
+    });
+
     it('a job ends and its machine’s sleep is held: a new job waits for the sleep to return before it wakes the machine, and ends on an awake machine', async () => {
       const sara = await owner('sleep');
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);

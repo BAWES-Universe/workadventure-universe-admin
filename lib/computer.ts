@@ -2033,9 +2033,10 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
   // The rest is done: no longer claimed, so the sweep never mistakes it for one that was left half way
   await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { restClaimedAt: null } });
   if ((await holders()) > 0) {
-    // A job started while the machine was resting and its wake may have come before the rest: wake it again, so it works
-    await provider.wake(row.providerRef).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null } });
+    // A job started while the machine was resting and its wake may have come before the rest: it is woken again, so it works. Through the same ticketed wake as every start (CodeRabbit on #1036, found on #1040): the ticket is taken from
+    // `resting` (a start's wake in flight is waited for, never woken a second time under it, and a stop or sleep of ours that can still land is waited for), readiness is waited for, and only then does the row say `working`. A bare wake
+    // here was sent outside the ticket and the power-operation fence, so it could land beside a start's own wake, or under a stop that was recorded after the rest
+    await bringUp(botId, provider, now).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
   }
   return true;
 }
