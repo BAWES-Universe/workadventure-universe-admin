@@ -88,6 +88,8 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/bots/mcp-servers', title: 'Apps', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]', title: 'Bot', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]/mcp-servers', title: 'Bot apps', parent: '/admin/bots/[id]' },
+  { pattern: '/admin/brick-reports', title: 'Brick reports', parent: '/admin' },
+  { pattern: '/admin/brick-reports/[id]', title: 'Brick reports', parent: '/admin/brick-reports' },
   { pattern: '/admin/ai-providers', title: 'Universe AI', parent: '/admin' },
   // The one-time setup of Universe's GitHub App (game #2041): a super admin opens it once and presses Create on GitHub
   { pattern: '/admin/github-app', title: 'GitHub for Universe', parent: '/admin' },
