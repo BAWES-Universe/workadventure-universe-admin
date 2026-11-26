@@ -408,3 +408,19 @@ describe('names in other capitals, and a stale copy, and several things forgotte
     expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
   });
 });
+
+describe('forgetting leans to taking too much (deliberate)', () => {
+  it('a capitalised name that is also a word also takes a line that only starts with it, in that person\'s own chat', () => {
+    const data = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 1000 } },
+      conversationHistory: [
+        { sender: 'person', message: 'my name is Will', timestamp: 1000 },
+        { sender: 'person', message: 'Will you help me?', timestamp: 2000 },
+        { sender: 'person', message: 'I will travel soon', timestamp: 3000 },
+      ],
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('name', null, 'Will')])).data as typeof data;
+    // "I will travel soon" stays (the word in lower case); "Will you help me?" goes with the name, on purpose
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I will travel soon']);
+  });
+});

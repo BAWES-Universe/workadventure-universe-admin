@@ -215,6 +215,9 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
     const trimmed = phrase.trim();
     const forgotAt = onlyOlderThan?.get(id)?.getTime() ?? null;
     // A name written with a capital ("Will") is found only as written, so the word it is also ("I will") stays
+    // Deliberate: forgetting leans to taking too much. A capitalised name that is also a word ("Will", "Mark", "Grace") also takes
+    // an unrelated line that starts with it ("Will you help me?"), from that person's own saved chat only. A line is never left that
+    // says a forgotten name; the game does the same (pinned by a test).
     const exact = kind === 'name' && trimmed !== trimmed.toLowerCase();
     if (trimmed.length >= MIN_PHRASE) {
       phrases.push({ text: wordsIn(exact ? trimmed : trimmed.toLowerCase()), exact, forgotAt, owner: mine });
