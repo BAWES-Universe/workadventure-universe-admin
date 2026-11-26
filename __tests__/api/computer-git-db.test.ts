@@ -23,6 +23,7 @@ import { encryptApiKey } from '@/lib/encryption';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { grantToBrick, removeGrant } from '@/lib/app-connections';
+import { readServerTools, setToolSetting } from '@/lib/mcp-tool-policy';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, handBack, startJob, stopJobFor, takeOver, turnOffComputer } from '@/lib/computer';
 import { deleteBrick } from '@/lib/brick-delete';
@@ -567,19 +568,71 @@ const hasBranch = (name: string) => branches().split('\n').some((line) => line.r
     expect(pulls).toHaveLength(0);
   });
 
-  it('a job that may write loses that when the owner turns GitHub’s “make” and “change” both off: reading stays, pushing and pull requests go', async () => {
+  it('a job that may write loses that when the owner turns GitHub’s Changes things off: reading stays, pushing and pull requests go, and git says why', async () => {
     const sara = await saraWithGitHub();
     const jobId = await running(sara);
     const minted = await mintJobToken(jobId, 'git', NOW);
     if (!minted.ok) throw new Error('no key');
     const header = basic(minted.token);
     expect((await receivePost(header, newBranchPush('refs/heads/before-off', mainTip()))).status).toBe(200);
-    await prisma.botMcpServer.updateMany({ where: { botId: sara.brickId }, data: { makeSetting: 'off', changeSetting: 'off' } });
+    await prisma.botMcpServer.updateMany({ where: { botId: sara.brickId }, data: { changeSetting: 'off' } });
     expect((await askRefs(header, 'git-upload-pack')).status).toBe(200);
-    expect((await receivePost(header, newBranchPush('refs/heads/after-off', mainTip()))).status).toBe(403);
-    expect((await openPullWith(header)).status).toBe(403);
+    expect(await (await askRefs(header, 'git-receive-pack')).text()).toContain('ERR Commit files is off for sara\'s Brick in GitHub, so nothing was pushed.');
+    const refused = await receivePost(header, newBranchPush('refs/heads/after-off', mainTip()));
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain('Commit files is off for sara\'s Brick in GitHub');
+    const pull = await openPullWith(header);
+    expect(pull.status).toBe(403);
+    expect(await pull.json()).toMatchObject({ ok: false, error: 'Open a pull request is off for sara\'s Brick in GitHub, so no pull request was opened.' });
     expect(hasBranch('before-off')).toBe(true);
     expect(hasBranch('after-off')).toBe(false);
+  });
+
+  it('follows each GitHub action’s own choice once the grant is brought over: only Right away runs on a computer, and Asks first says to ask in chat', async () => {
+    const sara = await saraWithGitHub();
+    const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: sara.brickId, connectionId: sara.connectionId }, select: { id: true } });
+    const brought = await readServerTools(sara.brickId, grant.id, { appActions: true });
+    expect(brought.kind).toBe('appActions');
+    const idOf = (name: string) => brought.tools.find((tool) => tool.name === name)!.id;
+    const jobId = await running(sara);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const header = basic(minted.token);
+    // Everything on Right away: a new branch, and a pull request from it
+    expect((await receivePost(header, newBranchPush('refs/heads/per-action', mainTip()))).status).toBe(200);
+    expect(hasBranch('per-action')).toBe(true);
+    expect((await openPullWith(header)).status).toBe(200);
+    expect(pulls).toHaveLength(1);
+
+    // Make a branch off: a push that makes one is turned down by git's own report; Commit files alone still runs
+    await setToolSetting(sara.brickId, grant.id, idOf('github_create_branch'), 'off');
+    const noBranch = await receivePost(header, newBranchPush('refs/heads/no-branch', mainTip()));
+    const report = await noBranch.text();
+    expect(report).toContain('ng refs/heads/no-branch');
+    expect(report).toContain('Make a branch is off for sara\'s Brick in GitHub, so nothing was pushed.');
+    expect(hasBranch('no-branch')).toBe(false);
+    await setToolSetting(sara.brickId, grant.id, idOf('github_create_branch'), null);
+
+    // Commit files asks first: a computer can't ask, so no push at all, and the words say where to ask
+    await setToolSetting(sara.brickId, grant.id, idOf('github_write_files'), 'asksFirst');
+    const advert = await (await askRefs(header, 'git-receive-pack')).text();
+    expect(advert).toContain('ERR Commit files asks first for sara\'s Brick in GitHub, and a computer can\'t ask, so nothing was pushed. Ask your owner in chat: Commit files there shows them a card.');
+    expect((await receivePost(header, newBranchPush('refs/heads/asks', mainTip()))).status).toBe(403);
+    expect(hasBranch('asks')).toBe(false);
+    await setToolSetting(sara.brickId, grant.id, idOf('github_write_files'), null);
+
+    // Open a pull request asks first: none is opened
+    await setToolSetting(sara.brickId, grant.id, idOf('github_create_pull_request'), 'asksFirst');
+    const pull = await openPullWith(header);
+    expect(pull.status).toBe(403);
+    expect((await pull.json()).error).toMatch(/^Open a pull request asks first for sara's Brick in GitHub/);
+    expect(pulls).toHaveLength(1);
+
+    // Read a file off: no clone or fetch either
+    await setToolSetting(sara.brickId, grant.id, idOf('github_read_file'), 'off');
+    const asked = seen.length;
+    expect(await (await askRefs(header, 'git-upload-pack')).text()).toContain('ERR Read a file is off for sara\'s Brick in GitHub, so this computer can\'t read from GitHub.');
+    expect(seen.length).toBe(asked);
   });
 
   it('looks at the key again once a push is read: a push that was let in and then loses its job, its grant or its GitHub is not passed on', async () => {
