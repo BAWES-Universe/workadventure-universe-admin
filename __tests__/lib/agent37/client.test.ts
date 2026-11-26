@@ -105,6 +105,28 @@ describe('the Agent37 client', () => {
     await expect(empty.api.listInstances()).resolves.toEqual([]);
   });
 
+  it('Opus on #1040 (sweep recovery): the one list for the sweep is ONE request with its own timeout, never asked again (503, 429 and a lost answer end it), and a part list or a body with no list is refused like the asked-again list', async () => {
+    const machine = { id: 'a', status: 'running', url: 'https://a.agent37.app', created: 1793794006 };
+    for (const status of [503, 429, 502]) {
+      const busy = client([json(status, { error: { code: 'try_again' } }), json(200, { data: [machine] })]);
+      await expect(busy.api.listInstancesOnce(5_000)).rejects.toMatchObject({ status });
+      expect(busy.calls).toHaveLength(1);
+      expect(busy.sleep).not.toHaveBeenCalled();
+    }
+    const lost = client([new TypeError('fetch failed'), json(200, { data: [machine] })]);
+    await expect(lost.api.listInstancesOnce(5_000)).rejects.toBeInstanceOf(Agent37Unreached);
+    expect(lost.calls).toHaveLength(1);
+    const fine = client([json(200, { data: [machine] })]);
+    await expect(fine.api.listInstancesOnce(5_000)).resolves.toEqual([machine]);
+    expect(fine.calls[0].url).toBe('https://api.agent37.com/v1/instances');
+    expect(fine.calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    const part = client([json(200, { data: [machine], has_more: true })]);
+    await expect(part.api.listInstancesOnce(5_000)).rejects.toThrow('only part of them');
+    for (const bad of [json(200, {}), json(200, { data: null }), json(200, [1]), new Response('', { status: 200 })]) {
+      await expect(client([bad]).api.listInstancesOnce(5_000)).rejects.toThrow();
+    }
+  });
+
   it('never asks again for a create: after a lost answer the caller looks first', async () => {
     const { api, calls } = client([json(502, { error: 'bad_gateway' }), json(201, { id: 'x' })]);
     await expect(api.createInstance({ template: 't' })).rejects.toBeInstanceOf(Agent37Error);

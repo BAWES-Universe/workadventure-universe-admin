@@ -277,7 +277,15 @@ export class Agent37Client {
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
   async listInstances(): Promise<Instance[]> {
-    const answer = await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account()));
+    return this.listed(await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account())));
+  }
+
+  /** The same list from ONE request with its own short timeout and never asked again: for the sweep's look for a machine that runs behind a row that says it is stopped (it never waits on Agent37, and skips a pass that gets no clean answer). */
+  async listInstancesOnce(timeoutMs: number): Promise<Instance[]> {
+    return this.listed(await this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account(), undefined, timeoutMs));
+  }
+
+  private listed(answer: { data?: Instance[]; [more: string]: unknown } | null): Instance[] {
     // An answer with no list in it (an empty body, `{}`, a page that is not the list) says nothing: it is not read as an account with no machines,
     // which would let a make look for its machine in nothing and a purge call a Brick clear without looking
     if (!answer || typeof answer !== 'object' || !Array.isArray(answer.data)) throw new Error('Agent37 did not answer with a list of machines');

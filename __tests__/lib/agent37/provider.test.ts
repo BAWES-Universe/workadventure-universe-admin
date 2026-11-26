@@ -53,6 +53,12 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push('list');
       return [...instances.values()];
     },
+    /** The one look at the whole account (one request, never asked again): a test makes it fail with `refuse.listOnce`. */
+    async listInstancesOnce(timeoutMs: number) {
+      calls.push(`listOnce:${timeoutMs}`);
+      if (refuse.listOnce) throw refuse.listOnce;
+      return [...instances.values()];
+    },
     async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }) {
       calls.push('create');
       if (refuse.create) {
@@ -600,6 +606,44 @@ describe('the Agent37 provider', () => {
       await expect(p.openTurn('m1', { text: 'x' })).rejects.toThrow('deleted');
       await expect(p.cancelTurn('m1', 'r')).rejects.toThrow('deleted');
     });
+  });
+});
+
+describe('the look at every machine of the account (the sweep stops a machine that runs behind a stopped row, CodeRabbit on #1040)', () => {
+  it('says each machine by its status in ONE request: awake for a running or starting one, asleep for a stopped, sleeping, stopping or gone one, not known for a status Agent37 never documented (said to Sentry)', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.create('bot-2');
+    await p.create('bot-3');
+    await p.create('bot-4');
+    const set = (id: string, status: string) => {
+      (w.instances.get(id) as { status: string }).status = status;
+    };
+    set('m1', 'running');
+    set('m2', 'stopping');
+    set('m3', 'sleeping');
+    set('m4', 'quantum');
+    (Sentry.captureMessage as jest.Mock).mockClear();
+    w.calls.length = 0;
+    const said = await p.awakeMachinesOnce(5_000);
+    expect(said.get('m1')).toBe(true);
+    expect(said.get('m2')).toBe(false);
+    expect(said.get('m3')).toBe(false);
+    expect(said.get('m4')).toBeNull();
+    // One request with the short timeout, no other call
+    expect(w.calls).toEqual(['listOnce:5000']);
+    expect(Sentry.captureMessage).toHaveBeenCalledWith('Agent37 said a machine status that is not in the list', expect.objectContaining({ level: 'warning' }));
+  });
+
+  it('a list that gets no clean answer throws (an error, a rate limit) and is asked once: nothing is read from it', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.refuse.listOnce = new Agent37Error(429, null, 'slow down');
+    w.calls.length = 0;
+    await expect(p.awakeMachinesOnce(5_000)).rejects.toBeInstanceOf(Agent37Error);
+    expect(w.calls).toEqual(['listOnce:5000']);
   });
 });
 

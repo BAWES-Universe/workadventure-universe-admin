@@ -584,6 +584,23 @@ export class Agent37ComputerProvider implements ComputerProvider {
     return this.awakeFrom(() => this.client.getInstanceOnce(ref, timeoutMs));
   }
 
+  /** Every machine of the account from ONE request (see the interface): a status that is not documented is `null`, said to Sentry, and never taken for awake or asleep. */
+  async awakeMachinesOnce(timeoutMs: number): Promise<Map<string, boolean | null>> {
+    const listed = await this.client.listInstancesOnce(timeoutMs);
+    const said = new Map<string, boolean | null>();
+    for (const instance of listed) {
+      if (!instance || typeof instance.id !== 'string' || typeof instance.status !== 'string') continue;
+      const status = String(instance.status);
+      if (AWAKE_STATUSES.includes(status)) said.set(instance.id, true);
+      else if (ASLEEP_STATUSES.includes(status) || gone(status)) said.set(instance.id, false);
+      else {
+        said.set(instance.id, null);
+        Sentry.captureMessage('Agent37 said a machine status that is not in the list', { level: 'warning', tags: { area: 'computer', step: 'awake-status' }, extra: { status: status.slice(0, 40) } });
+      }
+    }
+    return said;
+  }
+
   private async awakeFrom(look: () => Promise<Instance>): Promise<boolean> {
     try {
       const status = String((await look()).status);

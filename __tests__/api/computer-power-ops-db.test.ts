@@ -22,6 +22,7 @@ jest.mock('@/lib/computer-control', () => {
   return { ...actual, readControl: jest.fn(actual.readControl) };
 });
 
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits } from '../helpers/give-back-limits';
 import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
@@ -30,7 +31,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals, wakeTimingForTests } from '@/lib/computer';
-import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped } from '@/lib/computer';
+import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped, setLateStartListMsForTests } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
 import { endPowerOp, openPowerOpOf, powerTiming, underPowerOp, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
@@ -1798,5 +1799,310 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', pauses: 0, awakeProvedAt: new Date(began + 120_000) });
       expect(await prisma.computerJobPause.count({ where: { jobId: job.id } })).toBe(0);
     });
+  });
+  describe('Opus on #1040 (CodeRabbit 4710981601): the sweep finds a machine that runs behind a row that says it is stopped, and one left by a wake whose sender died', () => {
+    /** A computer that ran a job, whose job ended, whose row says `stopped`, and whose machine is awake: a start that landed after its row was stopped. */
+    const behindStoppedRow = async (name: string) => {
+      const sara = await owner(name);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      expect(started).toMatchObject({ ok: true });
+      await finishJob((started as { job: { id: string } }).job.id, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped', turnUnprovenSince: null } });
+      // The job's end put the machine to sleep; a start of ours that was already on its way lands now
+      await fake.wake(sara.ref);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      return sara;
+    };
+    /** A computer that has worked and has no mark saved: its next wake asks for a fresh boot (the restart `ready` waits for). */
+    const freshBootReadyLate = async (name: string) => {
+      const sara = await owner(name);
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 400 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped', markBootId: null } });
+      fake.freshBoots.length = 0;
+      fake.wakeSent.length = 0;
+      return sara;
+    };
+    const stopsOf = (ref: string) => fake.calls.filter((call) => call.name === 'stop' && call.ref === ref).length;
+    const stopOps = (ref: string) => prisma.computerPowerOp.findMany({ where: { providerRef: ref, kind: 'stop' } });
+    const booked = async () => ({ events: await prisma.meterEvent.count(), reservations: await prisma.meterReservation.count({ where: { state: 'held' } }) });
+    const warned = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-start-found').length;
+    const rowSeconds = (sara: Owner, text: string) => prisma.$executeRawUnsafe(`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '${text}') WHERE "bot_id" = '${sara.brickId}'`);
+
+    beforeEach(() => {
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      setLateStartListMsForTests(null);
+    });
+    afterEach(() => {
+      setLateStartListMsForTests(null);
+      fake.listHookForTests = null;
+      fake.listFailsForTests = null;
+      fake.listNotKnownForTests.clear();
+    });
+
+    it('T1 CodeRabbit\'s exact case: the check passed, the sender froze, its wake was given up on and the hold lifted, its start lands and the sender never returns: ONE sweep pass stops it once (a recorded power operation), the row ends stopped, no job is started or billed, and Sentry is told', async () => {
+      const sara = await freshBootReadyLate('t1');
+      fake.holdAfterCheck = 1;
+      const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      await until(() => fake.heldAfterCheck.length === 1);
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      await sleep(600);
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      await watchPassed(sara);
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+      // The sender is frozen for good; its start lands from outside (it is not told anything)
+      await fake.wake(sara.ref);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      const before = await booked();
+      const stopsBefore = stopsOf(sara.ref);
+      const opsBefore = (await stopOps(sara.ref)).length;
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore + 1);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      const ops = await stopOps(sara.ref);
+      expect(ops.length).toBe(opsBefore + 1);
+      expect(ops.filter((op) => op.doneAt === null)).toEqual([]);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+      expect(await prisma.computerJob.findMany({ where: { botId: sara.brickId, title: 'A' }, select: { status: true, stretchStarted: true } })).toEqual([{ status: 'done', stretchStarted: null }]);
+      expect(await booked()).toEqual(before);
+      expect(warned()).toBe(1);
+      // Nothing is left to stop on the next pass
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore + 1);
+      expect(warned()).toBe(1);
+      for (const release of fake.heldAfterCheck.splice(0)) release();
+      await starting;
+    }, 30_000);
+
+    it('T1b no window: a start that lands an hour after its row was stopped is still stopped by the next pass', async () => {
+      const sara = await behindStoppedRow('t1b');
+      await rowSeconds(sara, '60 minutes');
+      const stopsBefore = stopsOf(sara.ref);
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore + 1);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      expect((await machineOf(sara)).machine).toBe('stopped');
+    }, 30_000);
+
+    it('T2 a replacement first: it takes the next ticket between the list and the claim: no stop is sent and the row stays the replacement\'s', async () => {
+      const sara = await behindStoppedRow('t2');
+      const epoch = (await machineOf(sara)).wakeEpoch;
+      fake.listHookForTests = async () => {
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "wake_epoch" = "wake_epoch" + 1, "machine" = 'waking', "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
+      };
+      const stopsBefore = stopsOf(sara.ref);
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'waking', wakeEpoch: epoch + 1 });
+      expect(warned()).toBe(0);
+    }, 30_000);
+
+    it('T2b a replacement came and went: it woke the machine and stopped itself (the row is `stopped` again at the next epoch): the claim is fenced on the epoch and no stop is sent', async () => {
+      const sara = await behindStoppedRow('t2b');
+      const epoch = (await machineOf(sara)).wakeEpoch;
+      fake.listHookForTests = async () => {
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "wake_epoch" = "wake_epoch" + 1, "machine" = 'waking', "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "machine" = 'stopped', "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
+      };
+      const stopsBefore = stopsOf(sara.ref);
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', wakeEpoch: epoch + 1 });
+      expect(warned()).toBe(0);
+      // The next pass reads the new epoch and stops the machine, which is still awake behind a stopped row
+      fake.listHookForTests = null;
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore + 1);
+    }, 30_000);
+
+    it('T3 the claim first: the stop is recorded and held by the provider, a real start meanwhile sees the open stop and wakes only after it landed, and ends working', async () => {
+      const sara = await behindStoppedRow('t3');
+      fake.holdNext = 1;
+      const sweeping = sweepComputers(NOW);
+      await until(() => fake.held.length === 1);
+      expect((await stopOps(sara.ref)).filter((op) => op.doneAt === null)).toHaveLength(1);
+      const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+      const b = startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      await sleep(400);
+      expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+      fake.held.splice(0).forEach((release) => release());
+      await sweeping;
+      await expect(b).resolves.toMatchObject({ ok: true, job: { status: 'running' } });
+      expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore + 1);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('working');
+    }, 30_000);
+
+    it('T4 other states: an awake machine behind a row that is working, waking (a fresh beat), restoring, resting, broken or cold is never stopped by this look, and one behind `stopping` is stopped once (by the sweep\'s own retry, never twice)', async () => {
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 120_000 });
+      for (const state of ['working', 'waking', 'restoring', 'resting', 'broken', 'cold', 'stopping'] as const) {
+        const sara = await behindStoppedRow(`t4-${state}`);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state } });
+        await rowSeconds(sara, '1 second');
+        const stopsBefore = stopsOf(sara.ref);
+        await sweepComputers(NOW);
+        expect({ state, stops: stopsOf(sara.ref) - stopsBefore }).toEqual({ state, stops: state === 'stopping' ? 1 : 0 });
+      }
+      expect(warned()).toBe(0);
+    }, 60_000);
+
+    it('T4b the state moves between the list and the claim with no new ticket (a person takes the machine over, a rest or a pack-away starts, the Brick is marked broken): the claim is fenced on the state and nothing is stopped', async () => {
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 120_000 });
+      for (const state of ['working', 'waking', 'restoring', 'resting', 'broken', 'cold', 'stopping'] as const) {
+        const sara = await behindStoppedRow(`t4b-${state}`);
+        fake.listHookForTests = async () => {
+          await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state } });
+        };
+        const stopsBefore = stopsOf(sara.ref);
+        const opsBefore = (await stopOps(sara.ref)).length;
+        await sweepComputers(NOW);
+        expect({ state, stops: stopsOf(sara.ref) - stopsBefore, ops: (await stopOps(sara.ref)).length - opsBefore }).toEqual({ state, stops: 0, ops: 0 });
+        fake.listHookForTests = null;
+      }
+      expect(warned()).toBe(0);
+    }, 60_000);
+
+    it('T5 a machine of the account that this database has no row for is never touched: no call of any kind for it', async () => {
+      const sara = await behindStoppedRow('t5');
+      await fake.wake('fake-someone-elses-machine');
+      const callsBefore = fake.calls.length;
+      await sweepComputers(NOW);
+      expect(fake.calls.slice(callsBefore).filter((call) => call.ref === 'fake-someone-elses-machine')).toEqual([]);
+      expect(await fake.awake('fake-someone-elses-machine')).toBe(true);
+      // ...while the machine this database knows is stopped
+      expect(await fake.awake(sara.ref)).toBe(false);
+    }, 30_000);
+
+    it('T6 a list that fails (an error), never answers, or names a status nobody documented: no stop, the pass ends within the timeout, and the rest of the sweep still runs (an idle computer is still put to rest)', async () => {
+      const sara = await behindStoppedRow('t6');
+      // Another Brick has an idle computer the sweep puts to rest AFTER this step: it must still do that when the list fails
+      const tom = await owner('t6-other');
+      const tomIdle = async () => {
+        const first = await startJob({ botId: tom.brickId, personId: tom.id, title: 'first', writes: false }, NOW);
+        expect(first).toMatchObject({ ok: true });
+        await finishJob((first as { job: { id: string } }).job.id, 'done', NOW);
+        await fake.wake(tom.ref);
+        await prisma.brickComputer.update({ where: { botId: tom.brickId }, data: { machine: 'working' } });
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${tom.brickId}`;
+      };
+      const tomRests = () => fake.calls.filter((call) => call.name === 'rest' && call.ref === tom.ref).length;
+      await tomIdle();
+      let restsBefore = tomRests();
+      const stopsBefore = stopsOf(sara.ref);
+      setLateStartListMsForTests(300);
+      fake.listFailsForTests = 'throw';
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect(tomRests()).toBe(restsBefore + 1);
+      // A list that never answers ends the step within its timeout (and a little over), and the sweep goes on
+      fake.listFailsForTests = 'hang';
+      await tomIdle();
+      restsBefore = tomRests();
+      const began = Date.now();
+      await sweepComputers(NOW);
+      expect(Date.now() - began).toBeLessThan(3_000);
+      expect(tomRests()).toBe(restsBefore + 1);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      // A status that is not documented is not known: neither stopped nor taken for asleep
+      fake.listFailsForTests = null;
+      fake.listNotKnownForTests.add(sara.ref);
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect(warned()).toBe(0);
+    }, 60_000);
+
+    it('T7 asleep: a machine the list does not call awake behind a stopped row is not stopped and no power operation is recorded for it', async () => {
+      const sara = await behindStoppedRow('t7');
+      await fake.stop(sara.ref);
+      const stopsBefore = stopsOf(sara.ref);
+      const opsBefore = (await stopOps(sara.ref)).length;
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect((await stopOps(sara.ref)).length).toBe(opsBefore);
+      expect(warned()).toBe(0);
+    }, 30_000);
+
+    describe('T8 a wake whose sender died, with no turn hold and no job', () => {
+      const abandoned = async (name: string, state: 'waking' | 'restoring' = 'waking') => {
+        const sara = await behindStoppedRow(name);
+        setWakeTimingForTests({ beatMs: 60_000, staleMs: 400 });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state, turnUnprovenSince: null } });
+        return sara;
+      };
+
+      it('the sweep claims it (the epoch moves on), stops the machine and the row ends stopped; the dead sender\'s start landing later is stopped by the next pass', async () => {
+        const sara = await abandoned('t8');
+        const epoch = (await machineOf(sara)).wakeEpoch;
+        await rowSeconds(sara, '10 seconds');
+        const stopsBefore = stopsOf(sara.ref);
+        await sweepComputers(NOW);
+        expect(stopsOf(sara.ref)).toBe(stopsBefore + 1);
+        expect(await fake.awake(sara.ref)).toBe(false);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'stopped' });
+        expect((await machineOf(sara)).wakeEpoch).toBeGreaterThan(epoch);
+        await fake.wake(sara.ref);
+        await sweepComputers(NOW);
+        expect(stopsOf(sara.ref)).toBe(stopsBefore + 2);
+        expect(await fake.awake(sara.ref)).toBe(false);
+      }, 30_000);
+
+      it('(a) a wake that beat a moment ago is live: not stopped', async () => {
+        const sara = await abandoned('t8a');
+        await rowSeconds(sara, '0 seconds');
+        const stopsBefore = stopsOf(sara.ref);
+        await sweepComputers(NOW);
+        expect(stopsOf(sara.ref)).toBe(stopsBefore);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'waking' });
+      }, 30_000);
+
+      it('(b) a job that is running holds the machine: not stopped, even with a stale beat', async () => {
+        const sara = await abandoned('t8b');
+        // A job of the Brick is running (its start came while the row said stopped); its row is then put back to a wake whose beat is stale
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'running', writes: false }, NOW)).toMatchObject({ ok: true, job: { status: 'running' } });
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking' } });
+        await rowSeconds(sara, '10 seconds');
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['running', 'waiting'] } } })).toBeGreaterThan(0);
+        const stopsBefore = stopsOf(sara.ref);
+        await sweepComputers(NOW);
+        expect(stopsOf(sara.ref)).toBe(stopsBefore);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'waking' });
+      }, 30_000);
+
+      it('(c) a return from cold storage (`restoring`, stage `returning`) has its own claim and is left alone, even stale', async () => {
+        const sara = await abandoned('t8c', 'restoring');
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { packStage: 'returning' } });
+        await rowSeconds(sara, '10 seconds');
+        const stopsBefore = stopsOf(sara.ref);
+        await sweepComputers(NOW);
+        expect(stopsOf(sara.ref)).toBe(stopsBefore);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'restoring', packStage: 'returning' });
+      }, 30_000);
+    });
+
+    it('T9 order: the machine is awake in the list while its row is `working`, and a normal turn-off is proved before anything is claimed: the row is read BEFORE the list, so nothing is stopped', async () => {
+      const sara = await owner('t9');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      expect(started).toMatchObject({ ok: true });
+      await finishJob((started as { job: { id: string } }).job.id, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working', turnUnprovenSince: null } });
+      // The job's end put the machine to sleep; it is awake again for this look (a person's use of it, say)
+      await fake.wake(sara.ref);
+      fake.listHookForTests = async () => {
+        // The list was taken with the machine awake; now the normal turn-off lands and is proved
+        await fake.rest(sara.ref);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      };
+      const stopsBefore = stopsOf(sara.ref);
+      await sweepComputers(NOW);
+      expect(stopsOf(sara.ref)).toBe(stopsBefore);
+      expect((await stopOps(sara.ref)).filter((op) => op.doneAt === null)).toEqual([]);
+      expect(warned()).toBe(0);
+    }, 30_000);
   });
 });

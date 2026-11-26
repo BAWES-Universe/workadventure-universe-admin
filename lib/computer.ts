@@ -2326,6 +2326,70 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
   }
 }
 
+/**
+ * A wake whose sender died leaves the row `waking` or `restoring` for good, and the machine it woke running (a redeploy in the middle of a wake, the old container killed after seconds). Only `settleTurnHold` stopped such a wake, and only when a
+ * turn hold existed. The sweep stops it here too: a wake whose beat has been missed for the whole stale time, with no running or waiting job that could be using the machine, is claimed with the abandoned claim (the epoch seen AND the beat still stale
+ * are checked by the database in the write, and the epoch moves on: a live wake beats every 30 s, and a replacement took the next ticket, so neither is ever claimed). A cold-storage return (`restoring` with its stage `returning`) has its own claim and
+ * does not beat this row: it is left to that. The row is `stopped` afterwards, so `stopLateStarts` also catches a start the dead sender had already sent (Opus on #1040).
+ * Every path that writes `waking` or `restoring` with a machine goes through `bringUpMachine` (the start's own make, the return from cold storage inside it, and the ticket), which beats the row.
+ */
+async function stopAbandonedWakes(): Promise<void> {
+  const rows = await prisma.brickComputer.findMany({
+    where: { machine: { in: ['waking', 'restoring'] }, NOT: { providerRef: null }, updatedAt: { lte: new Date(Date.now() - wakeTiming.staleMs) }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] },
+    select: { botId: true, providerRef: true, provider: true, machine: true, wakeEpoch: true },
+    take: 200,
+  });
+  for (const row of rows) {
+    if (!row.providerRef) continue;
+    if ((await prisma.computerJob.count({ where: { botId: row.botId, status: { in: ['running', 'waiting'] } } })) > 0) continue;
+    const provider = providerFor(row);
+    if (!provider) continue;
+    await stopMachine(row.botId, row.providerRef, provider, [row.machine], undefined, { epoch: row.wakeEpoch, staleMs: wakeTiming.staleMs }).catch(() => false);
+  }
+}
+
+/** The longest the look at the whole account may take (one request, never asked again). A test shortens it. */
+let lateStartListMs = 5_000;
+export function setLateStartListMsForTests(ms: number | null): void {
+  lateStartListMs = ms ?? 5_000;
+}
+/** How many `stopped` rows one pass reads. */
+const LATE_START_ROWS = 5000;
+
+/**
+ * A start of ours can reach the provider long after its row was stopped (its sender froze, or died right after sending it), and nothing fences a call already sent: the machine then runs behind a row that says `stopped`. Looked for here, once
+ * for the whole account (CodeRabbit on #1040, Opus): the `stopped` rows of this database are read FIRST, then ONE list of the account is asked (one try, a short timeout, never asked again), so a machine the list calls awake was awake after
+ * its row was stopped, never before it (the other order would stop a machine a normal turn-off had just stopped). Only for machines this database knows (dev and prod may share an account): the list is never walked for its own sake.
+ * A machine the list calls awake behind a row that is still `stopped` at the epoch that was read is stopped with the state AND the epoch in the claim's own write: a replacement that took the next ticket, or woke the machine and stopped it again
+ * (the epoch moved), makes the claim write nothing. Nothing is started or billed here. A list that gets no clean answer (an error, a rate limit, a part of the account, no answer in time) skips the pass.
+ */
+async function stopLateStarts(): Promise<void> {
+  const rows = await prisma.brickComputer.findMany({ where: { machine: 'stopped', NOT: { providerRef: null } }, select: { botId: true, providerRef: true, provider: true, wakeEpoch: true }, orderBy: { updatedAt: 'desc' }, take: LATE_START_ROWS });
+  if (rows.length === 0) return;
+  const byProvider = new Map<Provider, typeof rows>();
+  for (const row of rows) {
+    const provider = providerFor(row);
+    if (!provider?.awakeMachinesOnce) continue;
+    byProvider.set(provider, [...(byProvider.get(provider) ?? []), row]);
+  }
+  for (const [provider, mine] of byProvider) {
+    const said = await withinMs(
+      provider.awakeMachinesOnce!(lateStartListMs).catch((error) => {
+        console.error('[Computer] The list of machines did not answer, no late start was looked for this pass:', error instanceof Error ? error.message : 'unknown');
+        return null;
+      }),
+      lateStartListMs + 1_000,
+      null,
+    );
+    if (!said) continue;
+    for (const row of mine) {
+      if (!row.providerRef || said.get(row.providerRef) !== true) continue;
+      const proven = await stopMachine(row.botId, row.providerRef, provider, ['stopped'], row.wakeEpoch).catch(() => false);
+      if (proven) Sentry.captureMessage('A computer was found running behind a row that says it is stopped, and was stopped', { level: 'warning', tags: { area: 'computer', step: 'late-start-found' }, extra: { botId: row.botId } });
+    }
+  }
+}
+
 /** Whether any job of this Brick is running or waiting, that is, still needs its machine woken. */
 async function wakeStillWanted(botId: string): Promise<boolean> {
   return (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0;
@@ -3700,6 +3764,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // A machine that may still run the turn of a job that ended is put to sleep and proved, and only then do the jobs behind it start
   const turnHolds = await prisma.brickComputer.findMany({ where: { NOT: { turnUnprovenSince: null } }, select: { botId: true }, take: 200 });
   for (const machine of turnHolds) await settleTurnHold(machine.botId);
+  // A wake whose sender died (a redeploy in the middle of it) and a start that reached the provider after its row was stopped leave a machine running that nothing counts (CodeRabbit on #1040): both are looked for here, and never block the rest of the sweep
+  await stopAbandonedWakes().catch((error) => console.error('[Computer] Abandoned wakes could not be looked for:', error instanceof Error ? error.message : 'unknown'));
+  await stopLateStarts().catch((error) => console.error('[Computer] Machines running behind a stopped row could not be looked for:', error instanceof Error ? error.message : 'unknown'));
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of idle) await restIfUnheld(machine.botId, now);
   // A machine a job holds is kept awake while it works

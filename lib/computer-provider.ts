@@ -162,6 +162,12 @@ export interface ComputerProvider {
   awake(ref: string): Promise<boolean>;
   /** The same as `awake`, from ONE request with this timeout and no asking again (a renewal must answer its worker within a few seconds, post-0.5.0 B). Absent: `awake` is used under the caller's own cap. */
   awakeOnce?(ref: string, timeoutMs: number): Promise<boolean>;
+  /**
+   * What the provider says about EVERY machine of its account, from ONE request with this timeout and no asking again (the sweep's look for a machine that runs behind a row that says it is stopped, CodeRabbit on #1040): by machine,
+   * `true` = running or on its way up, `false` = stopped, asleep or gone, `null` = a status it never documented (not known, never taken for either). Throws when it gets no clean answer (an error, a rate limit, a list that is only part of the account).
+   * A machine the list does not name is not in the map. Absent: this provider has no such look.
+   */
+  awakeMachinesOnce?(timeoutMs: number): Promise<Map<string, boolean | null>>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
@@ -428,6 +434,25 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async awake(ref: string): Promise<boolean> {
     return this.awake_.has(ref) || this.stuckAwake.has(ref);
+  }
+
+  /** Test seams for the look at the whole account: runs between "the list was taken" and "the answer returned" (a test moves a row there); makes the list fail (`throw`) or never answer (`hang`); machines the list calls not known. */
+  listHookForTests: (() => Promise<void>) | null = null;
+  listFailsForTests: 'throw' | 'hang' | null = null;
+  readonly listNotKnownForTests = new Set<string>();
+  listsAsked = 0;
+
+  async awakeMachinesOnce(_timeoutMs: number): Promise<Map<string, boolean | null>> {
+    this.listsAsked++;
+    if (this.listFailsForTests === 'throw') throw new Error('The pretend provider did not answer with a list');
+    if (this.listFailsForTests === 'hang') await new Promise<void>(() => undefined);
+    // The list is taken now: what is awake at this moment is what it says
+    const taken = new Map<string, boolean | null>();
+    for (const ref of this.awake_) taken.set(ref, true);
+    for (const ref of this.stuckAwake) taken.set(ref, true);
+    for (const ref of this.listNotKnownForTests) taken.set(ref, null);
+    await this.listHookForTests?.();
+    return taken;
   }
 
   async watch(ref: string): Promise<WatchSession | null> {
