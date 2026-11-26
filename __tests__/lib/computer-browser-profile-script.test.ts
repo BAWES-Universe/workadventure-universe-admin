@@ -1307,6 +1307,15 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
       return { code: done.status ?? -1, out: done.stdout };
     }
 
+    it('the image\'s own start-up has the WHOLE lock block before the cleanup block (the test assembles them in that order, so the order itself is checked on the image\'s text)', () => {
+      const lockStart = UNIVERSE_UP.indexOf('LOCK="$STATE/up.lock"');
+      const lockEnd = UNIVERSE_UP.indexOf("trap 'rmdir \"$LOCK\" 2>/dev/null' EXIT");
+      const cleanup = UNIVERSE_UP.indexOf("# A cleanup that could not remove the browser's profile left a mark");
+      expect(lockStart).toBeGreaterThanOrEqual(0);
+      expect(lockEnd).toBeGreaterThan(lockStart);
+      expect(cleanup).toBeGreaterThan(lockEnd);
+    });
+
     it('after a restore killed right after the move, the start-up that runs before the retry finds no mark and leaves the profile alone; the profile is closed to the agent; the retry then hands it over', () => {
       fakeProfile('job A cookies');
       act('park', JOB_A, [JOB_A]);

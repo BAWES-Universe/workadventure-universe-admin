@@ -81,8 +81,11 @@ import {
   settlePark,
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
+import { markUpdate, refreshMarkParts, savedMark, MARK_SELECT } from '@/lib/computer-mark';
+import { fenceCommand } from '@/lib/computer-fence-script';
+import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
-import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
+import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -122,6 +125,8 @@ export interface JobView {
   control: 'brick' | 'person';
   /** What Brick is ready to put in at the hand-over and where, as it named it: the person's one tap fills in this and nothing else. */
   ready: { what: string; where: string } | null;
+  /** When the person asked for the job (its creation): Brick tells two jobs of one title apart by how long ago each was asked (GPT eighth note, E2). */
+  askedAt: Date;
   startedAt: Date | null;
   endedAt: Date | null;
   /** Details the person asked Brick to fill in, still to be done: what and where. Brick does only these, and only now. */
@@ -141,7 +146,10 @@ export interface ComputerView {
   machine: MachineState;
   /** The job that has the machine (running, or waiting for its person); null when it rests. */
   job: JobView | null;
-  /** Jobs in line behind it, or waiting for the person's allowance. */
+  /**
+   * Jobs in line behind it, or waiting for the person's allowance. ORDER (a contract with the game, GPT eighth note E2): the order the line is taken, NOT by age: highest queue rank first, then OLDEST asked first. A caller that
+   * wants "newest first" sorts by each job's `askedAt` itself. Every job here, and `job`, carries `askedAt`.
+   */
   queued: JobView[];
   /** The person's month for computers: the share left (0 to 1), or null when no allowance is set up yet. Never a count or a price. */
   month: { leftFraction: number; unlimited: boolean; endsAt: Date } | null;
@@ -181,6 +189,7 @@ type JobRow = {
   control: string;
   startedAt: Date | null;
   endedAt: Date | null;
+  createdAt: Date;
   pausedAt?: Date | null;
   pausedWhy?: string | null;
   pauses?: number;
@@ -217,6 +226,7 @@ function jobView(row: JobRow): JobView {
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
+    askedAt: row.createdAt,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     detailsToFill,
@@ -660,12 +670,13 @@ async function keptAnswerOf(botId: string, personId: string, startKey: string): 
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
  * Written before the answer is given. The FIRST answer stored for a key stays: it never touches a start that made its own job (`made`), was superseded or was already answered (a caller that gets `false` reads the stored answer and gives that one: two requests that chose different earlier jobs must not hand the caller two answers), and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
-async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
+async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }, issued: Date | null = null): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
   const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
+  // A row this insert makes carries the key's issue time when the caller knows it (GPT eighth note, A1): the record of when its consent was given. An existing row keeps its own
   const written = await db.$executeRaw`
-    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
-    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
+    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at", "issued_at")
+    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'), ${issued})
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
     WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
@@ -824,6 +835,68 @@ export interface Registration {
 }
 
 /**
+ * GPT eighth note, A2 (Opus's design): the identity of a timed key is the part after its time prefix (`t<ms base 36>-`), which a redelivery of the same event keeps while its time prefix can change. Null for a key with no time.
+ * The whole of the rest, `-` included: only the first `-` ends the prefix (the prefix never holds one).
+ */
+export function identityOfKey(startKey: string): string | null {
+  return issuedOfKey(startKey) ? startKey.slice(startKey.indexOf('-') + 1) : null;
+}
+
+/**
+ * The key a start of this person on this Brick is KNOWN by: the FIRST key Orbit saw with the same identity (earliest issue time, then creation, then id), or the key itself when it holds none. A redelivery of one event under another time
+ * prefix is the same start: its answer, its refusal, its job and its consent time are the first key's (a replay never gains consent from the time it was replayed). The identity is matched EXACTLY after the first `-` (`_`, which a key
+ * holds, is never a wildcard here). Read only; every route that takes a key maps it first.
+ */
+export async function canonicalStartKey(botId: string, personId: string, startKey: string): Promise<string> {
+  const rest = identityOfKey(startKey);
+  if (rest === null) return startKey;
+  const found = await prisma.$queryRaw<{ start_key: string }[]>`
+    SELECT "start_key" FROM "computer_start_attempts"
+    WHERE "bot_id" = ${botId} AND "person_id" = ${personId} AND "start_key" ~ '^t[0-9a-z]{1,11}-' AND substr("start_key", position('-' in "start_key") + 1) = ${rest}
+    ORDER BY "issued_at" ASC NULLS LAST, "created_at" ASC, "id" ASC LIMIT 1`;
+  return found[0]?.start_key ?? startKey;
+}
+
+/**
+ * GPT eighth note, A1 (Opus's design): a keyed start with no attempt row whose key was issued BEFORE the key of an attempt this person already holds on this Brick (made or answered with a job, or open and beating), by
+ * the keys' own times (both are the message times of one chat, so no clock of ours is compared). The newer ask reached Orbit first, so this key is the earlier ask arriving late: it is written as answered by that job (or
+ * that attempt while it has no job), in one statement under the person's lock, and answers `earlier`: it makes and reserves nothing. Strictly later only: two starts of one message share a time and never answer each other.
+ * A deliberate second ask is issued AFTER the first answer, so its key is the newer one and is never touched. Null: none, or another request of this same key wrote its row first.
+ */
+async function answeredByNewerAsk(botId: string, personId: string, startKey: string, issued: Date, now: Date): Promise<Started | null> {
+  const newerWhere = (): Prisma.ComputerStartAttemptWhereInput => ({
+    botId,
+    personId,
+    startKey: { not: startKey },
+    issuedAt: { gt: issued, lte: new Date(now.getTime() + ISSUE_SKEW_MS) },
+    // A refused one counts too (Opus): the person's latest decision on this ask was a refusal (their month, a rule, controls not set up), and a delayed older packet must not override it and start paid work they were never told about
+    OR: [{ jobId: { not: null } }, { state: 'refused' }, { state: 'open', beatAt: { gt: new Date(now.getTime() - attemptLifeMs()) } }],
+  });
+  const orderBy = [{ issuedAt: 'asc' as const }, { id: 'asc' as const }];
+  // Nothing newer is the ordinary case: read without the lock first
+  if (!(await prisma.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true } }))) return null;
+  const decided = await prisma.$transaction(
+    async (tx): Promise<Started | 'refused' | null> => {
+      await lockPerson(tx, personId);
+      const own = { botId, personId, startKey };
+      if (await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: own }, select: { id: true } })) return null;
+      const newer = await tx.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true, jobId: true, startKey: true, state: true } });
+      if (!newer) return null;
+      if (!(await answerAttemptIn(tx, own, newer.jobId ? { jobId: newer.jobId } : { aliasAttemptId: newer.id }, issued))) return null;
+      // A refused one: this key is answered with the same kept refusal, read below from the alias just written
+      if (!newer.jobId && newer.state === 'refused') return 'refused' as const;
+      const by = newer.jobId ? await tx.computerJob.findUnique({ where: { id: newer.jobId }, select: { id: true, status: true, startKey: true } }) : null;
+      return { ok: false, reason: 'earlier', job: by ? { id: by.id, status: by.status, state: startStateOf(by.status), attempt: by.startKey } : { id: null, status: null, state: 'starting', attempt: newer.startKey } };
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (decided !== 'refused') return decided;
+  const kept = await attemptAnswer(botId, personId, startKey, now);
+  // The refusal on record, the same body the newer ask was given; one that cannot be read now is not answered here: the start goes on and its own checks answer it from the alias just written
+  return kept && 'kept' in kept ? { ok: false, reason: 'kept', body: kept.kept } : null;
+}
+
+/**
  * Round 8, A1: registers a keyed start that acks BEFORE anything else is asked (the earlier-start look, "try again", the person's spending rule): its attempt row is written with the request's own moment `began`, so a
  * later request (a reworded retry under a new key) that decides while this one is held finds it, open and beating, and waits for it; and the look for this key says it is going on. Kept beating until `release`.
  *
@@ -837,6 +910,9 @@ export async function registerStart(botId: string, personId: string, startKey: s
   let reopened = false;
   if (!row) {
     if (!fresh) return { answer: { ok: false, reason: 'stale_consent' } };
+    // A1 (GPT eighth note): an ask Orbit never heard of that was issued BEFORE one it already holds is the earlier ask arriving late (the retry overtook it on the way). It is answered with that ask and makes nothing
+    const overtaken = await answeredByNewerAsk(botId, personId, startKey, issued, now);
+    if (overtaken) return { answer: overtaken };
   } else {
     const own = ownTerminalOf(row);
     if (own) return { answer: 'kept' in own ? { ok: false, reason: 'kept', body: own.kept } : { ok: false, reason: 'retired' } };
@@ -1491,7 +1567,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
   }
   // Never over a pause that landed since this try looked (it would undo the pause)
   // ...and records the try (`lastTriedAt`, the line's rotation); that the start DECIDED is `start_decided_at`, written by `tryStart` when this returns
-  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
+  // ...and only while the job is still in the start (place in line) this try read it in: every Resume, carry-on and "do this first" moves the rank, so a try that was held while the person paused and resumed again never writes over the NEW start (CodeRabbit on #1025, 14c4e407 pass, N14)
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
   if (await computersArePaused()) {
@@ -1574,7 +1651,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
       const why = room.reason;
       // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
       await prisma.$transaction(async (tx) => {
-        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
+        // The refusal belongs to the start this try read the job in (its rank): a newer start of the job is never paused by it (N14)
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
         if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
       });
       return 'queued';
@@ -1970,11 +2048,17 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
     }, wakeTiming.beatMs);
     beat.unref?.();
+    let mark: MachineMark | null = null;
     try {
+      // A computer that has worked before and has no mark saved here (made ready before Orbit kept marks) may be on a boot that already ran jobs: a machine that slept keeps its boot and its
+      // programs. A mark taken now would put its clock reading AFTER whatever those jobs left running, and the fence would keep it as the computer's own. So it is started afresh before the first
+      // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
+      const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
+      const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
       await provider.wake(ref);
       try {
-        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
-        await provider.ready(ref);
+        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
+        mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
@@ -2000,11 +2084,12 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     }
     // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
     const wrote = await prisma.$transaction(async (tx) => {
-      const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      const held = await tx.$queryRaw<Array<{ wake_epoch: number; mark_boot_id: string | null }>>`SELECT "wake_epoch", "mark_boot_id" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if (held[0]?.wake_epoch !== mine) return false;
       await tx.brickComputer.update({
         where: { botId },
-        data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+        // The fence's mark is saved with the state that says the machine works, and only here (this start still holds the wake ticket); on the same boot the first one stays
+        data: { ...(mark ? markUpdate({ markBootId: held[0].mark_boot_id }, mark) : {}), machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
       });
       return true;
     });
@@ -2442,6 +2527,8 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
     const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
     // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
     if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
+    // The clean-up brought a new browser up: its parts are saved again for the fence (it keeps only what the saved list names)
+    else await refreshMarkParts(botId, row.providerRef, provider);
   } catch (error) {
     console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
   } finally {
@@ -2466,12 +2553,37 @@ export function setHandOverClaimWaitForTests(ms: number | null): void {
  * still being renewed for as long as one machine command may take, plus its own slack (`CLEAN_CLAIM_STALE_MS`): waiting less would let this job start
  * beside a command that is still stopping, moving and starting that browser (CodeRabbit N7 on #1025).
  */
-async function untilCleaned(botId: string): Promise<void> {
+async function untilCleaned(botId: string, stillLeader?: StillLeader): Promise<boolean> {
   for (let tries = 0; tries < Math.ceil(CLEAN_CLAIM_STALE_MS / 250); tries++) {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { cleanClaimedAt: true } });
-    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return;
+    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  return true;
+}
+
+/** A leader that waits renews its lease (and learns it lost the transition) about every 30 seconds: its waits, together, may be longer than the lease (Sentry on #1033). */
+async function stillLeaderEvery(stillLeader: StillLeader | undefined, tries: number): Promise<boolean> {
+  if (!stillLeader || tries === 0 || tries % leaderRenewTries !== 0) return true;
+  return stillLeader();
+}
+/** How many quarter-second looks of a wait pass between two renewals of the leader's lease (120: every 30 seconds). */
+let leaderRenewTries = 120;
+/** For tests: how often a waiting leader renews its lease. */
+export function setLeaderRenewTriesForTests(tries: number | null): void {
+  leaderRenewTries = tries ?? 120;
+}
+
+/** Waits while a hand-over of this Brick's files holds the machine (its claim is believed for the hand-over's own time budget, as the hand-overs themselves believe it). False: the leader lost the transition meanwhile. */
+async function untilFilesHandedOver(botId: string, stillLeader?: StillLeader): Promise<boolean> {
+  for (let tries = 0; tries < Math.ceil(FILES_CLAIM_MS / 250); tries++) {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { filesClaimedAt: true } });
+    if (!row?.filesClaimedAt || Date.now() - row.filesClaimedAt.getTime() > FILES_CLAIM_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return true;
 }
 
 /**
@@ -2575,7 +2687,6 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       return;
     }
     const held = job.status === 'running' || job.status === 'waiting';
-    const inLine = job.status === 'queued';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
@@ -2680,8 +2791,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const counted = verdict?.state === 'given' && verdict.counted;
         // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
         const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
-        // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason (CodeRabbit on #1025, d522f4b3 pass, N23)
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending clears its place, its reason and its browser state: a job in line (N23) and one that held the machine (it ran, then ended) alike (Opus on 14c4e407)
+        await settlePendingResumesIn(tx, jobId);
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
@@ -2718,7 +2829,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         await lockCutoff(tx, jobId);
         const early = await decideUnderCutoff(tx);
         if (early) return early;
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
       if ('deferred' in written && written.deferred) {
@@ -2734,14 +2845,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         continue;
       }
       ended = written;
-    } else if (inLine) {
-      // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason, in the same commit (N23)
+    } else {
+      // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending, in the same commit (N23; a job that ran and then ended too)
       ended = await prisma.$transaction(async (tx) => {
         await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
-    } else {
-      ended = await prisma.computerJob.updateMany({ where, data: endData });
     }
   }
   // Someone else ended it between the read and the write: that one counts and settles
@@ -3471,14 +3580,14 @@ async function cancelAgentTurn(botId: string, responseId: string): Promise<void>
   await provider.cancelTurn(row.providerRef, responseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
 }
 
-/** What `universe-fence --check` prints when nothing the agent started is left running. The command is in the image (it knows which processes the desktop needs). */
+/** What the fence's check prints when nothing the agent started is left running. The fence is sent by Orbit with every call (lib/computer-fence-script.ts) together with the mark Orbit holds. */
 const FENCE_CLEAR = /(^|\n)remaining=0\s*$/;
 const FENCE_TRIES = 3;
 
 /**
  * The take-over fence's second half (build handoff v2, section 4), done on the machine before the person has the keyboard: the turn
- * the agent is running is cancelled, every process it started is stopped (the image's `universe-fence` keeps the desktop, the screen
- * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
+ * the agent is running is cancelled, every process it started is stopped (the fence keeps what Orbit's mark names: the desktop, the screen
+ * and the agent's gateway), and a second look proves none is left. A computer with no mark for its boot is not fenced and nothing is proved. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
  */
 export async function fenceMachine(botId: string, stillLeader?: StillLeader): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
@@ -3495,11 +3604,24 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
       if (turn.agentResponseId) await provider.cancelTurn(ref, turn.agentResponseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
       await prisma.computerJob.updateMany({ where: { id: turn.id, agentResponseId: turn.agentResponseId }, data: { agentResponseId: null } });
     }
-    for (let attempt = 0; attempt < FENCE_TRIES; attempt++) {
+    // The mark is Orbit's own (never read back from the computer, where the agent could have rewritten it). A computer row with none (a machine made ready before marks
+    // were kept here, or one whose mark was damaged) cannot be proved clear: it goes the way an unproved fence goes, and the next wake takes a mark
+    // A restart Orbit is doing right now (a restore, park, clear or the clean-up after a job, all under the clean claim) saves the new browser's parts only once it is done:
+    // the fence waits for the claim first, so it never fences with the old list and stops the browser that was just brought back
+    if (!(await untilCleaned(botId, stillLeader))) return 'lost';
+    // Likewise a hand-over of files that is reading the machine right now (it holds the files claim): its commands run beside the fence, are not the computer's own, and would be stopped
+    // under it (or counted as left running). Its claim is let go within the hand-over's own time budget, and one a stopped server left is long past after that (Sentry on #1033)
+    if (!(await untilFilesHandedOver(botId, stillLeader))) return 'lost';
+    if (stillLeader && !(await stillLeader())) return 'lost';
+    const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
+    for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';
       try {
-        await provider.exec(ref, 'universe-fence', { timeoutMs: 30_000 });
-        const check = await provider.exec(ref, 'universe-fence --check', { timeoutMs: 30_000 });
+        // The fence's own commands are activity on the machine, so the keep-awake no-op is not due for another five minutes: it is a command of its own, started after the mark, and one that overlapped
+        // a try would be stopped or counted as left running. A sweep that read the row before this write fails its claim on the time it saw (Sentry on #1033)
+        await prisma.brickComputer.updateMany({ where: { botId }, data: { keptAwakeAt: new Date() } });
+        await provider.exec(ref, fenceCommand(mark), { timeoutMs: 30_000 });
+        const check = await provider.exec(ref, fenceCommand(mark, true), { timeoutMs: 30_000 });
         if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
       } catch (error) {
         console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
@@ -3528,7 +3650,9 @@ const KEEP_AWAKE_EVERY_MS = 5 * 60 * 1000;
  */
 async function keepWorkingMachinesAwake(now: Date, batch: number): Promise<number> {
   const due = await prisma.brickComputer.findMany({
-    where: { machine: 'working', NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
+    // Not while the machine is changing hands: a take-over or a hand-back runs the fence, and a no-op of its own that overlapped a try would be stopped or counted as left running (Sentry on #1033).
+    // The person's own screen time (`human_ready`) still needs it. A fence with no transition (a cancel) is covered by the time each try records as the last activity
+    where: { machine: 'working', controlState: { notIn: ['fencing', 'returning'] }, NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
     select: { botId: true, providerRef: true, provider: true, keptAwakeAt: true },
     take: batch,
   });

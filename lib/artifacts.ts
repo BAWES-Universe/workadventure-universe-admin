@@ -8,10 +8,11 @@ export const ARTIFACT_KINDS = ['app', 'page', 'markdown', 'svg'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /**
- * Who can open it: just its owner ("Just you", game #1994), people in the chat it was made in, or anyone who has the
- * link. "Just you" is the only one whose files are never served from the bucket's own address (lib/artifact-pass.ts).
+ * Who can open it: just its owner ("Just you", game #1994), people in the chat it was made in, anyone who has the link, or
+ * anyone who has the link and only for the version its owner published ("Public", game #2115). "Just you" is the only one
+ * whose files are never served from the bucket's own address (lib/artifact-pass.ts).
  */
-export const OPEN_SCOPES = ['me', 'chat', 'link'] as const;
+export const OPEN_SCOPES = ['me', 'chat', 'link', 'public'] as const;
 export type OpenScope = (typeof OPEN_SCOPES)[number];
 
 /** Who can ask for changes: only the owner, or everyone who can open it (in its chat). */
@@ -290,7 +291,7 @@ export interface Asker {
   inChat: boolean;
 }
 
-export function isOwner(artifact: ArtifactRules, asker: Asker): boolean {
+export function isOwner(artifact: Pick<ArtifactRules, 'ownerId'>, asker: Asker): boolean {
   return artifact.ownerId !== null && artifact.ownerId === asker.userId;
 }
 
@@ -307,7 +308,22 @@ export function hasExpired(artifact: ArtifactRules, now: Date): boolean {
  * a bot gets, and what a bot's search finds), so none of them can leave the rule out.
  */
 export function shownInItsChatTo(userId: string | null): { OR: ({ ownerId: string } | { openScope: { in: OpenScope[] } })[] } {
-  return { OR: [...(userId ? [{ ownerId: userId }] : []), { openScope: { in: ['chat', 'link'] } }] };
+  return { OR: [...(userId ? [{ ownerId: userId }] : []), { openScope: { in: ['chat', 'link', 'public'] } }] };
+}
+
+/** Anyone who has the link may open it: shared by link, or Public (game #2115). */
+export function isOpenByLink(artifact: Pick<ArtifactRules, 'openScope'>): boolean {
+  return artifact.openScope === 'link' || artifact.openScope === 'public';
+}
+
+/**
+ * Does this person see only what the owner published (game #2115)? Someone who opens it only because it is shared by link:
+ * not its owner, and not someone in the chat it was made in right now (the game vouches for that), who see the newest
+ * version as they always did.
+ */
+export function seesPublishedOnly(artifact: Pick<ArtifactRules, 'ownerId' | 'chatRef' | 'openScope'>, asker: Asker): boolean {
+  if (isOwner(artifact, asker) || !isOpenByLink(artifact)) return false;
+  return !(asker.inChat && artifact.chatRef !== null);
 }
 
 /** "Just you": its owner keeps it to themselves. Nobody else opens it, in its chat or by a link. */
@@ -317,14 +333,14 @@ export function isJustYou(artifact: Pick<ArtifactRules, 'openScope'>): boolean {
 
 /**
  * May this person open it (and see its versions and code)? The owner always. "Just you" opens for nobody else. A link
- * opens for anyone who has it. "People in this chat" opens only for someone who is in that chat now, which the game
+ * (or Public) opens for anyone who has it. "People in this chat" opens only for someone who is in that chat now, which the game
  * vouches for. Anything that is not one of the three is read as the narrowest, so a value this Orbit does not know never
  * opens a door.
  */
 export function canOpen(artifact: ArtifactRules, asker: Asker, now: Date): boolean {
   if (hasExpired(artifact, now)) return false;
   if (isOwner(artifact, asker)) return true;
-  if (artifact.openScope === 'link') return true;
+  if (isOpenByLink(artifact)) return true;
   if (artifact.openScope !== 'chat') return false;
   return asker.inChat && artifact.chatRef !== null;
 }

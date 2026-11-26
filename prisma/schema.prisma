@@ -230,11 +230,17 @@ model Artifact {
   // The chat it was made in: nearby | dm, and the id the bot server and the game both use for that chat. A copy has none.
   chatKind      String?   @map("chat_kind") @db.VarChar(20)
   chatRef       String?   @map("chat_ref") @db.VarChar(255)
-  // Who can open it: me (just its owner, game #1994) | chat (people in that chat) | link (anyone with the link)
+  // Who can open it: me (just its owner, game #1994) | chat (people in that chat) | link (anyone with the link) | public
+  // (anyone with the link, and only a published version: game #2115)
   openScope     String    @default("chat") @map("open_scope") @db.VarChar(20)
   // Who can ask for changes: owner (only the owner) | openers (everyone who can open it, in its chat)
   changeScope   String    @default("owner") @map("change_scope") @db.VarChar(20)
   latestVersion Int       @default(1) @map("latest_version")
+  // What the owner published (game #2115): the version people who open it by its link see instead of the latest, the title
+  // it had then, and when. All three are null until the owner publishes; a link that was never published shows the latest.
+  publishedVersion Int?      @map("published_version")
+  publishedTitle   String?   @map("published_title") @db.VarChar(120)
+  publishedAt      DateTime? @map("published_at")
   copiedFromId  String?   @map("copied_from_id")
   expiresAt     DateTime? @map("expires_at")
   createdAt     DateTime  @default(now()) @map("created_at")
@@ -916,6 +922,11 @@ model Bot {
   // when the Brick is made for a job ("Send me the first recipe"); null = the game's own fixed hello. Never sent as a
   // message and never read by the AI. Always null for a room bot.
   hello               String?   @db.VarChar(300)
+  // The key the game sent with New Brick (POST /api/bricks { requestKey }): the same key from the same person is the same
+  // request, so a tap tried again after a dropped connection gives back the first Brick. Null for every other Brick.
+  createRequestKey    String?   @map("create_request_key") @db.VarChar(200)
+  // The name that request asked for: a retry is checked against it, not against the Brick's name now (the owner may have renamed it since).
+  createRequestName   String?   @map("create_request_name") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -948,6 +959,7 @@ model Bot {
   template        BrickTemplate?
   madeFrom        BrickTemplateUse?
 
+  @@unique([ownerId, createRequestKey])
   @@index([roomId])
   @@index([ownerId])
   @@index([goneAt])
@@ -3383,6 +3395,11 @@ model BrickComputer {
   parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
   /// The wake ticket (round 8, B1): every write that sets the machine waking or restoring takes the next number, and an external stop or a late success counts only while its own number is still the Brick's.
   wakeEpoch         Int       @default(0) @map("wake_epoch")
+  /// The take-over fence's starting mark, held here and not on the computer (root-agent item 3A): this boot's id, the kernel's clock reading when the computer was made ready (ticks since boot), the computer's own parts (pid, start tick, kind) and the fingerprints of Agent37's command runner. Taken once per boot; the parts are saved again after each restart Orbit does itself.
+  markBootId        String?   @map("mark_boot_id") @db.VarChar(36)
+  markTicks         BigInt?   @map("mark_ticks")
+  markParts         Json?     @map("mark_parts")
+  markRunners       Json?     @map("mark_runners")
   /// Set when a second pause lands while one still waits for its browser to be put away: the browser is then emptied, never put away under either job's name (CodeRabbit on #1025). Cleared with the pointer.
   parkPendingWipe   Boolean   @default(false) @map("park_pending_wipe")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again

@@ -408,6 +408,8 @@ export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), 
       await recordOwnKeyCall(tx, jobId, at);
       // The admission for its turn, in the same transaction and under the same lock: the marker, the turn and the decision never part, so a call refused after the marker is impossible (there is no look after this commit)
       await recordTurnAdmitted(tx, jobId, { turn: admitted?.turn, run: admitted?.run, at });
+      // A call the job made on its own key after a pool refusal shows it carried on: the refusal is retired in this same transaction, as the funded path does (N13), so a later unrelated agent failure is never given back as our fault from it. A retirement that cannot be written rolls the admission back (CodeRabbit on #1025, 14c4e407 pass, N1)
+      await retirePoolRefusals(tx, jobId);
       // A call admitted on the owner's own key is a beat too: the hold stands another 90 s, so a replacement never claims the job while it works (a refused call returned above and renews nothing; CodeRabbit on #1025)
       // ...for 90 s from the moment it is admitted: the time is read after the waits for the locks (a long wait must not shorten the hold the owner is promised), and a hold that stands longer is never moved back
       await extendHoldIn(tx, jobId, leaseUntil(clock ? clock() : at));

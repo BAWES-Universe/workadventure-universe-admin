@@ -764,6 +764,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'newPerHour',
+      label: 'New Bricks one person can make in an hour',
+      hint: 'New Brick, Create Brick from a template and asking a Brick in chat all count together. The Brick everyone gets first does not. It only stops a script from making hundreds; a person who goes over is told, kindly, the time they can make another.',
+      unit: 'Bricks',
+      value: values.newPerHour,
+      recommended: recommended.newPerHour,
+      note: 'Applies to the next Brick made. Deleted Bricks still count for the hour. A person’s own keys are never limited by this.',
+      options: [
+        { value: 15, label: '15 Bricks', meaning: 'Quiet.' },
+        { value: 30, label: '30 Bricks', meaning: 'The agreed starting value.' },
+        { value: 100, label: '100 Bricks', meaning: 'For busy launches.' },
+      ],
+    },
+    {
       id: 'scheduledCardWait',
       label: 'How long a card from a goal or task waits for a person',
       hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',

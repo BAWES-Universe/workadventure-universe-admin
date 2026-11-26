@@ -30,6 +30,8 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
+import { isFenceCheckCommand, isFenceCommand } from '@/lib/computer-fence-script';
+const isPlainFence = (command: string) => isFenceCommand(command) && !isFenceCheckCommand(command);
 import { Agent37Error, Agent37Unreached, TurnNotSent } from '@/lib/agent37/client';
 import { fenceMachine, finishJob, finishJobUnder, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
@@ -480,7 +482,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         // The own file was left alone (a later write is there), the alias is written with this prepare's key
         expect((JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${jobId}.json`), 'utf8')) as { token: string }).token).toBe('cjt_later_own');
         const alias = JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.json`), 'utf8')) as { token: string };
-        expect(alias.token).toMatch(/^cjt_/);
+        // The alias carries the EXACT key this prepare made (the one in its command), never just any `cjt_` key (CodeRabbit on #1025, 14c4e407 pass, N3)
+        const made = [...new Set(command.match(/cjt_[A-Za-z0-9_-]+/g) ?? [])];
+        expect(made).toHaveLength(1);
+        expect(alias.token).toBe(made[0]);
         expect(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.stamp`), 'utf8')).toBe(String(mark0));
       } finally {
         rmSync(home, { recursive: true, force: true });
@@ -669,11 +674,11 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       let taken = false;
       fake.execAnswer = async (command) => {
         // Once, while the key is being written (the take over's own fence commands go through here too)
-        if (!taken && !command.startsWith('universe-fence')) {
+        if (!taken && !isFenceCommand(command)) {
           taken = true;
           await takeOver(sara.brickId, sara.id, NOW);
         }
-        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
+        return isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {};
       };
       const done = await prepareJob(jobId, RELAY, NOW);
       expect(done).toMatchObject({ ok: false });
@@ -1492,7 +1497,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         try {
           expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
           // The fence ran and was proved clear, and the machine works on: the turn may still be running inside the gateway
-          expect(fake.commands.map((one) => one.command)).toContain('universe-fence --check');
+          expect(fake.commands.map((one) => one.command).some(isFenceCheckCommand)).toBe(true);
           expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
           expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
           expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
@@ -1509,11 +1514,11 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { sara, jobId } = await running();
         const { sent, lapse } = await acceptedAndLost(jobId);
         try {
-          fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+          fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
           expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
           expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
           expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
-          fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+          fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {});
           expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
           await lapse();
           const back = await startTurn(jobId, 'carry on');
@@ -1704,7 +1709,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const reading = drain(started.events);
         await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: { increment: 1 } } });
         fake.failCancel = true;
-        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
         letGo();
         expect(await reading).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
         expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
@@ -1878,7 +1883,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       const commands: string[] = [];
       fake.execAnswer = (command) => {
         commands.push(command);
-        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
+        return isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {};
       };
       const started = await startTurn(jobId, 'go');
       if (!started.ok) throw new Error('no turn');
@@ -1889,7 +1894,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(seen).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
       // Three tries to cancel it, then the machine's own fence
       expect(fake.calls.filter((call) => call.name === 'cancelTurn').length).toBeGreaterThanOrEqual(3);
-      expect(commands).toContain('universe-fence');
+      expect(commands.some(isPlainFence)).toBe(true);
     });
 
     it('is cancelled by the job’s own record, never by an id the caller gives', async () => {
@@ -1928,7 +1933,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       const taken = await takeOver(sara.brickId, sara.id, NOW);
       expect(taken.ok).toBe(true);
       expect(fake.cancelledTurns).toEqual(['resp-5']);
-      expect(fake.commands.map((entry) => entry.command)).toEqual(['universe-fence', 'universe-fence --check']);
+      expect(fake.commands.map((entry) => (isFenceCheckCommand(entry.command) ? 'check' : isPlainFence(entry.command) ? 'fence' : entry.command))).toEqual(['fence', 'check']);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBeNull();
     });
@@ -1936,7 +1941,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
     it('tries again when the first look finds something left, and the machine keeps working once it is proved', async () => {
       const { sara } = await running();
       let looks = 0;
-      fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: ++looks < 2 ? 'remaining=3\n' : 'remaining=0\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: ++looks < 2 ? 'remaining=3\n' : 'remaining=0\n' } : {});
       expect(await fenceMachine(sara.brickId)).toBe('done');
       expect(looks).toBe(2);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
@@ -1944,7 +1949,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('stops the machine when it cannot be proved, so the person never has a screen with an agent still acting behind it', async () => {
       const { sara } = await running();
-      fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
       expect(await fenceMachine(sara.brickId)).toBe('failed');
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
       expect(fake.calls.some((call) => call.name === 'stop')).toBe(true);
@@ -1968,7 +1973,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
       it('is not proved when the provider is slower than the time given it, and is written `stopping` for the sweep, never left `working`', async () => {
         const { sara } = await running();
-        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
         setLeaderStopTimesForTests({ deadlineMs: 150, transactionMs: 10_000 });
         slowStop(1_000);
         expect(await fenceMachine(sara.brickId)).toBe('failed');
@@ -1977,7 +1982,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
       it('writes `stopping` again when the transaction itself ran out of time after the stop was sent, so a stopped machine is never left `working`', async () => {
         const { sara } = await running();
-        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
         // The stop is allowed longer than the transaction: the transaction is rolled back, with the record in it
         setLeaderStopTimesForTests({ deadlineMs: 5_000, transactionMs: 300 });
         slowStop(900);
@@ -1994,17 +1999,17 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       await takeOver(sara.brickId, sara.id, NOW);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopping');
       fake.stuckAwake.delete(ref);
-      fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {});
       await sweepComputers(minutes(2));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
     });
 
     it('wakes a machine that a failed fence stopped when the person hands the job back, so the job can go on', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
       await takeOver(sara.brickId, sara.id, NOW);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
-      fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {});
       const back = await handBack(sara.brickId, sara.id);
       expect(back.ok).toBe(true);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
@@ -2013,7 +2018,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('a command that fails is not proof, whatever it printed', async () => {
       const { sara } = await running();
-      fake.execAnswer = (command) => (command.endsWith('--check') ? { exitCode: 127, stdout: 'remaining=0\n' } : {});
+      fake.execAnswer = (command) => (isFenceCheckCommand(command) ? { exitCode: 127, stdout: 'remaining=0\n' } : {});
       expect(await fenceMachine(sara.brickId)).toBe('failed');
     });
 
@@ -2039,6 +2044,21 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       await sweepComputers(minutes(7));
       expect(quiet()).toBe(2);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).keptAwakeAt).not.toBeNull();
+    });
+
+    it('sends none while the machine is changing hands (a take-over or a hand-back runs the fence), and again once it is the person’s or the agent’s (Sentry on #1033)', async () => {
+      const { sara } = await running();
+      const quiet = () => fake.commands.filter((entry) => entry.command === 'true').length;
+      for (const controlState of ['fencing', 'returning']) {
+        // A leader holds the transition (a lease that has not run out): the sweep does not finish it for them
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { controlState, controlLeaseUntil: new Date(Date.now() + 10 * 60_000), keptAwakeAt: null } });
+        await sweepComputers(minutes(1));
+        expect(quiet()).toBe(0);
+      }
+      // The person has the screen: the machine still needs the no-op
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { controlState: 'human_ready', keptAwakeAt: null } });
+      await sweepComputers(minutes(1));
+      expect(quiet()).toBe(1);
     });
 
     it('sends none to a machine no job holds, which is left to rest', async () => {
