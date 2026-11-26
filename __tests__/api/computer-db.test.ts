@@ -2129,6 +2129,69 @@ run('a Brick’s computer, in a real database', () => {
         expect(await decision(w.job.id)).not.toMatchObject({ basis: 'orbit_fault' });
       });
 
+      it('a reader that delivered something, or has a send still unconfirmed, is judged by the normal rule, never given back free around it (Opus on #1057, M1)', async () => {
+        const delivered = await twoReaders();
+        expect(await planEffect(delivered.a, { key: 'mail-1', kind: 'send' })).toEqual({ ok: true, already: false });
+        expect(await settleEffect(delivered.a, 'mail-1', 'done', 'sent')).toBe(true);
+        await giveUp(delivered.a, minutes(11));
+        expect(await decision(delivered.a)).toMatchObject({ state: 'refused', basis: 'delivered' });
+
+        const unconfirmed = await twoReaders();
+        expect(await planEffect(unconfirmed.a, { key: 'mail-2', kind: 'send' })).toEqual({ ok: true, already: false });
+        await giveUp(unconfirmed.a, minutes(11));
+        expect(await decision(unconfirmed.a)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+      });
+
+      it('free only up to the give-back bound a month: past it the next one is judged as any failure of ours, and an earlier month does not count (Opus on #1057, M2)', async () => {
+        await seedGiveBackLimits({ goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const pair = async (at: Date) => {
+          const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, at);
+          const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, at);
+          if (!a.ok || !b.ok) throw new Error('no');
+          expect([a.job.status, b.job.status]).toEqual(['running', 'running']);
+          return { a: a.job.id, b: b.job.id };
+        };
+        const first = await pair(NOW);
+        await giveUp(first.a, minutes(11));
+        expect(await decision(first.a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared' });
+        expect(await row(first.a)).toMatchObject({ runnerFault: false });
+        await finishJob(first.b, 'done', minutes(12));
+
+        const second = await pair(minutes(13));
+        await giveUp(second.a, minutes(24));
+        expect(await decision(second.a)).not.toMatchObject({ basis: 'orbit_fault' });
+        await finishJob(second.b, 'done', minutes(25));
+
+        // The free one counted is from another month: the bound starts again
+        const lastMonth = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 1) - 60_000);
+        await prisma.computerJob.update({ where: { id: first.a }, data: { endedAt: lastMonth } });
+        const third = await pair(minutes(26));
+        await giveUp(third.a, minutes(37));
+        expect(await decision(third.a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared' });
+      });
+
+      it('with no give-back bound readable from Limits, nothing is free on this basis: it is judged as any failure of ours', async () => {
+        await clearGiveBackLimits();
+        const { a } = await twoReaders();
+        await giveUp(a, minutes(11));
+        expect(await decision(a)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('the job beside must overlap this job’s own life: one that ended before it started bears nothing out, even inside the window', async () => {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        if (!b.ok) throw new Error('no');
+        await finishJob(b.job.id, 'done', minutes(1));
+        const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, minutes(2));
+        if (!a.ok) throw new Error('no');
+        expect(await row(a.job.id)).toMatchObject({ status: 'running' });
+        await giveUp(a.job.id, minutes(11));
+        expect(await decision(a.job.id)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
       it('a failure as ours that names no basis is judged as before, whoever is beside it', async () => {
         const { a } = await twoReaders();
         await finishJobUnder(a, null, 'failed', minutes(11), 'It broke', 'ours', null, 'run-1');

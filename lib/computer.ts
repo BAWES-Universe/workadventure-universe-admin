@@ -47,7 +47,7 @@ import { extendHoldIn } from '@/lib/computer-lease';
 import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
-import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
+import { decidePendingForPurge, decideRunnerFinish, lockPerson, personGiveBackBound, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type GiveBackLimits, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -3057,7 +3057,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         if (judging && (runnerJudged || hintJudged)) {
           await lockPerson(tx, ref.personId);
           // The runner gave up because Orbit kept the computer from the person (another job was on it): Orbit's own doing, given back and never counted, once Orbit's records confirm it. Otherwise judged as any failure of ours
-          verdict = runnerJudged && judging.basis === 'browser_shared' && (await sharedBasisHolds(tx, { id: jobId, botId }, now)) ? SHARED_VERDICT : await decideRunnerFinish(tx, limits, ref, judging.turns, now, { run: judging.run ?? null, hint: judging.hint });
+          verdict = runnerJudged && judging.basis === 'browser_shared' && (await sharedBasisHolds(tx, { id: jobId, botId, personId: ref.personId }, limits, now)) ? SHARED_VERDICT : await decideRunnerFinish(tx, limits, ref, judging.turns, now, { run: judging.run ?? null, hint: judging.hint });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
@@ -3801,19 +3801,31 @@ const SHARED_BASIS_WINDOW_MS = 12 * 60_000;
 const SHARED_VERDICT: Verdict = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'browser_shared', route: null };
 
 /**
- * Whether Orbit's own records bear out a runner that gave up on `browser_shared` (GPT audit finding 5). Both must hold, read in the transaction that ends the job:
+ * Whether Orbit's own records bear out a runner that gave up on `browser_shared` (GPT audit finding 5), and whether it may still be free. Read in the transaction that ends the job, under the person's give-back lock.
+ * All must hold:
  *   - the job never became a writer: a writer has the computer to itself, so its hand-over is never refused as shared (and a hand-over that landed made it one);
- *   - another job of the same Brick was on the computer during the wait: running or waiting now, or ended within the window.
+ *   - it delivered nothing and has nothing still unconfirmed outside its computer (no effect `done` or `planned`): the normal rule then decides (`delivered` is refused, an unconfirmed one waits), never a free pass around it (Opus on #1057, M1);
+ *   - another job of the same Brick was on the computer during the wait: it started before now and was still live, or ended after this job started and within the window (it overlapped this job's own life);
+ *   - the person has fewer free `browser_shared` endings this month (by the month each job ended in) than the give-back bound from Limits, the number goodwill uses: two jobs kept side by side can never make every try free
+ *     (Opus on #1057, M2). It never uses up their goodwill either. No bound can be read: judged as any failure of ours.
  * One that does not hold is judged as any failure of ours (bounded goodwill), never given back on the runner's word alone.
  */
-async function sharedBasisHolds(tx: Prisma.TransactionClient, job: { id: string; botId: string }, now: Date): Promise<boolean> {
-  const own = await tx.computerJob.findUnique({ where: { id: job.id }, select: { writes: true } });
-  if (!own || own.writes) return false;
-  const since = new Date(now.getTime() - SHARED_BASIS_WINDOW_MS);
+async function sharedBasisHolds(tx: Prisma.TransactionClient, job: { id: string; botId: string; personId: string }, limits: GiveBackLimits | null, now: Date): Promise<boolean> {
+  const own = await tx.computerJob.findUnique({ where: { id: job.id }, select: { writes: true, startedAt: true } });
+  if (!own || own.writes || !own.startedAt) return false;
+  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: { in: ['done', 'planned'] } } })) > 0) return false;
+  const since = new Date(Math.max(now.getTime() - SHARED_BASIS_WINDOW_MS, own.startedAt.getTime()));
   const beside = await tx.computerJob.count({
     where: { botId: job.botId, id: { not: job.id }, startedAt: { not: null, lte: now }, OR: [{ status: { in: ['running', 'waiting'] } }, { endedAt: { gte: since } }] },
   });
-  return beside > 0;
+  if (beside === 0) return false;
+  const bound = limits ? personGiveBackBound(limits) : null;
+  if (bound === null) return false;
+  const free = await tx.computerGiveBackDecision.findMany({ where: { personId: job.personId, jobId: { not: job.id }, state: 'given', reason: 'browser_shared' }, select: { jobId: true } });
+  if (free.length === 0) return true;
+  const month = monthOf(now);
+  const thisMonth = await tx.computerJob.count({ where: { id: { in: free.map((one) => one.jobId) }, endedAt: { gte: month.start, lt: month.end } } });
+  return thisMonth < bound;
 }
 
 /**
