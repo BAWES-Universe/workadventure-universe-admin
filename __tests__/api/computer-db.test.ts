@@ -1156,11 +1156,22 @@ run('a Brick’s computer, in a real database', () => {
       if (!a.ok) throw new Error('no');
       // A rest that threw can still land for the provider's margin (shortened here): the row stays `resting`, claimed, and the stuck-rest sweep lets it go only once nothing of ours can land
       setPowerTimingForTests({ marginMs: 100 });
-      provider.failNext.rest = true;
-      await finishJob(a.job.id, 'done', minutes(1));
-      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      setPowerTimingForTests(null);
+      try {
+        provider.failNext.rest = true;
+        await finishJob(a.job.id, 'done', minutes(1));
+        const resting = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+        expect(resting.machine).toBe('resting');
+        // The rest's own operation closes by itself once the margin is past: waited for on the operation's `done_at` (a bounded poll), not guessed from a delay, so a slow database cannot make the sweep find it still open
+        const closeBy = Date.now() + 10_000;
+        for (;;) {
+          const open = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM computer_power_ops WHERE provider_ref = ${resting.providerRef} AND done_at IS NULL`;
+          if (Number(open[0].n) === 0) break;
+          if (Date.now() > closeBy) throw new Error('The rest that threw never closed its operation');
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      } finally {
+        setPowerTimingForTests(null);
+      }
       await backdate([sara.brickId]);
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');

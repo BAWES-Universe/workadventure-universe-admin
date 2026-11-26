@@ -18,6 +18,7 @@ jest.mock('@/lib/computer-browser-profile', () => {
 
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits } from '../helpers/give-back-limits';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
@@ -208,10 +209,39 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).wakeEpoch).toBe(seen.wakeEpoch);
       await endPowerOp(op);
       expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped', { epoch: seen.wakeEpoch })).toBe(seen.wakeEpoch + 1);
-      // Ticket first: the sweep's stop of a machine it saw `stopping` claims nothing now (the machine is `waking`), so no stop is sent and no operation is recorded
+      // Ticket first: the sweep SELECTS the machine `stopping` and is held there; a wake takes its ticket from that state; then the sweep goes on, and its stop claim writes nothing (the machine is `waking`): no stop is sent or recorded
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopping' } });
       const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
-      await sweepComputers(NOW);
+      const original = prisma.brickComputer.findMany.bind(prisma.brickComputer);
+      let selected: () => void = () => undefined;
+      let go: () => void = () => undefined;
+      const sweepSelected = new Promise<void>((resolve) => (selected = resolve));
+      const gate = new Promise<void>((resolve) => (go = resolve));
+      let selectedStopping = false;
+      const spy = jest.spyOn(prisma.brickComputer, 'findMany').mockImplementation((async (args: Parameters<typeof original>[0]) => {
+        const rows = await original(args);
+        if ((args?.where as { machine?: string } | undefined)?.machine === 'stopping' && rows.some((row) => row.botId === sara.brickId)) {
+          selectedStopping = true;
+          selected();
+          await gate;
+        }
+        return rows;
+      }) as typeof prisma.brickComputer.findMany);
+      try {
+        const sweeping = sweepComputers(NOW);
+        await sweepSelected;
+        expect(selectedStopping).toBe(true);
+        const current = await machineOf(sara);
+        expect(current.machine).toBe('stopping');
+        expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'stopping', { epoch: current.wakeEpoch })).toBe(current.wakeEpoch + 1);
+        go();
+        await sweeping;
+      } finally {
+        go();
+        spy.mockRestore();
+      }
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect((await machineOf(sara)).machine).toBe('waking');
       expect(await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM computer_power_ops WHERE provider_ref = ${sara.ref} AND done_at IS NULL`).toEqual([{ n: BigInt(0) }]);
     });
 
@@ -293,14 +323,21 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       try {
         await lockTaken;
         // A third start reaches the machine's claim and waits for the row behind the holder
-        const third = startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW);
-        await sleep(1_500);
+        let thirdSettled = false;
+        const third = startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW).finally(() => (thirdSettled = true));
+        // The checkpoint: the database itself shows the third start's claim waiting on the computer's row. A start that exited before this fails the test instead of passing it by luck
+        await waitUntilBlockedOnLock(1);
+        expect(thirdSettled).toBe(false);
         setTimeout(() => release(), 17_000);
         const asked = Date.now();
         // The start's wait for the row must not hold the line: this is answered at once, not after the 15 s a "do this first" transaction lasts
         const first = await moveJobFirst(sara.brickId, sara.id, b.job.id, {}, NOW);
-        expect(first).toEqual(expect.objectContaining({}));
+        expect(first).toMatchObject({ ok: true });
         expect(Date.now() - asked).toBeLessThan(2_000);
+        // The intended reorder: B is now first in line (ahead of A's turn and of every other job waiting)
+        const queued = await prisma.computerJob.findMany({ where: { botId: sara.brickId, status: 'queued' }, select: { id: true, queueRank: true }, orderBy: [{ queueRank: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }] });
+        expect(queued[0]?.id).toBe(b.job.id);
+        expect(thirdSettled).toBe(false);
         expect(await third).toMatchObject({ ok: true });
       } finally {
         release();
