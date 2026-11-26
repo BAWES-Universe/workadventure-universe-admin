@@ -49,7 +49,7 @@ export const holdsAppActions = (server: { appActionsVersion: number | null; conn
 /** A row changed between the read and the write of the same call: the whole call is read again. */
 class StaleRows extends Error {}
 
-const TOOL_SELECT = { id: true, name: true, title: true, description: true, fingerprint: true, heading: true, suggestedHeading: true, suggestionSource: true, confirmedAt: true, movedById: true, confirmedById: true, setting: true } as const;
+const TOOL_SELECT = { id: true, name: true, title: true, description: true, fingerprint: true, heading: true, suggestedHeading: true, suggestionSource: true, confirmedAt: true, movedById: true, confirmedById: true, setting: true, settingByPerson: true } as const;
 type ToolRow = Prisma.BotMcpToolGetPayload<{ select: typeof TOOL_SELECT }>;
 
 const SETTING_ORDER: readonly Setting[] = ['rightAway', 'asksFirst', 'off'];
@@ -79,14 +79,10 @@ export function startingChoice(toolkit: string, slug: string, headingSetting: Se
 async function startingChoicesOff(serverId: string, toolkit: string): Promise<boolean> {
   const own = ownActionList(toolkit)?.filter((action) => action.startsOn);
   if (!own?.length) return false;
-  const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { ...SETTINGS_SELECT, tools: { where: { name: { in: own.map((action) => action.slug) } }, select: { name: true, heading: true, setting: true } } } });
+  const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { ...SETTINGS_SELECT, tools: { where: { name: { in: own.map((action) => action.slug) }, settingByPerson: false }, select: { name: true, heading: true, setting: true } } } });
   if (!server) return false;
   const settings = settingsOfGrant(server);
-  return server.tools.some((tool) => {
-    const start = startsOn(toolkit, tool.name);
-    if (!tool.heading || (tool.setting !== null && tool.setting !== start)) return false;
-    return (tool.setting ?? null) !== startingChoice(toolkit, tool.name, settings[tool.heading as Heading]);
-  });
+  return server.tools.some((tool) => !!tool.heading && (tool.setting ?? null) !== startingChoice(toolkit, tool.name, settings[tool.heading as Heading]));
 }
 
 const settingsOfGrant = (server: { lookUpSetting: string; makeSetting: string; changeSetting: string; deleteSendSetting: string }): Record<Heading, Setting> => ({
@@ -211,10 +207,14 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           // The person's strictest choice for it. An action Universe starts on its own choice (own lists: Run a workflow asks first) holds
           // that choice while the person made none (or left it as it started), only where it is stricter than its heading. Then never looser
           // than what it was judged by before it was brought over
-          const chosen = rows.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          // (An action Universe starts on its own choice counts only what a person chose: Universe's start is worked out again here.)
           const start = startsOn(toolkit, entry.slug);
-          const own = start && (chosen === null || chosen === start) ? startingChoice(toolkit, entry.slug, settings[entry.heading]) : chosen;
+          const persons = start ? rows.filter((tool) => tool.settingByPerson) : rows;
+          const chosen = persons.reduce<Setting | null>((acc, tool) => stricterSetting(acc, tool.setting as Setting | null), null);
+          const byPerson = chosen !== null && rows.some((tool) => tool.settingByPerson && tool.setting !== null);
+          const own = start && chosen === null ? startingChoice(toolkit, entry.slug, settings[entry.heading]) : chosen;
           const setting = carried(rows, entry.heading, own);
+          const settingByPerson = byPerson && setting === chosen;
           for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
             name: entry.slug,
@@ -228,7 +228,7 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             confirmedById: null,
           };
           if (!keeper) {
-            fresh.push({ serverId, ...data, setting, confirmedAt: now });
+            fresh.push({ serverId, ...data, setting, settingByPerson, confirmedAt: now });
             rowsUpToDate = false;
             continue;
           }
@@ -244,13 +244,14 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
             !!keeper.confirmedAt &&
             keeper.confirmedById === null &&
             keeper.movedById === null &&
-            (keeper.setting ?? null) === setting;
+            (keeper.setting ?? null) === setting &&
+            keeper.settingByPerson === settingByPerson;
           if (same) continue;
           rowsUpToDate = false;
           // Only what Universe says the action is, its name as the App spells it now, and the person's strictest choice for it
           const written = await tx.botMcpTool.updateMany({
             where: { id: keeper.id, fingerprint: keeper.fingerprint, heading: keeper.heading, confirmedAt: keeper.confirmedAt },
-            data: { ...data, setting, confirmedAt: keeper.confirmedAt ?? now },
+            data: { ...data, setting, settingByPerson, confirmedAt: keeper.confirmedAt ?? now },
           });
           if (written.count !== 1) throw new StaleRows();
         }

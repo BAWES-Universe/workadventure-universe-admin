@@ -174,6 +174,28 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('asksFirst');
   });
 
+  it('keeps Asks first for Run a workflow when the person chose it themselves, even under a heading set Off', async () => {
+    const sara = await withGitHub('sara');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { changeSetting: 'off' } });
+    const first = await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    const runId = first.tools.find((tool) => tool.name === 'github_run_workflow')!.id;
+    await setToolSetting(sara.brickId, sara.serverId, runId, 'asksFirst');
+    const row = () => prisma.botMcpTool.findUniqueOrThrow({ where: { id: runId }, select: { setting: true, settingByPerson: true } });
+    expect(await row()).toEqual({ setting: 'asksFirst', settingByPerson: true });
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    expect(await row()).toEqual({ setting: 'asksFirst', settingByPerson: true });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('asksFirst');
+    // A new list version keeps it too
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { appActionsVersion: -1 } });
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    expect(await row()).toEqual({ setting: 'asksFirst', settingByPerson: true });
+    // Back to "as its heading": it follows Off again
+    await setToolSetting(sara.brickId, sara.serverId, runId, null);
+    await readServerTools(sara.brickId, sara.serverId, { appActions: true });
+    expect(await row()).toEqual({ setting: null, settingByPerson: false });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+  });
+
   it('judges an action of Universe’s list that the grant has no row for by Universe’s list, not as Right away', async () => {
     const sara = await withGitHub('sara');
     await readServerTools(sara.brickId, sara.serverId, { appActions: true });
