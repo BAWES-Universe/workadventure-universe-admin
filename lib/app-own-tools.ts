@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOwnApp } from '@/lib/app-same';
-import { acceptSorterPick, nameRule, stricterHeading } from '@/lib/app-actions/sort';
+import { acceptSorterPick, stricterHeading } from '@/lib/app-actions/sort';
 import { lockGrant } from '@/lib/app-actions/grant';
 import type { Heading } from '@/lib/mcp-tool-policy';
 
@@ -22,9 +22,10 @@ import type { Heading } from '@/lib/mcp-tool-policy';
  * Then the heading's setting decides (Looks things up and Makes new things Right away, Changes things and Deletes or sends out Asks first, unless
  * the person chose otherwise). Confirmed by Universe means no person: `confirmedById` stays empty.
  *
- * What a person decided is never touched: a tool a person confirmed or moved keeps their choice (a moved tool that changes keeps their heading,
- * tightened only by what Universe knows of the new version: keepMovedTool). A tool Universe confirmed is sorted again when
- * what it is sorted by changes (a suggestion that came later), and a tool that changed is sorted again like a new one.
+ * What a person decided is never lost: a tool a person confirmed or moved keeps their choice. A moved tool that changes sits under the
+ * stricter of their heading and the rule for its new version, worked out from their own choice each time (keepMovedTool). A tool Universe
+ * confirmed is sorted again when what it is sorted by changes (a suggestion that came later), and a tool that changed is sorted again like a
+ * new one.
  */
 
 /** Where one tool of an own App goes. */
@@ -36,14 +37,16 @@ export function sortOwnTool(name: string, suggested: Heading | null | undefined)
 const wordsOf = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
 
 /**
- * Where a tool a person moved goes once it changed: their heading, never looser than what Universe knows of the new version (its name
- * always, the server's suggestion once there is one). Without a suggestion yet it is not pushed under Deletes or sends out for good: the
- * person's heading stays, so the suggestion that comes later can still tighten it (it only ever tightens, it never loosens their choice).
+ * Where a tool a person moved sits once it changed: the stricter of the heading they chose and Universe's rule for the new version (its name,
+ * then the server's suggestion; nothing suggested yet is Deletes or sends out). Worked out again from their own choice on every read of the
+ * list, so a suggestion that comes later brings their heading back, and a tool is never looser than either.
  */
 export function keepMovedTool(name: string, personHeading: Heading, suggested: Heading | null | undefined): Heading {
-  const known = suggested ? acceptSorterPick('', wordsOf(name), suggested) : nameRule(wordsOf(name));
-  return known ? stricterHeading(personHeading, known) : personHeading;
+  return stricterHeading(personHeading, sortOwnTool(name, suggested));
 }
+
+/** The same wait as every other write of a grant's tools (GRANT_WRITE in lib/mcp-tool-policy.ts). */
+const SETTLE_WRITE = { maxWait: 15_000, timeout: 60_000 } as const;
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -104,5 +107,6 @@ export async function settleOwnAppTools(serverId: string, db?: Prisma.Transactio
   // A read with nothing to do writes nothing and takes no lock
   const todo = await work(prisma);
   if (!todo || todo.length === 0) return false;
-  return prisma.$transaction(run);
+  // Held as long as a save of the list may hold the grant (GRANT_WRITE in lib/mcp-tool-policy.ts), so a read that waits for one does not fail
+  return prisma.$transaction(run, SETTLE_WRITE);
 }

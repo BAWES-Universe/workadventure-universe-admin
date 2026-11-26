@@ -326,7 +326,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (kindOf(server) === 'appActions') return { ...(await describe(tx, serverId)), added: [], changed: [], removed: [] };
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, confirmedById: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, confirmedById: true, heading: true, personHeading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     // On the person's own App a tool Universe confirmed (no person) keeps following the bot server's suggestion, so it is sorted again when a
@@ -348,17 +348,18 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
       } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && before.movedById && before.heading) {
-        // On a person's own App a tool they moved keeps their heading when it changes, never looser than what Universe knows of the new
-        // version, and is confirmed by Universe (lib/app-own-tools.ts): what they decided is never overwritten by a re-sort
+        // On a person's own App a tool they moved sits, once it changed, under the stricter of their own heading and the rule for the new
+        // version, confirmed by Universe (lib/app-own-tools.ts). Their own heading is kept apart, so what they decided is never lost
+        const personHeading = (before.personHeading ?? before.heading) as Heading;
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: keepMovedTool(tool.name, before.heading as Heading, suggestion.suggestedHeading as Heading | null), confirmedById: null, confirmedAt: new Date() },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, personHeading, heading: keepMovedTool(tool.name, personHeading, suggestion.suggestedHeading as Heading | null), confirmedById: null, confirmedAt: new Date() },
         });
         reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, movedById: null, confirmedById: null, confirmedAt: null },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, personHeading: null, movedById: null, confirmedById: null, confirmedAt: null },
         });
         reworded = true;
         if (before.confirmedAt || before.heading) changed.push(tool.name);
@@ -369,11 +370,11 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
           reworded = true;
         }
-        // A tool a person moved that Universe kept for them after it changed (confirmed by nobody): a suggestion that comes later is taken
-        // and can only tighten their heading, never loosen it
+        // A tool a person moved that Universe kept for them after it changed (confirmed by nobody): the suggestion is taken, and the tool
+        // sits again under the stricter of their own heading and the rule, so a suggestion that comes later brings their heading back
         const keptForPerson = universeSorts && !server.legacyText && !!before.movedById && !before.confirmedById && !!before.confirmedAt && !!before.heading;
         if (keptForPerson) {
-          const heading = keepMovedTool(tool.name, before.heading as Heading, suggestion.suggestedHeading as Heading | null);
+          const heading = keepMovedTool(tool.name, (before.personHeading ?? before.heading) as Heading, suggestion.suggestedHeading as Heading | null);
           if (heading !== before.heading) reworded = true;
           await tx.botMcpTool.update({ where: { id: before.id }, data: { ...shown, ...suggestion, heading } });
           continue;
@@ -452,7 +453,7 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
       // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between
       const moved = await tx.botMcpTool.updateMany({
         where: { id: toolId, fingerprint: tool.fingerprint, heading: tool.heading, confirmedAt: tool.confirmedAt },
-        data: { heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
+        data: { heading, personHeading: heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
       });
       if (moved.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
