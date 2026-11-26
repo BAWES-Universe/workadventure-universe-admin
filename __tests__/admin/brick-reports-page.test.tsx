@@ -20,6 +20,7 @@ const row = (over: Partial<ProblemRow> = {}): ProblemRow => ({
   id: 'p1',
   kind: 'problem',
   area: 'pages',
+  operation: 'read_page',
   title: 'Links inside pages don’t open',
   state: 'new',
   cameBack: false,
@@ -112,14 +113,17 @@ describe('one problem', () => {
     expect(notes.map((note) => note.textContent)).toEqual(['Tapping a link on each listing does nothing in the chat preview.', 'Nothing opens. Open links in a new tab?']);
     expect(screen.getByText('2 of 6 notes with words, picked at random')).toBeTruthy();
     expect(screen.getByTestId('brick-report-retried').textContent).toBe('Tried again before sending: 4 of 22');
+    // What ran is staff-only detail, as code; titles never use it
+    expect(screen.getByTestId('brick-report-operation').textContent).toBe('read_page');
   });
 
   it('shows no words section when nobody added words', async () => {
-    fetchMock.mockImplementation(() => ok(detail({ sample: [], withWords: 0, retried: 0 })));
+    fetchMock.mockImplementation(() => ok(detail({ sample: [], withWords: 0, retried: 0, operation: 'none' })));
     render(<BrickReportPage />);
     expect(await screen.findByText('Links inside pages don’t open')).toBeTruthy();
     expect(screen.queryByText('In people’s own words')).toBeNull();
     expect(screen.queryByTestId('brick-report-retried')).toBeNull();
+    expect(screen.queryByTestId('brick-report-operation')).toBeNull();
   });
 
   it('moves it to another tab and reads it again', async () => {

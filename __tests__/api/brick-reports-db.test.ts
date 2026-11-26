@@ -13,11 +13,12 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => 
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
-import { NOTES_PER_BRICK_PER_DAY, TAKE_BACK_MS, recordReportNote, reportInbox, reportProblem, takeBackReportNote } from '@/lib/brick-reports';
+import { NOTES_PER_BRICK_PER_DAY, RECEIPT_WAIT_MS, TAKE_BACK_MS, confirmReportReceipts, forgetReportWordsOf, recordReportNote, reportInbox, reportProblem, takeBackReportNote, withdrawUndelivered } from '@/lib/brick-reports';
 import { POST as sendNote } from '@/app/api/bricks/reports/route';
 import { POST as takeBack } from '@/app/api/me/brick-reports/take-back/route';
 import { POST as addWords } from '@/app/api/me/brick-reports/words/route';
 import { POST as readStatus } from '@/app/api/me/brick-reports/status/route';
+import { POST as confirmDelivered } from '@/app/api/bricks/reports/delivered/route';
 import { GET as inboxGet } from '@/app/api/admin/brick-reports/route';
 import { GET as problemGet, PATCH as problemPatch } from '@/app/api/admin/brick-reports/[id]/route';
 
@@ -70,6 +71,7 @@ async function freshPair(): Promise<[string, string]> {
 }
 const me = (path: string, body: unknown) => request(path, { method: 'POST', body });
 
+let lostReceipt = false;
 async function send(body: Record<string, unknown>) {
   const response = await sendNote(request('/api/bricks/reports', { method: 'POST', body, token: SERVICE_TOKEN }));
   const json = (await response.json()) as Record<string, unknown>;
@@ -77,6 +79,8 @@ async function send(body: Record<string, unknown>) {
     const row = await prisma.brickReportNote.findUnique({ where: { id: json.id as string }, select: { problemId: true } });
     keep(row?.problemId);
   }
+  // The chat got its receipt (the bot server says so once its message went out), unless a test is about a lost one
+  if (json.sent === true && !lostReceipt) await confirmReportReceipts(body.botId as string, [json.id as string]);
   return { status: response.status, json };
 }
 
@@ -111,6 +115,10 @@ run('Brick reports', () => {
     expect((await send({ ...note(saraBrick, 'open_link'), title: 'Cannot open Blue Plover binder' })).status).toBe(400);
     expect((await send({ ...note(saraBrick, 'open_link'), operation: 'Cannot open Blue Plover binder' })).status).toBe(400);
     expect((await send({ ...note(saraBrick, 'open_link'), ref: 'not-a-ref' })).status).toBe(400);
+    // Context holds no words either: only own key or not and the game's version
+    expect((await send({ ...note(saraBrick, 'open_link'), context: { model: 'Blue Plover binder' } })).status).toBe(400);
+    expect((await send({ ...note(saraBrick, 'open_link'), context: { tools: ['Blue Plover binder'] } })).status).toBe(400);
+    expect((await send({ ...note(saraBrick, 'open_link'), context: { gameVersion: 'Blue Plover binder' } })).status).toBe(400);
   });
 
   it('keeps a note with no words: its title is built from fixed words, and draft words only come back cleaned, not kept', async () => {
@@ -123,7 +131,7 @@ run('Brick reports', () => {
       }),
     );
     expect(json.sent).toBe(true);
-    expect(json.note).toEqual({ kind: 'problem', area: 'files', title: `Timed out: open_link_${tag}`, operation: `open_link_${tag}`, failure: 'timed_out', retried: true, effect: 'stopped' });
+    expect(json.note).toEqual({ kind: 'problem', area: 'files', title: 'Timed out: Files', operation: `open_link_${tag}`, failure: 'timed_out', retried: true, effect: 'stopped' });
     expect(json.wordsPreview).toBe('Sent and to, call. Order failed');
     const row = await prisma.brickReportNote.findUniqueOrThrow({ where: { id: json.id as string } });
     expect(row.words).toBe('');
@@ -143,14 +151,14 @@ run('Brick reports', () => {
       const known = await send(note(saraBrick, 'x', { area: 'apps', operation: `app:${key}`, failure: 'signed_out' }));
       expect(known.json.note).toMatchObject({ operation: `app:${key}`, title: 'Signed out: Report Mail App' });
       const unknown = await send(note(saraBrick, 'x', { area: 'apps', operation: `app:private-${tag}`, failure: 'signed_out' }));
-      expect(unknown.json.note).toMatchObject({ operation: 'app', title: 'Signed out: Apps: an App' });
+      expect(unknown.json.note).toMatchObject({ operation: 'app', title: 'Signed out: an App' });
       // Known only by its connection: named by the catalog App it came from, never by the name the person gave it
       const fromCatalog = await prisma.appConnection.create({ data: { ownerId: sara, name: 'Blue Plover binder', serverUrl: 'https://example.test/mcp', catalogKey: key } });
       const own = await prisma.appConnection.create({ data: { ownerId: sara, name: 'Blue Plover binder', serverUrl: 'https://example.test/own' } });
       const viaCatalog = await send(note(saraBrick, 'x', { area: 'apps', operation: 'app', appConnectionId: fromCatalog.id, failure: 'failed' }));
       expect(viaCatalog.json.note).toMatchObject({ operation: `app:${key}`, title: 'Failed: Report Mail App' });
       const viaOwn = await send(note(saraBrick, 'x', { area: 'apps', operation: 'app', appConnectionId: own.id, failure: 'failed' }));
-      expect(viaOwn.json.note).toMatchObject({ operation: 'app', title: 'Failed: Apps: an App' });
+      expect(viaOwn.json.note).toMatchObject({ operation: 'app', title: 'Failed: an App' });
       for (const sent of [viaCatalog, viaOwn]) {
         const row = await prisma.brickReportNote.findUniqueOrThrow({ where: { id: sent.json.id as string } });
         expect(JSON.stringify(row)).not.toContain('Blue Plover');
@@ -224,6 +232,54 @@ run('Brick reports', () => {
     expect(await (await addWords(me('/api/me/brick-reports/words', { id, key, words: 'Too late now' }))).json()).toEqual({ added: false, reason: 'taken_back' });
   });
 
+  it('a note whose receipt never reached its chat is withdrawn after a fixed time, like Take it back; a confirmed one stays', async () => {
+    const [brick, other] = await freshPair();
+    lostReceipt = true;
+    try {
+      const lost = await send(note(brick, 'lost_receipt', { draftWords: 'Never shown' }));
+      const kept = await send(note(brick, 'lost_receipt_kept'));
+      const opened = await send(note(brick, 'lost_receipt_opened'));
+      // Only the bot server, with its token, and only for its own Brick's notes
+      const wrongToken = await confirmDelivered(request('/api/bricks/reports/delivered', { method: 'POST', body: { botId: brick, ids: [kept.json.id] }, token: 'wrong' }));
+      expect(wrongToken.status).toBe(401);
+      const confirm = await confirmDelivered(request('/api/bricks/reports/delivered', { method: 'POST', body: { botId: other, ids: [kept.json.id] }, token: SERVICE_TOKEN }));
+      expect(await confirm.json()).toEqual({ confirmed: 0 });
+      const mine = await confirmDelivered(request('/api/bricks/reports/delivered', { method: 'POST', body: { botId: brick, ids: [kept.json.id] }, token: SERVICE_TOKEN }));
+      expect(await mine.json()).toEqual({ confirmed: 1 });
+      // A chat that reads its note proves it got the receipt
+      mockUser.current = null;
+      await readStatus(me('/api/me/brick-reports/status', { id: opened.json.id, key: opened.json.takeBackKey }));
+      const lostProblem = await problemOf(lost.json.id);
+      // Not yet: it waits a while for the bot server's word
+      const created = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: lost.json.id as string } })).createdAt;
+      expect(await withdrawUndelivered(new Date(created.getTime() + RECEIPT_WAIT_MS - 1000))).toBe(0);
+      // Then it is withdrawn, emptied like Take it back, and its problem (only it) goes; the confirmed and the opened ones stay
+      await withdrawUndelivered(new Date(created.getTime() + RECEIPT_WAIT_MS + 1000));
+      const gone = await prisma.brickReportNote.findUniqueOrThrow({ where: { id: lost.json.id as string } });
+      expect(gone).toMatchObject({ words: '', context: null, personKey: null, problemId: null });
+      expect(gone.takenBackAt).not.toBeNull();
+      expect(await prisma.brickReportProblem.count({ where: { id: lostProblem } })).toBe(0);
+      for (const live of [kept, opened]) expect((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: live.json.id as string } })).takenBackAt).toBeNull();
+      // Sent again with the same reference, it answers "taken back" and keeps nothing new
+      expect((await send({ ...note(brick, 'lost_receipt'), ref: (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: lost.json.id as string } })).ref })).json).toMatchObject({ id: lost.json.id, takenBack: true });
+    } finally {
+      lostReceipt = false;
+    }
+  });
+
+  it('deleting a person’s account empties the words they sent; their notes stay counted', async () => {
+    const [brick] = await freshPair();
+    const uuid = `leaver-${tag}`;
+    const { json } = await send(note(brick, 'leaver', { personKey: `person:${uuid}` }));
+    mockUser.current = null;
+    await addWords(me('/api/me/brick-reports/words', { id: json.id, key: json.takeBackKey, words: 'My own words here' }));
+    expect((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: json.id as string } })).words).toBe('My own words here');
+    expect(await forgetReportWordsOf(uuid)).toBe(1);
+    const row = await prisma.brickReportNote.findUniqueOrThrow({ where: { id: json.id as string } });
+    expect(row).toMatchObject({ words: '', wordsAt: null, takenBackAt: null });
+    expect(await reportProblem(await problemOf(json.id))).toMatchObject({ times: 1, withWords: 0 });
+  });
+
   it('a Brick sends at most so many notes a day, whatever key it runs on', async () => {
     const day = new Date('2030-01-02T10:00:00Z');
     const brick = (await createBrick({ ownerId: sara, name: 'Busy' })).id;
@@ -287,7 +343,7 @@ run('Brick reports', () => {
     expect(await takeBackReportNote(opener.json.id as string, opener.json.takeBackKey as string)).toEqual({ takenBack: true });
     const left = await prisma.brickReportProblem.findUniqueOrThrow({ where: { id: problemId } });
     expect(left.lastSeenAt.getTime()).toBe((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: later.json.id as string } })).createdAt.getTime());
-    expect(await reportProblem(problemId)).toMatchObject({ title: `Can’t do it yet: share_${tag}`, times: 1, bricks: 1 });
+    expect(await reportProblem(problemId)).toMatchObject({ title: 'Can’t do it yet: Pages', operation: `share_${tag}`, times: 1, bricks: 1 });
   });
 
   it('deleting the Brick keeps its notes counted, product-only, with no link to the Brick', async () => {

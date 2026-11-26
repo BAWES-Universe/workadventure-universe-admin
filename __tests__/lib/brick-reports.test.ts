@@ -55,11 +55,12 @@ describe('cleaning a note', () => {
 });
 
 describe('a note’s title', () => {
-  it('is built from fixed words only: how it failed, then what ran', () => {
+  it('is built from fixed words only: how it failed, then what ran in plain words, never a tool name', () => {
     expect(reportTitle({ area: 'apps', operation: 'app:gmail', failure: 'signed_out' }, new Map([['gmail', 'Gmail']]))).toBe('Signed out: Gmail App');
     expect(reportTitle({ area: 'pages', operation: 'none', failure: 'missing_ability' })).toBe('Can’t do it yet: Pages');
-    expect(reportTitle({ area: 'apps', operation: 'app', failure: 'timed_out' })).toBe('Timed out: Apps: an App');
-    expect(reportTitle({ area: 'computer', operation: 'run_command', failure: 'failed' })).toBe('Failed: run_command');
+    expect(reportTitle({ area: 'apps', operation: 'app', failure: 'timed_out' })).toBe('Timed out: an App');
+    expect(reportTitle({ area: 'computer', operation: 'run_command', failure: 'failed' })).toBe('Failed: Computer');
+    expect(reportTitle({ area: 'pages', operation: 'make_artifact', failure: 'failed' })).toBe('Failed: Pages');
     expect(reportTitle({ area: 'chat', operation: 'none', failure: 'corrected' })).toBe('Corrected or unhappy: Chat');
   });
 

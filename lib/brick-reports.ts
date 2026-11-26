@@ -13,9 +13,15 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
  * one-way hash. The Brick is kept only to tell its owner when a fix ships; no screen shows which Brick, owner, world or room sent a note.
  *
  * A note sent again with the same reference (the chat's message and what it is about) is the same note: the chat gets the same receipt and
- * key back, so an answer lost on the way never makes a second note. Taking a note back empties it at once. Deleting the chat changes
- * nothing for a note already sent: Take it back (24 hours, anyone in the chat) is the way. Deleting the Brick keeps its notes, product-only,
- * counted, with no link to the Brick.
+ * key back, so an answer lost on the way never makes a second note. Taking a note back empties it at once.
+ *
+ * A lost receipt: the bot server confirms each note once the chat message carrying its receipt (and Take it back) went out. A note never
+ * confirmed within RECEIPT_WAIT_MS (the answer or the message was lost, the chat was cleared) is withdrawn automatically, exactly like Take
+ * it back, so no note stays that its chat cannot see or take back. A chat that opens a note (its words, its status) proves it got it.
+ *
+ * Deleting: deleting the chat changes nothing for a note already sent; Take it back (24 hours, anyone in the chat) is the way. Deleting the
+ * Brick keeps its notes counted with no link to the Brick (the link is set to null); words a person chose to send stay, since they are the
+ * sender's and not the owner's. Deleting a person's account must call forgetReportWordsOf, which empties the words they sent.
  *
  * Words people add are untrusted: whatever reads notes later (the weekly sort, lessons that go into every Brick's rules) must treat them
  * as data inside a fenced block, never as instructions; a lesson may come only from a problem with notes from 3 or more different owners,
@@ -43,6 +49,8 @@ export const OPERATION_PATTERN = /^(?:none|app|app:[a-z0-9][a-z0-9_.-]{0,55}|[a-
 export const NOTES_PER_BRICK_PER_DAY = 10;
 /** How long the chat can take a note back. */
 export const TAKE_BACK_MS = 24 * 60 * 60 * 1000;
+/** How long a note waits for the bot server to confirm its receipt reached the chat before it is withdrawn. */
+export const RECEIPT_WAIT_MS = 15 * 60 * 1000;
 
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
@@ -133,15 +141,17 @@ const AREA_TITLE: Record<ReportArea, string> = {
   other: 'Other',
 };
 
-/** What ran, in words: "Gmail App", "make_artifact", "an App", or the area when nothing ran. */
+/**
+ * What ran, in plain words: a catalog App by its name ("Gmail App"), any other App as "an App", and the Brick's own tools (and nothing)
+ * by their area ("Pages"). A tool's own name (make_artifact) is only the grouping key, never a title.
+ */
 function operationWords(operation: string, area: ReportArea, appNames: ReadonlyMap<string, string>): string {
-  if (operation === 'none') return AREA_TITLE[area];
-  if (operation === 'app') return `${AREA_TITLE[area]}: an App`;
+  if (operation === 'app') return 'an App';
   if (operation.startsWith('app:')) return `${appNames.get(operation.slice(4)) ?? 'An'} App`;
-  return operation;
+  return AREA_TITLE[area];
 }
 
-/** A note's title, from fixed words only: "Signed out: Gmail App", "Can’t do it yet: Pages". Never words from a chat. */
+/** A note's title, from fixed words only: "Signed out: Gmail App", "Can’t do it yet: Pages", "Timed out: an App". Never words from a chat. */
 export function reportTitle(note: { area: ReportArea; operation: string; failure: ReportFailure }, appNames: ReadonlyMap<string, string> = new Map()): string {
   return `${FAILURE_WORDS[note.failure]}: ${operationWords(note.operation, note.area, appNames)}`.slice(0, TITLE_MAX);
 }
@@ -186,10 +196,8 @@ export interface NoteInput {
 
 /** What the bot server already knew when the note was sent, with no words in it. */
 export interface NoteContext {
-  model?: string;
   ownKey?: boolean;
   gameVersion?: string;
-  tools?: string[];
 }
 
 /** The note as it was kept: what the chat shows under "What was sent". */
@@ -299,11 +307,27 @@ export async function recordReportNote(input: NoteInput, now: Date = new Date())
   });
 }
 
+const NOTE_SELECT = {
+  id: true,
+  takeBackHash: true,
+  takenBackAt: true,
+  deliveredAt: true,
+  createdAt: true,
+  reopened: true,
+  problemId: true,
+  kind: true,
+  area: true,
+  operation: true,
+  failure: true,
+  words: true,
+} as const;
+type NoteRow = Prisma.BrickReportNoteGetPayload<{ select: typeof NOTE_SELECT }>;
+
 /** The note a key opens, or null: compared in constant time, so a wrong key says nothing about the note. */
 async function noteFor(id: string, key: string) {
   const row = await prisma.brickReportNote.findUnique({
     where: { id },
-    select: { takeBackHash: true, takenBackAt: true, createdAt: true, reopened: true, problemId: true, kind: true, area: true, operation: true, failure: true, words: true },
+    select: NOTE_SELECT,
   });
   const given = Buffer.from(keyHash(key), 'hex');
   const held = row ? Buffer.from(row.takeBackHash, 'hex') : null;
@@ -311,25 +335,19 @@ async function noteFor(id: string, key: string) {
   return row;
 }
 
-export type TakeBackOutcome = { takenBack: true } | { takenBack: false; reason: 'not_found' | 'too_late' };
-
 /**
- * Takes a note back, for anyone in the chat that holds its key, within TAKE_BACK_MS of sending. Taking it back twice is fine. Its words,
- * context and person go at once: the row stays, empty, only so the Brick's count for the day still holds it (and its reference, so the
- * same note sent again answers "taken back" and is not kept again). A problem with no note left goes. A note that took a fixed problem back
- * to New, taken back while no later note holds the problem open, puts it back to Fixed: what was taken back never counts.
+ * Empties a note at once (Take it back, or withdrawn when its receipt never reached the chat). Its words, context and person go: the row
+ * stays, empty, only so the Brick's count for the day still holds it (and its reference, so the same note sent again answers "taken back"
+ * and is not kept again). A problem with no note left goes. A note that took a fixed problem back to New, emptied while no later note holds
+ * the problem open, puts it back to Fixed: what was taken back never counts. Emptying twice changes nothing.
  */
-export async function takeBackReportNote(id: string, key: string, now: Date = new Date()): Promise<TakeBackOutcome> {
-  const row = await noteFor(id, key);
-  if (!row) return { takenBack: false, reason: 'not_found' };
-  if (row.takenBackAt) return { takenBack: true };
-  if (now.getTime() - row.createdAt.getTime() > TAKE_BACK_MS) return { takenBack: false, reason: 'too_late' };
+async function emptyNote(row: NoteRow, now: Date): Promise<void> {
   await prisma.$transaction(async (tx) => {
     // The same lock as a new note of this problem: a note arriving now either sees the problem as it is after this, or holds it open itself
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${row.kind}:${row.area}:${row.operation}:${row.failure}`}, 0))`;
     // Only a note not taken back yet: a second tap racing the first changes nothing
     const taken = await tx.brickReportNote.updateMany({
-      where: { id, takenBackAt: null },
+      where: { id: row.id, takenBackAt: null },
       data: { words: '', wordsAt: null, context: Prisma.JsonNull, personKey: null, takenBackAt: now },
     });
     if (taken.count === 0 || !row.problemId) return;
@@ -348,6 +366,19 @@ export async function takeBackReportNote(id: string, key: string, now: Date = ne
       data: { lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
     });
   });
+}
+
+export type TakeBackOutcome = { takenBack: true } | { takenBack: false; reason: 'not_found' | 'too_late' };
+
+/**
+ * Takes a note back, for anyone in the chat that holds its key, within TAKE_BACK_MS of sending (see emptyNote). Taking it back twice is fine.
+ */
+export async function takeBackReportNote(id: string, key: string, now: Date = new Date()): Promise<TakeBackOutcome> {
+  const row = await noteFor(id, key);
+  if (!row) return { takenBack: false, reason: 'not_found' };
+  if (row.takenBackAt) return { takenBack: true };
+  if (now.getTime() - row.createdAt.getTime() > TAKE_BACK_MS) return { takenBack: false, reason: 'too_late' };
+  await emptyNote(row, now);
   return { takenBack: true };
 }
 
@@ -364,7 +395,8 @@ export async function addReportWords(id: string, key: string, words: unknown, no
   if (now.getTime() - row.createdAt.getTime() > TAKE_BACK_MS) return { added: false, reason: 'too_late' };
   const clean = cleanReportText(words, TEXT_MAX);
   if (!clean) return { added: false, reason: 'empty' };
-  const done = await prisma.brickReportNote.updateMany({ where: { id, takenBackAt: null }, data: { words: clean, wordsAt: now } });
+  // The chat holds the key, so its receipt arrived: it is never withdrawn as lost
+  const done = await prisma.brickReportNote.updateMany({ where: { id, takenBackAt: null }, data: { words: clean, wordsAt: now, ...(row.deliveredAt ? {} : { deliveredAt: now }) } });
   return done.count > 0 ? { added: true, words: clean } : { added: false, reason: 'taken_back' };
 }
 
@@ -375,7 +407,40 @@ export async function reportNoteStatus(id: string, key: string, now: Date = new 
   const row = await noteFor(id, key);
   if (!row) return { state: 'not_found' };
   if (row.takenBackAt) return { state: 'taken_back', words: '', canTakeBack: false };
+  // The chat holds the key, so its receipt arrived: it is never withdrawn as lost
+  if (!row.deliveredAt) await prisma.brickReportNote.updateMany({ where: { id, deliveredAt: null }, data: { deliveredAt: now } });
   return { state: 'live', words: row.words, canTakeBack: now.getTime() - row.createdAt.getTime() <= TAKE_BACK_MS };
+}
+
+/** The bot server's word that the chat message carrying these notes' receipts went out: they are never withdrawn as lost. Only its own Brick's. */
+export async function confirmReportReceipts(botId: string, ids: string[], now: Date = new Date()): Promise<number> {
+  if (ids.length === 0) return 0;
+  const done = await prisma.brickReportNote.updateMany({ where: { botId, id: { in: ids }, deliveredAt: null }, data: { deliveredAt: now } });
+  return done.count;
+}
+
+/**
+ * Withdraws the notes whose receipt never reached their chat within RECEIPT_WAIT_MS, exactly like Take it back: nobody could see them or
+ * take them back. Run before the inbox is read, so a lost receipt never counts. Says how many went.
+ */
+export async function withdrawUndelivered(now: Date = new Date()): Promise<number> {
+  const lost = await prisma.brickReportNote.findMany({
+    where: { deliveredAt: null, takenBackAt: null, createdAt: { lt: new Date(now.getTime() - RECEIPT_WAIT_MS) } },
+    orderBy: { createdAt: 'asc' },
+    take: 200,
+    select: NOTE_SELECT,
+  });
+  for (const row of lost) await emptyNote(row, now);
+  return lost.length;
+}
+
+/**
+ * Empties the words a person sent with notes, for when their account is deleted (nothing in Orbit deletes an account today; whatever does
+ * must call this, see lib/bot-privacy.ts). Their notes stay counted, product-only; their person hash is one-way, so it is recomputed here.
+ */
+export async function forgetReportWordsOf(userUuid: string): Promise<number> {
+  const done = await prisma.brickReportNote.updateMany({ where: { personKey: personHash(`person:${userUuid}`), words: { not: '' } }, data: { words: '', wordsAt: null } });
+  return done.count;
 }
 
 // ---------------------------------------------------------------- the inbox
@@ -392,6 +457,8 @@ export interface ProblemRow {
   id: string;
   kind: ReportKind;
   area: ReportArea;
+  /** What ran (a tool name, `app:<key>`, `app` or `none`): staff only, shown as a code chip; titles never use it. */
+  operation: string;
   title: string;
   state: ReportState;
   cameBack: boolean;
@@ -456,6 +523,7 @@ type CountRow = {
   id: string;
   kind: string;
   area: string;
+  operation: string;
   title: string;
   state: string;
   came_back: boolean;
@@ -476,7 +544,7 @@ async function countedProblems(where: Prisma.Sql, now: Date): Promise<CountRow[]
   const weekAgo = new Date(now.getTime() - WEEK);
   const twoWeeksAgo = new Date(now.getTime() - 2 * WEEK);
   return prisma.$queryRaw<CountRow[]>(Prisma.sql`
-    SELECT p.id, p.kind, p.area, p.title, p.state, p.came_back, p.first_seen_at, p.last_seen_at,
+    SELECT p.id, p.kind, p.area, p.operation, p.title, p.state, p.came_back, p.first_seen_at, p.last_seen_at,
       ((COUNT(DISTINCT n.bot_id)) + (CASE WHEN BOOL_OR(n.bot_id IS NULL) THEN 1 ELSE 0 END))::int AS bricks,
       (COUNT(DISTINCT COALESCE(b.owner_id, n.bot_id, '')))::int AS owners,
       (COUNT(DISTINCT n.person_key))::int AS people,
@@ -509,6 +577,7 @@ function rowOf(row: CountRow): ProblemRow {
     id: row.id,
     kind: row.kind as ReportKind,
     area: row.area as ReportArea,
+    operation: row.operation,
     title: row.title,
     state: row.state as ReportState,
     cameBack: row.came_back,
@@ -528,6 +597,7 @@ function rowOf(row: CountRow): ProblemRow {
 
 /** One tab of the inbox, highest priority first (then the most recently seen), and how many problems each tab holds. */
 export async function reportInbox(state: ReportState, now: Date = new Date()): Promise<Inbox> {
+  await withdrawUndelivered(now);
   const rows = (await countedProblems(Prisma.sql`TRUE`, now)).map(rowOf);
   const counts: Record<ReportState, number> = { new: 0, working: 0, fixed: 0 };
   for (const row of rows) if (row.state in counts) counts[row.state] += 1;
@@ -547,6 +617,7 @@ export interface ProblemDetail extends ProblemRow {
 
 /** One problem, with why it ranks where it does and two of the words people added, picked at random. Null when it has no note left. */
 export async function reportProblem(id: string, now: Date = new Date()): Promise<ProblemDetail | null> {
+  await withdrawUndelivered(now);
   const [row] = await countedProblems(Prisma.sql`p.id = ${id}`, now);
   if (!row) return null;
   const base = rowOf(row);

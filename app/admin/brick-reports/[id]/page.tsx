@@ -87,6 +87,11 @@ export default function BrickReportPage() {
         </span>
         <span className={styles.chip}>{KIND_WORDS[problem.kind]}</span>
         <span className={styles.chip}>{AREA_WORDS[problem.area]}</span>
+        {problem.operation !== 'none' && (
+          <span className={styles.chip} data-testid="brick-report-operation">
+            <code>{problem.operation}</code>
+          </span>
+        )}
         <span className={styles.chip} data-tone={problem.state === 'fixed' ? 'fixed' : undefined} data-testid="brick-report-state">
           {STATE_WORDS[problem.state]}
         </span>

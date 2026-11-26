@@ -37,6 +37,7 @@ CREATE TABLE "brick_report_notes" (
     "take_back_hash" VARCHAR(64) NOT NULL,
     "take_back_sealed" TEXT NOT NULL,
     "taken_back_at" TIMESTAMP(3),
+    "delivered_at" TIMESTAMP(3),
     "day" DATE NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -46,6 +47,7 @@ CREATE TABLE "brick_report_notes" (
 CREATE UNIQUE INDEX "brick_report_notes_bot_id_ref_key" ON "brick_report_notes"("bot_id", "ref");
 CREATE INDEX "brick_report_notes_problem_id_created_at_idx" ON "brick_report_notes"("problem_id", "created_at");
 CREATE INDEX "brick_report_notes_bot_id_day_idx" ON "brick_report_notes"("bot_id", "day");
+CREATE INDEX "brick_report_notes_delivered_at_created_at_idx" ON "brick_report_notes"("delivered_at", "created_at");
 
 ALTER TABLE "brick_report_notes" ADD CONSTRAINT "brick_report_notes_problem_id_fkey" FOREIGN KEY ("problem_id") REFERENCES "brick_report_problems"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE "brick_report_notes" ADD CONSTRAINT "brick_report_notes_bot_id_fkey" FOREIGN KEY ("bot_id") REFERENCES "bots"("id") ON DELETE SET NULL ON UPDATE CASCADE;

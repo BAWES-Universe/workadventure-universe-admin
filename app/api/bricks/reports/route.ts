@@ -9,8 +9,6 @@ export async function OPTIONS(request: NextRequest) {
   return preflight(request);
 }
 
-const short = z.string().trim().max(80);
-
 const bodySchema = z
   .object({
     botId: z.string().trim().min(1).max(100),
@@ -29,12 +27,11 @@ const bodySchema = z
     /** Words the Brick drafted with the person, only when they asked: cleaned and answered back as `wordsPreview`, never kept. */
     draftWords: z.string().max(1200).optional(),
     effect: z.enum(REPORT_EFFECTS),
+    /** What the bot server already knew, with no words in it: only these two, so no caller can put words here. */
     context: z
       .object({
-        model: short.optional(),
         ownKey: z.boolean().optional(),
-        gameVersion: z.string().trim().max(40).optional(),
-        tools: z.array(short).max(100).optional(),
+        gameVersion: z.string().trim().regex(/^[A-Za-z0-9._+-]{1,40}$/).optional(),
       })
       .strict()
       .optional(),

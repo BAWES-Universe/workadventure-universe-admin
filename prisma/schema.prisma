@@ -1833,6 +1833,8 @@ model BrickReportNote {
   takeBackHash   String            @map("take_back_hash") @db.VarChar(64)
   takeBackSealed String            @map("take_back_sealed")
   takenBackAt    DateTime?         @map("taken_back_at")
+  // When the bot server said the chat message carrying its receipt went out; never set within 15 minutes, the note is withdrawn
+  deliveredAt    DateTime?         @map("delivered_at")
   // The day (UTC) it was sent: a Brick sends at most so many a day
   day          DateTime            @db.Date
   createdAt    DateTime            @default(now()) @map("created_at")
@@ -1840,6 +1842,7 @@ model BrickReportNote {
   @@unique([botId, ref])
   @@index([problemId, createdAt])
   @@index([botId, day])
+  @@index([deliveredAt, createdAt])
   @@map("brick_report_notes")
 }
 

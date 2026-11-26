@@ -103,6 +103,7 @@ export async function hiddenBotIds(): Promise<string[]> {
  * Nothing in Orbit deletes an account today. When something does, it goes through here too: the database takes the
  * account's universes (with their room bots) and its Bricks (game #1992, `{ ownerId }`) with it, and their hidden chats
  * and memory would stay behind as above.
+ * It must also call forgetReportWordsOf (lib/brick-reports.ts): the words that person sent with notes to the Universe team.
  */
 export async function deleteWithHiddenBotData<T>(botsWhere: Prisma.BotWhereInput, remove: () => Prisma.PrismaPromise<T>): Promise<T> {
   const hidden = await prisma.bot.findMany({ where: { AND: [botsWhere, HIDING_BOTS] }, select: { id: true } });
