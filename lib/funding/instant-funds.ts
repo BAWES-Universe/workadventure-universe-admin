@@ -36,7 +36,7 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
         if (held.ok) return { ok: true, created: held.created };
         if (held.reason === 'rule') return held;
         // A key the books were told to give up (see `release`) holds nothing, said as "unavailable": the step is not run and credit is not blamed
-        return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
+        return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : held.reason === 'not_given' ? 'credit_not_given' : 'unavailable' };
       } catch (error) {
         console.error('[Funding] Could not hold Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false, reason: 'unavailable' };

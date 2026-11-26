@@ -184,8 +184,14 @@ describe('the real upgrade', () => {
     it('keeps every row of every table it had and the schema equals schema.prisma', async () => {
       const after = await counts((b as Throwaway).client, ['app_settings']);
       for (const [table, n] of Object.entries(before)) {
-        // The only table whose rows the upgrade may add to is the allowance history (written from the saved setting)
+        // The only tables whose rows the upgrade may add to: the allowance history (written from the saved setting), and the grant rules,
+        // which gain the seeded research default's second version ($2.00 a month, 20261126100000) while the first is still the seeded one
         if (table === 'meter_allowance_changes') continue;
+        if (table === 'grant_rules') {
+          expect(after[table]).toBeGreaterThanOrEqual(n);
+          expect(after[table]).toBeLessThanOrEqual(n + 1);
+          continue;
+        }
         expect({ table, n: after[table] }).toEqual({ table, n });
       }
       expect(drift(b as Throwaway)).toBe('');

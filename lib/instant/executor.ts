@@ -13,6 +13,7 @@ import {
   admitInstantTool,
   argsFingerprint,
   customerChargeFor,
+  owedForCharge,
   holdFor,
   missingInstantLimits,
   providerUserIdFor,
@@ -137,8 +138,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   if (known) return known.personId === input.personId ? describeKnown(known, { funds, adapter, now }) : refuse('not_owner');
 
   // Instant is always the Brick's owner's own, on their own Brick: no room, owner is who asked, Brick not deleted
-  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
-  if (!bot || bot.roomId !== null || bot.deletedAt !== null || bot.ownerId !== input.personId) return refuse('not_owner');
+  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, deletedAt: true, enabled: true } });
+  if (!bot || bot.roomId !== null || bot.deletedAt !== null || !bot.enabled || bot.ownerId !== input.personId) return refuse('not_owner');
 
   if (!instant) return refuse('not_set');
   const limits = await getInstantLimits();
@@ -147,7 +148,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   const admitted = admitInstantTool(input.tool, input.arguments);
   if (!admitted.ok) return refuse(admitted.reason);
-  // Nothing is on for a Brick by default: only an App its owner switched on for this Brick can run
+  // Research Apps are on for every Brick's owner by default; one whose own App of the same service is on for this Brick uses that instead
   if (!(await brickHasApp(input.botId, admitted.toolkit))) return refuse('not_offered');
   if (admitted.topMicros > (limits.maxRunMicros ?? 0)) return refuse('too_costly');
 
@@ -184,6 +185,15 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
       // Two asks that arrive together with different call ids both passed the check above: only one gets past this one
       const sameAsk = await openTwin(tx, input.personId, fingerprint);
       if (sameAsk) return { kind: 'refused', outcome: refuse('already_checking', { runId: sameAsk }) };
+      // One question (one task) has at most so many runs, counted under this lock so two runs of one question at once cannot both slip past it.
+      // A run that was refused never went out, so it does not count. While a bound is set, a run that names no question is refused: it could
+      // not be counted, so leaving the key out would be a way round the bound (the bot server always sends one)
+      const taskKey = taskKeyOf(input);
+      if (!taskKey && limits.maxRunsPerQuestion !== null) return { kind: 'refused', outcome: refuse('no_question') };
+      if (taskKey && limits.maxRunsPerQuestion !== null) {
+        const runs = await tx.instantRun.count({ where: { personId: input.personId, taskKey, state: { not: 'refused' } } });
+        if (runs >= limits.maxRunsPerQuestion) return { kind: 'refused', outcome: refuse('question_limit') };
+      }
       const exposure = await exposureIn(tx, now);
       if (exposure + admitted.topMicros > (limits.exposureCeilingMicros ?? 0)) return { kind: 'refused', outcome: refuse('exposure_full') };
       const id = crypto.randomUUID();
@@ -399,7 +409,8 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
         const reason = reasonOfRejection(call.code, call.status);
         // The run says it failed first: the event is written from the run as it now stands
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
-        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
+        // Nothing ran, so there is no call fee either: it is settled at nothing owed
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now, { nothingRan: true });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
         return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
@@ -527,10 +538,12 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'> & { now?: D
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
-async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
+async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date, opts: { nothingRan?: boolean } = {}): Promise<void> {
   if (run.providerState === 'settled') return;
   const finishedAt = run.finishedAt ?? now;
-  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
+  // What is owed to Composio, the same thing on both ways: a measured charge (the tool's own) with its call fee, or the top price (which holds the fee)
+  const owed = opts.nothingRan ? micros : owedOf(micros, basis);
+  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(owed), providerBasis: basis, finishedAt } });
   // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
   // `repairInstantReporting`). It is written by the same writer as every later correction (`reportInstantRunIn`: one place decides what the event says, from the run
   // as it now stands in this transaction, never from a copy made here), inside a savepoint, because a failed statement otherwise leaves the whole transaction
@@ -544,15 +557,18 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
     console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown');
   }
-  if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
+  if (owed > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
+
+/** A measured `micros` is Composio's charge for the tool (`instant_charge`), billed apart from the call fee; an estimate is the top price, fee included. */
+const owedOf = (micros: number, basis: 'measured' | 'estimated'): number => (basis === 'measured' ? owedForCharge(micros) : micros);
 
 /**
  * A run that worked and whose charge is known: the provider side is settled (inside the caller's transaction). What the person is
  * charged is said to the credit books afterwards, outside it (`finishCustomer`); the amount returned is what that will ask for.
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
-  const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
+  const charged = customerChargeFor(owedOf(providerMicros, basis), asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
   await settleProvider(run, tx, providerMicros, basis, ctx.now);
   return charged;
 }
@@ -729,15 +745,17 @@ export async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.T
     await tx.instantRun.update({ where: { id: run.id }, data: { detail: { ...detail, lateEvidence: { status: line.status, chargeMicros: null, at: now.toISOString() } } as Prisma.InputJsonValue } });
     return;
   }
-  const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
+  // What is owed for it, as on time: the charge on the line with its call fee (the estimate it replaces was the top price, which holds the fee)
+  const owed = verified !== null ? owedForCharge(verified) : null;
+  const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(owed !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: owed } } : {}) };
   await tx.instantRun.update({
     where: { id: run.id },
-    data: { detail: next as Prisma.InputJsonValue, ...(verified !== null ? { providerMicros: BigInt(verified), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
+    data: { detail: next as Prisma.InputJsonValue, ...(owed !== null ? { providerMicros: BigInt(owed), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
   });
   // The event says the figure that was found: the one writer of the event corrects it (once; a second look finds nothing to change), and keeps what it said before
   if (verified !== null) await reportInstantRunIn(tx, run.id, now, { insertIsBestEffort: true });
   // A figure found late that is above the top price means the table is too low, as for one found on time: Instant stops (the person's side is not touched)
-  if (verified !== null && verified > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
+  if (owed !== null && owed > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 
 /**
@@ -851,7 +869,8 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
     if (line && !run.providerLogId) await tx.instantRun.update({ where: { id: run.id }, data: { providerLogId: line.id } });
     if (line && line.chargeMicros !== null) {
       if (run.state === 'succeeded') await settleSuccess({ ...run, providerLogId: line.id }, tx, line.chargeMicros, 'measured', limits, ctx);
-      else await settleProvider(run, tx, line.chargeMicros, 'measured', now);
+      // A request Composio would not take never ran: what its log says it charged is all that is owed, with no call fee on top
+      else await settleProvider(run, tx, line.chargeMicros, 'measured', now, { nothingRan: run.reason === 'invalid_request' });
       return;
     }
     if (now >= deadline) {

@@ -295,7 +295,8 @@ the statements it sends keep working against the new columns, which are all null
 205. `20261125000000_computer_mark_in_orbit`
 206. `20261125100000_computer_take_over_check`
 207. `20261126000000_app_actions`
-208. `20261126120000_tool_person_heading`
-209. `20261126130000_app_action_choice_by_person`
-210. `20261126150000_brick_reports`
+208. `20261126100000_research_on_by_default`
+209. `20261126120000_tool_person_heading`
+210. `20261126130000_app_action_choice_by_person`
+211. `20261126150000_brick_reports`
 <!-- migrations:end -->

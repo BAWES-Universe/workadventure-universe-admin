@@ -165,6 +165,28 @@ const TABLE: Record<string, InstantTool> = {
 };
 
 /**
+ * The research Apps Universe runs on its own account (spec "Research Apps on by default", 26 Nov 2026). Every tool of the table belongs to one of
+ * these, and each is ON for every Brick's owner with nothing to connect and no switch: a Brick searches the web from its first message, paid
+ * from its owner's Instant Apps credit. Its name is what people see and connect by (the provider that runs it for Universe never is), and its
+ * strength is the one line the Brick picks an App by and the Apps page shows under the name. Which of a person's own Apps is the same App (so
+ * their own one wins and this one is not offered next to it) is decided by the one rule of lib/app-same.ts, from the key and the name.
+ */
+export interface InstantAppInfo {
+  name: string;
+  /** What kind of App it is, said to the Brick with each tool: only a `research` one gets the "search right away" instructions. */
+  kind: 'research';
+  strength: string;
+}
+
+export const INSTANT_APPS: Record<string, InstantAppInfo> = {
+  exa: { name: 'Exa', kind: 'research', strength: 'Papers, companies and people' },
+  tavily: { name: 'Tavily', kind: 'research', strength: 'Fresh news and quick facts' },
+};
+
+/** The App a toolkit of the table belongs to, or null when it has none (a row without an App is never offered). */
+export const instantAppOf = (toolkit: string): InstantAppInfo | null => (Object.prototype.hasOwnProperty.call(INSTANT_APPS, toolkit) ? INSTANT_APPS[toolkit] : null);
+
+/**
  * The call fee Composio adds to a managed-account tool run (its rate card tier for the app) and the direct execution add-on. Every
  * tool of the table is in "all other managed apps" ($0.0005), a settled figure. An app whose rate card figure is only a floor (Google
  * Maps is "from $0.01", varying by API) has no row: a floor is not a top price, and it comes back once Composio states a maximum.
@@ -172,6 +194,14 @@ const TABLE: Record<string, InstantTool> = {
 function feeMicros(): number {
   return RATE_MICROS.managed_other + DIRECT_EXECUTION_MICROS;
 }
+
+/**
+ * What Composio's call fee comes to for one run (the money call of 26 Nov 2026: the fee is counted against the person's own credit). A run whose
+ * App charges nothing (a free search, or one during the provider's discount) still costs Universe this fee, so it is taken from the person's
+ * Instant Apps credit like any other charge: each person's own credit bounds how many runs they have, and one heavy user can never use up
+ * what everyone shares. It is inside every run's top price, so it is always held before the run.
+ */
+export const instantCallFeeMicros = (): number => feeMicros();
 
 export type Admission =
   | { ok: true; tool: string; toolkit: string; topMicros: number; priceVersion: string; units: number }
@@ -265,7 +295,20 @@ export function holdFor(topMicros: number, markupBps: number | null): number {
   return Number((BigInt(topMicros) * BigInt(10_000 + bps) + BigInt(9_999)) / BigInt(10_000));
 }
 
-/** What the person is charged for a charge of Composio's, never more than what was held. The part past the hold is ours. */
+/**
+ * What Universe owes Composio for one run whose charge Composio reported (`instant_charge`, the tool's own charge): that charge plus its call fee
+ * (`instantCallFeeMicros`), which Composio bills apart from it. A run's top price already holds the fee, so an estimate made from the top price is
+ * this figure already, and a run's provider cost (`provider_micros`) is the same thing whether it was measured or estimated.
+ */
+export function owedForCharge(chargeMicros: number): number {
+  return chargeMicros + feeMicros();
+}
+
+/**
+ * What the person is charged for a run that worked: what Universe owes Composio for it (`providerMicros`: its charge and its call fee, see
+ * `owedForCharge`), with the markup a super admin set, never more than what was held. The part past the hold is ours. A run that did not work
+ * is never charged at all (its hold goes back), so the fee is only ever taken for a run that answered.
+ */
 export function customerChargeFor(providerMicros: number, holdMicros: number, markupBps: number | null): number {
   const bps = markupBps ?? 0;
   const price = Number((BigInt(providerMicros) * BigInt(10_000 + bps) + BigInt(9_999)) / BigInt(10_000));
@@ -312,6 +355,11 @@ export interface InstantLimits {
   goodwillPerPersonPerMonth: number | null;
   /** A share added to Composio's charge for what the person pays, in basis points. Empty: the person pays Composio's charge as it is. */
   markupBps: number | null;
+  /**
+   * The most Instant runs one question may have (one chat turn: one task), so a Brick that tries another research App on thin results stops
+   * somewhere. Empty: no bound per question (each run is still bounded by the person's credit and the ceiling).
+   */
+  maxRunsPerQuestion: number | null;
   /** How long a run that went out and has no answer is waited for before it is looked up, in minutes. */
   sentWaitMinutes: number;
   /** How long an unclear run is looked up for before it is closed on what is known, in minutes. */
@@ -335,6 +383,7 @@ export const INSTANT_LIMITS_EMPTY: InstantLimits = {
   goodwillMaxMicros: null,
   goodwillPerPersonPerMonth: null,
   markupBps: null,
+  maxRunsPerQuestion: null,
   ...INSTANT_LIMITS_RECOMMENDED,
 };
 
@@ -348,6 +397,7 @@ export const INSTANT_LIMIT_LABELS: Record<keyof InstantLimits, { label: string; 
   goodwillMaxMicros: { label: 'Most one give-back may be', hint: 'Empty: nothing is given back for “Didn’t work”.', unit: 'micros' },
   goodwillPerPersonPerMonth: { label: 'Give-backs one person may have in a month', hint: 'Empty: nothing is given back for “Didn’t work”.', unit: 'count' },
   markupBps: { label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent (1,000 is 10%). Empty: the person pays Composio’s charge as it is.', unit: 'bps' },
+  maxRunsPerQuestion: { label: 'Most research runs for one question', hint: 'A Brick may try another research App when the first answer is thin; it stops here. Counts every run of one chat turn. Empty: no bound per question.', unit: 'count' },
   sentWaitMinutes: { label: 'Wait before looking up a run with no answer', hint: 'Minutes.', unit: 'minutes' },
   unclearWaitMinutes: { label: 'How long an unclear run is looked up for', hint: 'Minutes, from when it went out. After that it is closed on what is known and the person’s hold goes back.', unit: 'minutes' },
   unreachableWaitMinutes: { label: 'How long to wait when Composio’s log cannot be reached', hint: 'Minutes, from when the run went out. After that the person’s hold is given back (they are never charged for it later), the cost is ours, and the Costs report says it was released unconfirmed.', unit: 'minutes' },
@@ -364,6 +414,7 @@ export const INSTANT_LIMIT_RANGES: Record<keyof InstantLimits, { min: number; ma
   goodwillMaxMicros: { min: 0, max: 1_000_000_000 },
   goodwillPerPersonPerMonth: { min: 0, max: 10_000 },
   markupBps: { min: 0, max: 100_000 },
+  maxRunsPerQuestion: { min: 1, max: 1_000 },
   sentWaitMinutes: { min: 1, max: 1_440 },
   // Longer than the 60 seconds a request to Composio may take, so the sweep never closes a run whose answer is still on its way
   unclearWaitMinutes: { min: 2, max: 10_080 },
@@ -425,9 +476,12 @@ export type InstantReason =
   | 'too_costly' // the top price is above the most one run may cost
   | 'exposure_full' // our own limit with the provider is reached
   | 'credit_used_up' // the person's Instant Apps credit does not cover it
+  | 'credit_not_given' // the person was not given Instant Apps credit this period (the month's budget ran out) and has none
   | 'credit_unavailable' // the credit books could not be read: nothing ran
   | 'not_owner' // only the Brick's owner's own requests run Instant
   | 'already_checking' // the very same ask is still being looked up
+  | 'question_limit' // this question already had the most runs one question may have
+  | 'no_question' // a bound per question is set and the run named no question, so it could not be counted
   | 'provider_off' // Composio refused: Instant is not switched on for the tool
   | 'provider_empty' // Composio's balance is empty
   | 'provider_failed' // it ran and did not work (nothing charged to the person)
@@ -451,9 +505,12 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   too_costly: 'That would cost more than one run may.',
   exposure_full: 'This is not available right now.',
   credit_used_up: 'Your Instant Apps credit does not cover it.',
+  credit_not_given: 'Research on Universe’s account isn’t available right now. Your own free account on Apps has no Universe limit.',
   credit_unavailable: 'I cannot read your credit right now, so nothing ran.',
   not_owner: 'Only my owner can have me run that.',
   already_checking: 'I am still checking the same request.',
+  question_limit: 'That is as many look-ups as I do for one question.',
+  no_question: 'That could not run because it was not asked as part of a question.',
   provider_off: 'This is not available right now.',
   provider_empty: 'This is not available right now.',
   provider_failed: 'It did not work. You were not charged.',
