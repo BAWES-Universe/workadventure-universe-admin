@@ -1164,15 +1164,28 @@ export function computerAllowanceLimit(micros: number | null): Limit {
  */
 export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
 export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
-/** This UTC month against the rollout budget: what was issued, and how many people were due a default and not given it. */
-export type RolloutStanding = { issuedMicros: number; notGivenPeople: number };
+/**
+ * This UTC month against the rollout budget: what was issued, how many people were due a default and not given it, and what one more person
+ * is given from it (the current defaults Universe pays for), so the row can say how many more people the rest funds.
+ */
+export type RolloutStanding = { issuedMicros: number; notGivenPeople: number; perPersonMicros?: number };
 
 const asDollars = (micros: number) => `$${(micros / 1_000_000).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** What is left of the budget this month, and how many more people at today's defaults it funds (whole grants only: an issue never goes past it). */
+function leftOf(micros: number, rollout: RolloutStanding): string {
+  const left = Math.max(0, micros - rollout.issuedMicros);
+  if (left === 0) return ', nothing left';
+  const each = rollout.perPersonMicros ?? 0;
+  if (each <= 0) return `, ${asDollars(left)} left`;
+  const people = Math.floor(left / each);
+  return `, ${asDollars(left)} left: enough for ${people === 1 ? '1 more person' : `${people.toLocaleString('en')} more people`} at ${asDollars(each)} each`;
+}
 
 /** The rollout budget row's line: issued against the budget this month, and the people it left out (never silent when it runs out). */
 export function rolloutStatus(micros: number | null, rollout: RolloutStanding | null | undefined): string | undefined {
   if (!rollout) return undefined;
-  const issued = micros === null ? `Issued ${asDollars(rollout.issuedMicros)} this month.` : `Issued ${asDollars(rollout.issuedMicros)} of ${asDollars(micros)} this month.`;
+  const issued = micros === null ? `Issued ${asDollars(rollout.issuedMicros)} this month.` : `Issued ${asDollars(rollout.issuedMicros)} of ${asDollars(micros)} this month${leftOf(micros, rollout)}.`;
   if (rollout.notGivenPeople === 0) return issued;
   const people = rollout.notGivenPeople === 1 ? '1 person was' : `${rollout.notGivenPeople.toLocaleString('en')} people were`;
   return `${issued} ${people} not given credit this month because it would go past this.`;
@@ -1227,11 +1240,26 @@ export function readInstantLimits(answer: unknown): InstantLimitViews | null {
   return valid ? (limits as InstantLimitViews) : null;
 }
 
-export function instantLimits(views: InstantLimitViews): Limit[] {
+/** What Instant may owe the provider now (/api/admin/instant `exposure`), or null when the answer does not say. */
+export function readInstantExposure(answer: unknown): number | null {
+  const used = (answer as { exposure?: { usedMicros?: unknown } | null } | null)?.exposure?.usedMicros;
+  return typeof used === 'number' && Number.isFinite(used) && used >= 0 ? used : null;
+}
+
+/** The Instant ceiling row's line: what Instant may owe now of the ceiling this month, and what is left before new runs stop. */
+export function exposureStatus(ceilingMicros: number | null, usedMicros: number | null | undefined): string | undefined {
+  if (usedMicros === null || usedMicros === undefined) return undefined;
+  if (ceilingMicros === null) return `Used ${asDollars(usedMicros)} this month.`;
+  const left = Math.max(0, ceilingMicros - usedMicros);
+  return left === 0 ? `Used ${asDollars(usedMicros)} of ${asDollars(ceilingMicros)} this month: new runs stop until next month or a higher number.` : `Used ${asDollars(usedMicros)} of ${asDollars(ceilingMicros)} this month, ${asDollars(left)} left.`;
+}
+
+export function instantLimits(views: InstantLimitViews, usedMicros: number | null = null): Limit[] {
   return Object.entries(views).map(([key, view]) => {
     const scale = instantScale(view.unit);
     const unset = view.value === null;
     return {
+      ...(key === 'exposureCeilingMicros' ? { status: exposureStatus(view.value, usedMicros) } : {}),
       id: key,
       label: view.label,
       hint: view.hint,
@@ -1660,6 +1688,7 @@ export function UniverseAiLimits() {
   const [allowanceFailed, setAllowanceFailed] = useState(false);
   // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
   const [instant, setInstant] = useState<InstantLimitViews | null>(null);
+  const [instantUsed, setInstantUsed] = useState<number | null>(null);
   // Code jobs' own limits, the same way
   const [codeJobs, setCodeJobs] = useState<CodeJobLimitViews | null>(null);
 
@@ -1708,8 +1737,10 @@ export function UniverseAiLimits() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/instant');
       if (!response.ok) return;
-      const views = readInstantLimits(await response.json());
+      const body: unknown = await response.json();
+      const views = readInstantLimits(body);
       if (views) setInstant(views);
+      setInstantUsed(readInstantExposure(body));
     } catch {
       // Not shown until it can be read
     }
@@ -1771,6 +1802,7 @@ export function UniverseAiLimits() {
     }
     const views = readInstantLimits(result.data);
     if (views) setInstant(views);
+    setInstantUsed(readInstantExposure(result.data));
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1852,7 +1884,7 @@ export function UniverseAiLimits() {
             limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
-          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant, instantUsed)} onChange={saveInstant} />}
           {codeJobs && <LimitGroup title="Apps: code jobs" note="Short pieces of code an App's Brick may run in a separate, temporary workspace with no access to anyone's accounts. They are on by default, with these starting values; change any of them here. A job stops at its time and size limits, whatever it was doing." limits={codeJobLimits(codeJobs)} onChange={saveCodeJobs} />}
           {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money, rollout)} onChange={saveMoney} />}
           {voiceFailed ? (

@@ -1135,6 +1135,46 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
     });
 
+    it('their own App named Exa behind a company proxy wins by its name; their Off still counts as theirs; switched off, a lost sign-in or another person’s Exa do not hide Universe’s; nothing is held while theirs wins', async () => {
+      await setLimits();
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      liveTools(p);
+      setAdapterForTests(p.adapter);
+      const all = ['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH'];
+      try {
+        // Another person's own Exa (Omar's, on his own Brick or none) never hides Sara's
+        await prisma.appConnection.create({ data: { ownerId: omar, name: 'Exa', serverUrl: 'https://search-proxy.othercorp.example/v1/mcp', authType: 'none', source: 'link' } as never });
+        expect(await toolNames()).toEqual(all);
+        // Sara's own Exa behind her company's proxy: no Exa address, matched by its name
+        const own = await ownLink(brick, sara, 'https://search-proxy.mycorp.example/v1/mcp', { name: 'Exa' });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+        const f = fakeFunds(1_000_000);
+        for (const tool of ['EXA_SEARCH', 'EXA_ANSWER', 'EXA_GET_CONTENTS_ACTION']) {
+          expect(await runInstant(ask({ tool, arguments: tool === 'EXA_GET_CONTENTS_ACTION' ? { urls: ['https://example.org'] } : { query: 'weather' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
+        }
+        expect(f.funds.reserve).not.toHaveBeenCalled();
+        expect(p.instant.run).not.toHaveBeenCalled();
+        expect(await prisma.instantRun.count({ where: { personId: sara, toolkit: 'exa', state: { not: 'refused' } } })).toBe(0);
+        // Her own Exa's look-ups set Off on this Brick: still her own copy, so her Off applies and Universe's Exa is not offered instead
+        const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: brick, connectionId: own.id } });
+        await prisma.botMcpServer.update({ where: { id: grant.id }, data: { lookUpSetting: 'off' } });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+        // Switched off for this Brick: Universe's Exa is back
+        await prisma.botMcpServer.update({ where: { id: grant.id }, data: { enabled: false } });
+        expect(await toolNames()).toEqual(all);
+        // On again, but its sign-in was refused: it does not work, so Universe's Exa stays
+        await prisma.botMcpServer.update({ where: { id: grant.id }, data: { enabled: true } });
+        await prisma.appConnection.update({ where: { id: own.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+        expect(await toolNames()).toEqual(all);
+        // Mended: hers wins again
+        await prisma.appConnection.update({ where: { id: own.id }, data: { signInLostAt: null, signInLostStatus: null } });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+      } finally {
+        await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] }, source: 'link' } });
+      }
+    });
+
     it('an App added straight on the Brick (no App connection) that works is their own copy too: Universe’s is neither offered nor run, nothing is held, until it stops working', async () => {
       await setLimits();
       setInstantFunds(fakeFunds(1_000_000).funds);
@@ -1323,6 +1363,8 @@ run('the bounded Instant executor, in a real database', () => {
         expect(await prisma.creditIssueSkip.count({ where: { personId: person, reason: 'over_budget', programId: program } })).toBe(1);
         const leftOut = (await rolloutThisMonth()).notGivenPeople;
         expect(leftOut).toBeGreaterThanOrEqual(1);
+        // The row also says what one more person is given from the budget: today's $2.00 default (at least)
+        expect((await rolloutThisMonth()).perPersonMicros).toBeGreaterThanOrEqual(2_000_000);
         // Raised: the same person is given their $2 on the next look and is offered research again
         await setBudget(1_000_000_000_000);
         expect((await listFor(bot)).tools.map((tool) => tool.name)).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);
