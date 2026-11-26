@@ -196,6 +196,20 @@ run('Universe’s GitHub as an App’s actions, in a real database', () => {
     expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
   });
 
+  it('keeps Off for Run a workflow carried from before the grant was brought over, on every later read', async () => {
+    const sara = await withGitHub('sara');
+    // The bot server had read Run a workflow under Deletes or sends out, and the person had that heading Off
+    await syncCatalog(sara.brickId, sara.serverId, { tools: [{ name: 'github_run_workflow', fingerprint: 'f-run', suggestedHeading: 'deletesOrSends', suggestionSource: 'server' }] });
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { deleteSendSetting: 'off' } });
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+    const row = async () => (await readServerTools(sara.brickId, sara.serverId, { appActions: true })).tools.find((tool) => tool.name === 'github_run_workflow')?.setting;
+    expect(await row()).toBe('off');
+    expect(await row()).toBe('off');
+    expect((await gitHubJudgeFor(sara.brickId, sara.connectionId))!.judge('github_run_workflow').setting).toBe('off');
+    await prisma.botMcpServer.update({ where: { id: sara.serverId }, data: { appActionsVersion: -1 } });
+    expect(await row()).toBe('off');
+  });
+
   it('judges an action of Universe’s list that the grant has no row for by Universe’s list, not as Right away', async () => {
     const sara = await withGitHub('sara');
     await readServerTools(sara.brickId, sara.serverId, { appActions: true });

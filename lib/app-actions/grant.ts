@@ -214,7 +214,8 @@ export async function ensureAppActionTools(serverId: string, attempt = 0, force 
           const byPerson = chosen !== null && rows.some((tool) => tool.settingByPerson && tool.setting !== null);
           const own = start && chosen === null ? startingChoice(toolkit, entry.slug, settings[entry.heading]) : chosen;
           const setting = carried(rows, entry.heading, own);
-          const settingByPerson = byPerson && setting === chosen;
+          // A stricter choice carried from before the grant was brought over is the person's too (it is what their older headings said)
+          const settingByPerson = setting !== null && ((byPerson && setting === chosen) || (firstTime && setting !== own));
           for (const tool of rows) if (tool !== keeper) drop.push(tool.id);
           const data = {
             name: entry.slug,
