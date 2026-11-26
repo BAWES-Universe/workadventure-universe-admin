@@ -1038,10 +1038,21 @@ export async function orderForArtifact(orderId: string, artifactId: string, deps
   return stillUnresolved(await verifyOrder(orderId, deps));
 }
 
-/** A page anyone with the link may open: the public page's checkout is only for it, and only while it is there. */
+/** A page anyone with the link may open (shared by link, or Public): the public page's checkout is only for it, and only while it is there. */
 export async function isOpenByLink(artifactId: string): Promise<boolean> {
-  const artifact = await prisma.artifact.findUnique({ where: { id: artifactId }, select: { openScope: true, expiresAt: true } });
-  return !!artifact && artifact.openScope === 'link' && !(artifact.expiresAt && artifact.expiresAt.getTime() <= Date.now());
+  const artifact = await prisma.artifact.findUnique({ where: { id: artifactId }, select: { openScope: true, publishedVersion: true, expiresAt: true } });
+  if (!artifact || (artifact.expiresAt && artifact.expiresAt.getTime() <= Date.now())) return false;
+  // Public with nothing published is not there for a visitor (game #2115): nobody pays on a page they cannot see
+  if (!(artifact.openScope === 'link' || (artifact.openScope === 'public' && artifact.publishedVersion !== null))) return false;
+  // Nor on a page whose published version is gone: the visitor is told it is not there, so nothing is charged for it
+  return !(await publishedVersionGone(artifactId, artifact.publishedVersion));
+}
+
+/** True when the owner published a version of this page and that version is no longer there (a visitor is then shown nothing, never the latest). */
+async function publishedVersionGone(artifactId: string, publishedVersion: number | null): Promise<boolean> {
+  if (publishedVersion === null) return false;
+  const row = await prisma.artifactVersion.findUnique({ where: { artifactId_number: { artifactId, number: publishedVersion } }, select: { id: true } });
+  return !row;
 }
 
 /** Whether a page is taking payments right now, for the page's own "Pay" button to know (nothing else about the job). */
