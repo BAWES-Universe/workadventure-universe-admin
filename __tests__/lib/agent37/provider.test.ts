@@ -166,13 +166,19 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value) };
 }
 
-function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
+function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; sleepLog?: string[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
   const clock = extra.clock ?? { t: 1_000_000 };
   return new Agent37ComputerProvider({
     client: w.client,
     outstandingReserveMicros: async () => extra.reserved ?? 0,
     sleep: async (ms?: number) => {
       extra.slept?.push(ms ?? 0);
+      // With a log asked for, a pause really takes a turn of the event loop and says when it began and when it ended: a caller that does not wait for it is seen
+      if (extra.sleepLog) {
+        extra.sleepLog.push(`sleep-begin:${ms ?? 0}`);
+        await new Promise((resolve) => setImmediate(resolve));
+        extra.sleepLog.push(`sleep-end:${ms ?? 0}`);
+      }
       clock.t += 3_000;
     },
     now: () => clock.t,
@@ -614,12 +620,22 @@ describe('getting a machine ready for a job', () => {
     for (const [said, expected] of [['unpack_wait=7\n', [7000]], ['unpack_wait=0\n', []], ['', []], ['unpack_wait=99999\n', []], ['not a number\n', []]] as const) {
       const w = world();
       const slept: number[] = [];
-      const p = provider(w, { slept });
+      // Everything the computer is asked and every pause, in the order they began and ended
+      const order: string[] = [];
+      const p = provider(w, { slept, sleepLog: order });
       await p.create('bot-1');
       slept.length = 0;
+      order.length = 0;
+      const ask = w.client.exec.bind(w.client);
+      (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+        order.push(isMarkCommand(command) ? 'mark' : command.includes('unpack_wait=') ? 'unpack-asked' : command);
+        return ask(id, command, options);
+      };
       w.setExec(answer(said));
       await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
       expect(slept).toEqual(expected);
+      // The wait ENDED before the mark was read (a wait that is not waited for would let the mark be read inside the margin): asked, waited, then marked, nothing between
+      expect(order.filter((entry) => entry !== 'universe-up')).toEqual(['unpack-asked', ...expected.flatMap((ms) => [`sleep-begin:${ms}`, `sleep-end:${ms}`]), 'mark']);
       // The note the fence tells by is written after the wait, never before
       const commands = w.execs.map((entry) => labelled(entry.command));
       expect(commands.at(-1)).toBe('mark');
