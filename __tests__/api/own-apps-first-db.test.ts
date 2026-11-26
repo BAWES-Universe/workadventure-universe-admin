@@ -11,7 +11,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { checkAppUse, createConnection, grantToBrick } from '@/lib/app-connections';
 import { createBrick } from '@/lib/brick-create';
-import { moveTool, readServerTools, syncCatalog } from '@/lib/mcp-tool-policy';
+import { moveTool, readServerTools, saveServerSettings, syncCatalog } from '@/lib/mcp-tool-policy';
 import { brickApps } from '@/lib/instant/asker';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 
@@ -159,6 +159,55 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       await moveTool(saraBrick, serverId, byName.query, 'changesThings', sara);
       const mine = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'deletesOrSends'), tool('notes', 'g2', 'changesThings'), tool('sendNote', 'h2', 'looksUp')] });
       expect(mine.tools.find((entry) => entry.name === 'query')).toMatchObject({ heading: 'changesThings', confirmedBy: { name: 'sara' }, movedBy: { name: 'sara' } });
+    });
+
+    it('keeps a tool the person moved under a heading set Off off, whatever Universe’s rule for its new version or a later suggestion says', async () => {
+      const serverId = await ownApp();
+      await saveServerSettings(saraBrick, serverId, { changesThings: 'off' });
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp'), tool('postNote', 'g1', 'looksUp'), tool('sendNote', 'h1', 'looksUp')] });
+      const byName = Object.fromEntries(synced.tools.map((entry) => [entry.name, entry.id]));
+      for (const id of Object.values(byName)) await moveTool(saraBrick, serverId, id, 'changesThings', sara);
+      // Changed: no suggestion yet, a stricter suggestion, and a send by its name. Each would be Deletes or sends out (Asks first), but Off is stricter
+      const changed = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2'), tool('postNote', 'g2', 'deletesOrSends'), tool('sendNote', 'h2', 'looksUp')] });
+      for (const entry of changed.tools) expect(entry).toMatchObject({ heading: 'changesThings', state: 'confirmed', movedBy: { name: 'sara' } });
+      // A suggestion that comes later on the same version keeps it off too
+      const later = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'deletesOrSends'), tool('postNote', 'g2', 'deletesOrSends'), tool('sendNote', 'h2', 'looksUp')] });
+      for (const entry of later.tools) expect(entry).toMatchObject({ heading: 'changesThings', state: 'confirmed', movedBy: { name: 'sara' } });
+      // Deletes or sends out set Right away does not loosen it: Off stays the stricter
+      await saveServerSettings(saraBrick, serverId, { deletesOrSends: 'rightAway' });
+      let rows = await prisma.botMcpTool.findMany({ where: { serverId } });
+      expect(rows.map((row) => row.heading)).toEqual(['changesThings', 'changesThings', 'changesThings']);
+      // Once the person turns Changes things back on (Asks first), the tie goes to the stricter heading; set Right away, Universe's rule (Asks first) wins
+      await saveServerSettings(saraBrick, serverId, { changesThings: 'asksFirst', deletesOrSends: 'asksFirst' });
+      rows = await prisma.botMcpTool.findMany({ where: { serverId }, orderBy: { name: 'asc' } });
+      expect(rows.map((row) => [row.name, row.heading, row.personHeading])).toEqual([
+        ['postNote', 'deletesOrSends', 'changesThings'],
+        ['query', 'deletesOrSends', 'changesThings'],
+        ['sendNote', 'deletesOrSends', 'changesThings'],
+      ]);
+      await saveServerSettings(saraBrick, serverId, { changesThings: 'rightAway' });
+      rows = await prisma.botMcpTool.findMany({ where: { serverId } });
+      expect(rows.every((row) => row.heading === 'deletesOrSends' && row.movedById === sara && row.confirmedById === null)).toBe(true);
+    });
+
+    it('starts again from the person’s own heading when a kept tool changes again, and a move to where it sits now makes it theirs', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp'), tool('notes', 'g1', 'looksUp')] });
+      const byName = Object.fromEntries(synced.tools.map((entry) => [entry.name, entry.id]));
+      await moveTool(saraBrick, serverId, byName.query, 'makesNew', sara);
+      await moveTool(saraBrick, serverId, byName.notes, 'makesNew', sara);
+      await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'deletesOrSends'), tool('notes', 'g2')] });
+      const third = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f3', 'looksUp'), tool('notes', 'g2')] });
+      // The second change starts from what the person chose, not from the stricter heading the first one put it under
+      expect(third.tools.find((entry) => entry.name === 'query')).toMatchObject({ heading: 'makesNew', movedBy: { name: 'sara' } });
+      expect((await prisma.botMcpTool.findUniqueOrThrow({ where: { id: byName.query } })).personHeading).toBe('makesNew');
+      // The person keeps the strict heading the changed tool waits under: that is their choice now, and a later suggestion does not undo it
+      const notes = third.tools.find((entry) => entry.name === 'notes')!;
+      expect(notes).toMatchObject({ heading: 'deletesOrSends', movedBy: { name: 'sara' } });
+      expect((await prisma.botMcpTool.findUniqueOrThrow({ where: { id: byName.notes } })).confirmedById).toBeNull();
+      await moveTool(saraBrick, serverId, byName.notes, 'deletesOrSends', sara);
+      const after = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f3', 'looksUp'), tool('notes', 'g2', 'looksUp')] });
+      expect(after.tools.find((entry) => entry.name === 'notes')).toMatchObject({ heading: 'deletesOrSends', confirmedBy: { name: 'sara' }, movedBy: { name: 'sara' } });
     });
 
     it('removes a tool the server dropped from a cut list unless a person decided on it', async () => {

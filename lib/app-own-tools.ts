@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { isOwnApp } from '@/lib/app-same';
 import { acceptSorterPick, stricterHeading } from '@/lib/app-actions/sort';
 import { lockGrant } from '@/lib/app-actions/grant';
-import type { Heading } from '@/lib/mcp-tool-policy';
+import type { Heading, Setting } from '@/lib/mcp-tool-policy';
 
 /**
  * A person's own App on their Brick is sorted and confirmed by Universe, the same way a ready-made App's actions are (#1042, lib/app-actions/sort.ts),
@@ -36,13 +36,21 @@ export function sortOwnTool(name: string, suggested: Heading | null | undefined)
 // A tool of a link App may be named in camelCase ("sendMessage"): its words are split before the name is read, so a send is still a send
 const wordsOf = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
 
+const SETTING_RANK: Record<Setting, number> = { rightAway: 0, asksFirst: 1, off: 2 };
+
 /**
- * Where a tool a person moved sits once it changed: the stricter of the heading they chose and Universe's rule for the new version (its name,
- * then the server's suggestion; nothing suggested yet is Deletes or sends out). Worked out again from their own choice on every read of the
- * list, so a suggestion that comes later brings their heading back, and a tool is never looser than either.
+ * Where a tool a person moved sits once it changed: under whichever of the heading they chose and Universe's rule for the new version (its
+ * name, then the server's suggestion; nothing suggested yet is Deletes or sends out) does the stricter thing with this grant's settings now
+ * (Off, then Asks first, then Right away). A tie goes to the stricter heading. So a tool they moved under a heading set Off stays off, and it
+ * is never looser than either. Worked out again from their own choice on every read of the list and every change of the settings, so a
+ * suggestion that comes later brings their heading back.
  */
-export function keepMovedTool(name: string, personHeading: Heading, suggested: Heading | null | undefined): Heading {
-  return stricterHeading(personHeading, sortOwnTool(name, suggested));
+export function keepMovedTool(name: string, personHeading: Heading, suggested: Heading | null | undefined, settings: Record<Heading, Setting>): Heading {
+  const rule = sortOwnTool(name, suggested);
+  const person = SETTING_RANK[settings[personHeading]];
+  const universe = SETTING_RANK[settings[rule]];
+  if (person !== universe) return person > universe ? personHeading : rule;
+  return stricterHeading(personHeading, rule);
 }
 
 /** The same wait as every other write of a grant's tools (GRANT_WRITE in lib/mcp-tool-policy.ts). */
@@ -68,19 +76,33 @@ export async function universeSortsTools(serverId: string, db: Db = prisma): Pro
 export async function settleOwnAppTools(serverId: string, db?: Prisma.TransactionClient): Promise<boolean> {
   const work = async (tx: Db) => {
     if (!(await universeSortsTools(serverId, tx))) return null;
-    const server = await tx.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: { legacyText: true } });
+    const server = await tx.botMcpServer.findUniqueOrThrow({
+      where: { id: serverId },
+      select: { legacyText: true, lookUpSetting: true, makeSetting: true, changeSetting: true, deleteSendSetting: true },
+    });
     // A server that existed before tools were checked keeps working in text as it did: it is not changed under the person
     if (server.legacyText) return null;
+    const settings = {
+      looksUp: server.lookUpSetting,
+      makesNew: server.makeSetting,
+      changesThings: server.changeSetting,
+      deletesOrSends: server.deleteSendSetting,
+    } as Record<Heading, Setting>;
     const tools = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, heading: true, suggestedHeading: true, confirmedAt: true, confirmedById: true, movedById: true },
+      select: { id: true, name: true, fingerprint: true, heading: true, personHeading: true, suggestedHeading: true, confirmedAt: true, confirmedById: true, movedById: true },
       orderBy: { id: 'asc' },
     });
-    // A person confirmed or moved it: theirs stays. The rest is written only where the sorted heading or the confirmation is missing
     return tools.flatMap((tool) => {
+      // A tool a person moved that Universe keeps for them since it changed (confirmed by nobody): worked out again from their own heading
+      if (tool.movedById && !tool.confirmedById && tool.confirmedAt && tool.personHeading) {
+        const heading = keepMovedTool(tool.name, tool.personHeading as Heading, tool.suggestedHeading as Heading | null, settings);
+        return tool.heading === heading ? [] : [{ tool, heading, kept: true }];
+      }
+      // A person confirmed or moved it: theirs stays. The rest is written only where the sorted heading or the confirmation is missing
       if (tool.movedById || (tool.confirmedAt && tool.confirmedById)) return [];
       const heading = sortOwnTool(tool.name, tool.suggestedHeading as Heading | null);
-      return tool.confirmedAt && tool.heading === heading ? [] : [{ tool, heading }];
+      return tool.confirmedAt && tool.heading === heading ? [] : [{ tool, heading, kept: false }];
     });
   };
   const run = async (tx: Prisma.TransactionClient): Promise<boolean> => {
@@ -91,12 +113,17 @@ export async function settleOwnAppTools(serverId: string, db?: Prisma.Transactio
     if (!todo || todo.length === 0) return false;
     const now = new Date();
     let written = 0;
-    for (const { tool, heading } of todo) {
+    for (const { tool, heading, kept } of todo) {
       // Only the tool as it was read: a person's choice that landed in between wins, and this is left to the next look
-      const done = await tx.botMcpTool.updateMany({
-        where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, suggestedHeading: tool.suggestedHeading, confirmedAt: tool.confirmedAt, confirmedById: null, movedById: null },
-        data: { heading, confirmedAt: now, confirmedById: null },
-      });
+      const done = kept
+        ? await tx.botMcpTool.updateMany({
+            where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, personHeading: tool.personHeading, suggestedHeading: tool.suggestedHeading, confirmedById: null, movedById: tool.movedById },
+            data: { heading },
+          })
+        : await tx.botMcpTool.updateMany({
+            where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, suggestedHeading: tool.suggestedHeading, confirmedAt: tool.confirmedAt, confirmedById: null, movedById: null },
+            data: { heading, confirmedAt: now, confirmedById: null },
+          });
       written += done.count;
     }
     if (written === 0) return false;
