@@ -30,7 +30,6 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals, wakeTimingForTests } from '@/lib/computer';
-import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
