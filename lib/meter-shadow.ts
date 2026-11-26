@@ -79,20 +79,23 @@ export async function compareReplyWindow(personId: string, now: Date = new Date(
   if (!window || window.startedAt.getTime() + limits.windowHours * 3_600_000 <= now.getTime()) return { since: null, today: 0, books: 0, replies: compareFigures(0, 0) };
   const since = window.startedAt;
   // Both counts from one snapshot, so a reply that is counted on one side the moment before the other is never a difference
-  const [today, books] = await prisma.$transaction(async (tx) => [
+  // A look Universe AI's vision took at an image is not a reply on either side. Its event is marked `imageRead: true`; events from before the mark
+  // have no such key, and a JSON path that is not there never matches a filter, `equals: false` and `NOT equals: true` alike. So the looks are
+  // counted with the one filter that matches only them, and taken off
+  const modelCalls = {
+    personKey: `person:${personId}`,
+    kind: 'model_call',
+    payerKind: 'universe',
+    // Work a Brick did on its own is put to its owner in the books; today's count has no person for it, so it is left out of this comparison
+    AND: [{ detail: { path: ['error'], equals: false } }, { detail: { path: ['greeting'], equals: false } }, { detail: { path: ['byOwner'], equals: false } }],
+    occurredAt: { gte: since },
+  } satisfies Prisma.MeterEventWhereInput;
+  // Both counts from one snapshot, so a reply that is counted on one side the moment before the other is never a difference
+  const [today, calls, looks] = await prisma.$transaction(async (tx) => [
     await tx.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, imageRead: false, timestamp: { gte: since } } }),
-    await tx.meterEvent.count({
-      where: {
-        personKey: `person:${personId}`,
-        kind: 'model_call',
-        payerKind: 'universe',
-        // Work a Brick did on its own is put to its owner in the books; today's count has no person for it, so it is left out of this comparison
-        AND: [{ detail: { path: ['error'], equals: false } }, { detail: { path: ['greeting'], equals: false } }, { detail: { path: ['byOwner'], equals: false } }],
-        // A look Universe AI's vision took at an image is not a reply on either side (events from before it have no such mark, and are not one)
-        NOT: { detail: { path: ['imageRead'], equals: true } },
-        occurredAt: { gte: since },
-      },
-    }),
+    await tx.meterEvent.count({ where: modelCalls }),
+    await tx.meterEvent.count({ where: { ...modelCalls, AND: [...modelCalls.AND, { detail: { path: ['imageRead'], equals: true } }] } }),
   ] as const, { isolationLevel: 'RepeatableRead' });
+  const books = calls - looks;
   return { since, today, books, replies: compareFigures(books, today) };
 }

@@ -102,6 +102,14 @@ run('a look Universe AI takes at an image, in a real database', () => {
     const compared = await compareReplyWindow(lina.id);
     expect([compared.today, compared.books, compared.replies.state]).toEqual([2, 2, 'same']);
 
+    // A reply in the books from before image looks (its event has no imageRead mark) still counts, on both sides
+    const [older] = await prisma.botsAiUsage.findMany({ where: { botId: lina.brickId, imageRead: false }, orderBy: { id: 'asc' }, take: 1 });
+    const event = await prisma.meterEvent.findFirstOrThrow({ where: { sourceRef: `bots_ai_usage:${older.id}` } });
+    const unmarked = { ...(event.detail as Record<string, never>) };
+    delete unmarked.imageRead;
+    await prisma.meterEvent.update({ where: { eventId: event.eventId }, data: { detail: unmarked } });
+    expect(await compareReplyWindow(lina.id)).toMatchObject({ today: 2, books: 2 });
+
     // A full window of image looks alone leaves every reply there: 30 is the usual window
     const kai = await person('kai');
     await prisma.replyWindow.create({ data: { key: `ua:person:${kai.id}`, startedAt: new Date(Date.now() - 60 * 60_000) } });
