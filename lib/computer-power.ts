@@ -74,27 +74,41 @@ export function isTransactionTimeout(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028';
 }
 
+/** The computer's row was taken by someone else when a pause asked for it without waiting (`takeRowOrYield`: Postgres 55P03, lock not available). It wrote nothing: the transaction is rolled back and the pause is tried again. */
+export function isRowBusy(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message} ${JSON.stringify((error as { meta?: unknown }).meta ?? '')} ${String((error as { cause?: unknown }).cause ?? '')}` : '';
+  return /55P03|could not obtain lock on row/i.test(text);
+}
+
+/**
+ * The first thing a pause that will write the Brick computer's row does with it, before it settles the room (which takes the one lock every meter step of every person shares) and before it writes anything: take the row, WITHOUT
+ * waiting. A take-over leader's stop holds that row for up to 120 s, and a statement that waits for it while the transaction holds the meter lock or a job lock stalls everyone behind those locks (Prisma's own timeout does not
+ * interrupt a blocked statement). A pause that does not get the row yields at once (`isRowBusy`): its transaction is rolled back, and `pauseWhenRowFree` waits for the row holding nothing and tries again. A pause that never
+ * writes the row (the person holds the screen, a kept ending, a job in line) never reaches this, so it never waits. It also cannot wait in a cycle with a Restart first, which takes the row and then the jobs.
+ */
+export async function takeRowOrYield(tx: Db, botId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE NOWAIT`;
+}
+
 /** How many times a pause is tried when the row is taken again between the wait and its transaction (a second leader's stop right behind the first). */
 const ROW_TRIES = 3;
 
 /**
  * Runs the transaction of a pause (`run`: one `prisma.$transaction`, nothing after it, nothing sent to a provider) so that a take-over leader's stop on the Brick computer's row never makes the pause fail with a timeout
- * (post-0.5.0: pause during take-over). `waitFirst`: the caller knows the transaction will write the row (an explicit pause), so the row is waited for before it opens; otherwise (a renewal, which writes the row only if the room is
- * refused) the first try goes straight in and the wait comes only after it timed out. A try that timed out wrote nothing, so trying again is the same pause. Any other error is the caller's, and a third timeout is too.
+ * (post-0.5.0: pause during take-over). The first try goes straight in: the pause takes the row without waiting (`takeRowOrYield`) the moment it knows it will write it. One that did not get the row (or timed out) wrote nothing:
+ * the row is waited for here, outside any transaction, holding nothing, and the same pause is tried again. Any other error is the caller's, and a third failure is too.
  *
  * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives `at`, the caller's `now` moved on by the real time spent here (Sentry on #1040: a stretch ended at
  * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
  */
-export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (at: Date) => Promise<T>, waitFirst = true): Promise<T> {
+export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (at: Date) => Promise<T>): Promise<T> {
   const began = Date.now();
-  let wait = waitFirst;
   for (let attempt = 1; ; attempt++) {
-    if (wait) await untilRowFree(botId);
     try {
       return await run(new Date(now.getTime() + (Date.now() - began)));
     } catch (error) {
-      if (!isTransactionTimeout(error) || attempt >= ROW_TRIES) throw error;
-      wait = true;
+      if (!(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES) throw error;
+      await untilRowFree(botId);
     }
   }
 }

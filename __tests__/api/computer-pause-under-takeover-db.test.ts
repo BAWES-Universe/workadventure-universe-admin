@@ -23,7 +23,8 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { moveJobFirst, pauseJob, pauseJobAs } from '@/lib/computer-job-controls';
 import { pauseForLimit } from '@/lib/computer-limit-pause';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
-import { isTransactionTimeout, pauseWhenRowFree, setRowLockWaitForTests, untilRowFree } from '@/lib/computer-power';
+import * as Sentry from '@sentry/nextjs';
+import { isRowBusy, isTransactionTimeout, pauseWhenRowFree, setRowLockWaitForTests, takeRowOrYield, untilRowFree } from '@/lib/computer-power';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -181,7 +182,7 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       await leader.release();
     }
     expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1 });
-    // The first try waited 15 s inside its transaction and timed out, the second waited for the row: both waits are priced (300 s asked, written about 317 s in)
+    // The pause yielded at once and the renewal waited for the row outside any transaction: the wait is priced (300 s asked, written about 317 s in)
     expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(316);
     expect(Number((await jobOf(job.id)).secondsBilled)).toBeLessThanOrEqual(322);
     expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /P2028|expired transaction/i.test(line))).toEqual([]);
@@ -256,6 +257,87 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /40P01|deadlock|expired transaction|P2028/i.test(line))).toEqual([]);
   }, 80_000);
 
+  it('Opus F1: a refused renewal waiting behind a leader\'s stop never holds the meter lock: an unrelated Brick\'s renewal answers at once meanwhile, and the refused one still pauses afterwards', async () => {
+    const { sara, job } = await running('f1a');
+    const { job: other } = await running('f1b');
+    await settings(1_000);
+    const leader = await leaderHolds(sara.brickId, 17_000);
+    try {
+      const refused = renewJob(job.id, new Date(job.stretchStarted!.getTime() + 300_000));
+      await sleep(3_000);
+      const asked = Date.now();
+      await renewJob(other.id, new Date(other.stretchStarted!.getTime() + 60_000));
+      expect(Date.now() - asked).toBeLessThan(2_000);
+      expect(await refused).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+    } finally {
+      await leader.release();
+    }
+    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1 });
+  }, 80_000);
+
+  it('Opus F2: in a real take-over the jobs are the person\'s before the stop, so the person\'s Pause and a "do this first" answer `taken_over` at once, not after the leader\'s whole hold', async () => {
+    const { sara, job } = await running('f2');
+    await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'waiting', control: 'person' } });
+    const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Queued', writes: true }, NOW);
+    if (!queued.ok) throw new Error('no job');
+    const leader = await leaderHolds(sara.brickId, 17_000);
+    try {
+      const asked = Date.now();
+      const paused = await pauseJob(sara.brickId, sara.id, job.id, new Date(job.stretchStarted!.getTime() + 60_000));
+      expect(Date.now() - asked).toBeLessThan(2_000);
+      expect(paused).toMatchObject({ ok: false, reason: 'taken_over' });
+      const first = Date.now();
+      expect(await moveJobFirst(sara.brickId, sara.id, queued.job.id, { pauseRunning: true }, NOW)).toMatchObject({ ok: false, reason: 'taken_over' });
+      expect(Date.now() - first).toBeLessThan(2_000);
+      // A job in line has no row to write: pausing it does not wait either
+      const inLine = Date.now();
+      await pauseJob(sara.brickId, sara.id, queued.job.id, NOW);
+      expect(Date.now() - inLine).toBeLessThan(2_000);
+    } finally {
+      await leader.release();
+    }
+  }, 60_000);
+
+  it('Opus F3: a Restart first holding the row and wanting the job, and a pause holding the job and wanting the row, never deadlock (the pause yields): both finish with no 40P01', async () => {
+    const { sara, job } = await running('f3');
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    let restarted = false;
+    const restart = prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+        await sleep(1_500);
+        await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" WHERE "id" = ${job.id}`;
+        restarted = true;
+      },
+      { timeout: 60_000 },
+    );
+    await sleep(300);
+    const paused = await pauseJobAs(job.id, 'person', new Date(job.stretchStarted!.getTime() + 20_000));
+    await restart;
+    expect(restarted).toBe(true);
+    expect(paused).toMatchObject({ ok: true, kind: 'held' });
+    expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /40P01|deadlock/i.test(line))).toEqual([]);
+  }, 60_000);
+
+  it('Opus F4: a limit pause that finds the row taken on every try is seen in Sentry, and the job keeps running', async () => {
+    const { job } = await running('f4');
+    const real = prisma.$transaction.bind(prisma);
+    let calls = 0;
+    // Tries 1, 2 and 3 fail with a timeout; the waits between them (calls 2 and 4) are the real ones
+    jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+      calls++;
+      if (calls % 2 === 1 && calls <= 5) return Promise.reject(new Prisma.PrismaClientKnownRequestError('Transaction API error: timeout', { code: 'P2028', clientVersion: 'test' }));
+      return (real as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const answered = await pauseForLimit(job.id, 'allowance', new Date(job.stretchStarted!.getTime() + 45_000));
+    jest.restoreAllMocks();
+    expect(answered).toBe('not');
+    expect(errors).toHaveBeenCalled();
+    expect(Sentry.captureException).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tags: expect.objectContaining({ step: 'limit-pause' }) }));
+    expect(await jobOf(job.id)).toMatchObject({ status: 'running', pauses: 0 });
+  }, 60_000);
+
   describe('the wait itself', () => {
     it('untilRowFree waits for a held row and holds nothing afterwards: the row can be locked at once when it returns', async () => {
       const sara = await owner('until');
@@ -292,16 +374,25 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       expect(tries).toHaveBeenCalledTimes(3);
     });
 
-    it('with waitFirst false the first try goes straight in (a renewal that does not pause never waits)', async () => {
-      const sara = await owner('direct');
+    it('a pause that asks for the row while another holds it yields at once instead of waiting (Postgres 55P03), and the error is recognised as a busy row', async () => {
+      const sara = await owner('nowait');
       const leader = await leaderHolds(sara.brickId, 3_000);
       try {
         const began = Date.now();
-        expect(await pauseWhenRowFree(sara.brickId, NOW, async () => 'done', false)).toBe('done');
+        const failed = await prisma.$transaction((tx) => takeRowOrYield(tx, sara.brickId), { timeout: 10_000, maxWait: 10_000 }).catch((error: unknown) => error);
         expect(Date.now() - began).toBeLessThan(1_000);
+        expect(isRowBusy(failed)).toBe(true);
+        expect(isRowBusy(new Error('something else'))).toBe(false);
       } finally {
         await leader.release();
       }
     }, 30_000);
+
+    it('a row that was busy is waited for and the same pause tried again', async () => {
+      const sara = await owner('busyretry');
+      const tries = jest.fn().mockRejectedValueOnce(new Error('could not obtain lock on row in relation "brick_computers"')).mockResolvedValueOnce('paused');
+      expect(await pauseWhenRowFree(sara.brickId, NOW, tries)).toBe('paused');
+      expect(tries).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -25,7 +25,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { brickOf, computerView, controlInternals, provedAtOf, provedSecondsOf, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
-import { pauseWhenRowFree } from '@/lib/computer-power';
+import { pauseWhenRowFree, takeRowOrYield } from '@/lib/computer-power';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { revokeJobTokens } from '@/lib/computer-token';
 import { settleRoomIn } from '@/lib/meter-allowance';
@@ -256,6 +256,8 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
     const live = await tx.computerJobToken.count({ where: { id: options.key, jobId, revokedAt: null, expiresAt: { gt: now }, OR: [{ ownerEpoch: row.ownerEpoch }, ...(row.ownerEpoch === 0 ? [{ ownerEpoch: null }] : [])] } });
     if (live === 0) return { kind: 'key_gone' };
   }
+  // From here the pause writes the Brick computer's row: it is taken now, without waiting, before the room is settled (post-0.5.0: pause during take-over; see `takeRowOrYield`)
+  await takeRowOrYield(tx, row.botId);
   const job = await tx.computerJob.findUniqueOrThrow({
     where: { id: jobId },
     select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true, awakeProvedAt: true },
@@ -380,7 +382,7 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   if (!first) return { ok: false, reason: 'not_found' };
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-  // A take-over leader's stop may hold the computer's row, which this pause writes: it is waited for before the transaction opens, never inside it (post-0.5.0: pause during take-over)
+  // A take-over leader's stop may hold the computer's row, which this pause writes: the pause yields at once when it cannot take it and is tried again once the row is free (`pauseWhenRowFree`)
   const decided = await pauseWhenRowFree(first.botId, now, (at) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, at, provider, options), TX));
   return afterPause(jobId, decided, now, options);
 }
@@ -443,7 +445,7 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
     if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
-    // The computer's row is waited for before the transaction opens (a take-over leader's stop may hold it): see `pauseWhenRowFree`
+    // A take-over leader's stop may hold the computer's row: the pause yields and is tried again once it is free (see `pauseWhenRowFree`)
     const done = await pauseWhenRowFree(botId, now, (at) => prisma.$transaction(async (tx) => {
       // The job's locks first (the order used everywhere), then the command's row: a copy of this tap waits here for the first, then finds its row
       if (!(await lockJob(tx, jobId))) return { decided: { kind: 'not_found' } as PauseDecision };
@@ -583,7 +585,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
       return { refused: error.reason };
     }
   }, TX);
-  // Pausing what holds the computer writes the computer's row, which a take-over leader's stop may hold: it is waited for before the line is taken, never while holding it (post-0.5.0: pause during take-over). Without a pause the row is not written
+  // Pausing what holds the computer writes the computer's row, which a take-over leader's stop may hold: a pause that cannot take it yields at once (the line is let go) and is tried again once it is free. Without a pause the row is not written
   const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, now, decide) : decide(now));
   if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pendingOutcomeOf(under!.command, jobId), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };

@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { controlInternals, providerFor } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
@@ -42,13 +43,15 @@ export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', no
     if (!first) return 'not';
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-    // The computer's row is waited for before the transaction opens (a take-over leader's stop may hold it): see `pauseWhenRowFree`
+    // A take-over leader's stop may hold the computer's row: the pause yields and is tried again once it is free (see `pauseWhenRowFree`)
     const decided = await pauseWhenRowFree(first.botId, now, (at) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, at, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 }));
     if (decided.kind !== 'held') return 'not';
     await afterPause(jobId, decided, now);
     return 'paused';
   } catch (error) {
     console.error('[Computer] Could not pause a job its month or a limit stopped:', error instanceof Error ? error.message : 'unknown');
+    // Every try found the computer's row taken (or timed out): the job keeps running and the next refused call tries again, but it is seen (Opus on #1040, F4)
+    Sentry.captureException(error, { tags: { area: 'computer', step: 'limit-pause' } });
     return 'not';
   }
 }

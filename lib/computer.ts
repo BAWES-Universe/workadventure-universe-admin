@@ -2295,7 +2295,7 @@ export async function renewJob(
     if (lost !== 'taken_over') return lost;
     look = 'unknown';
   }
-  // The renewal writes the computer's row only when the room is refused and the job pauses; a take-over leader's stop may hold it then. The first try goes straight in; one that timed out waits for the row outside the transaction and tries again
+  // The renewal writes the computer's row only when the room is refused and the job pauses; a take-over leader's stop may hold it then. The pause yields at once when it cannot take the row (before it settles anything), and the renewal waits for the row outside any transaction and tries again
   const decide = (at: Date) => prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
@@ -2328,7 +2328,7 @@ export async function renewJob(
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
-  const decided = await pauseWhenRowFree(first.botId, now, decide, false);
+  const decided = await pauseWhenRowFree(first.botId, now, decide);
   if (decided.kind === 'over') {
     const again = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
     return again && isOver(again.status) && again.endedBy === 'unanswered' ? { ok: false, reason: 'unanswered' } : { ok: false, reason: 'over' };
@@ -2411,7 +2411,7 @@ async function awakeLookFor(job: { status: string; stretchStarted: Date | null; 
  */
 async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
   const controls = await import('@/lib/computer-job-controls');
-  // A take-over leader's stop may hold the computer's row, which this pause writes: it is waited for before the transaction opens (post-0.5.0: pause during take-over)
+  // A take-over leader's stop may hold the computer's row, which this pause writes: it yields at once when it cannot take it, and is tried again once the row is free (`pauseWhenRowFree`)
   const decide = (at: Date) => prisma.$transaction(
     async (tx) => {
       const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
