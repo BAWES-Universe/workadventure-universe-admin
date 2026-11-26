@@ -22,7 +22,8 @@ const bodySchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('activity'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
   z.object({ action: z.literal('pause'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
   z.object({ action: z.literal('resume'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
-  z.object({ action: z.literal('cancel'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
+  // `expected`: the state the person was asked about (a job that had not started needs no question): the cancel is refused as `started` if the job has started since
+  z.object({ action: z.literal('cancel'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema, expected: z.literal('not_started').optional() }).strict(),
   z.object({ action: z.literal('first'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema, pauseRunning: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('note'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema, text: z.string().trim().min(1).max(NOTE_MAX) }).strict(),
 ]);
@@ -38,6 +39,7 @@ const bodySchema = z.discriminatedUnion('action', [
  *  - `list`: `{ ok: true, view }`, the computer as the page shows it (the job that has the machine, the line with paused jobs, the month).
  *  - `activity` (jobId): `{ ok: true, job: { id, title, status }, steps: [{ seq, label, at }] }`, oldest first.
  *  - `pause`, `resume`, `cancel` (jobId), `first` (jobId, `pauseRunning`): `{ ok: true, view }`.
+ *  - `cancel` with `expected: 'not_started'` (the person was told the job had not started, so nothing was asked): cancelled only while that is still true, decided in the very write that ends it. A job that has started, been paused or done a step since is NOT cancelled: HTTP 200 `{ ok: false, reason: 'started' }` (kept under the command id, so a retry answers the same). Left out, a cancel behaves as it always did.
  *  - `note` (jobId, text): `{ ok: true, view, note: { seq, delivery } }`, delivery: now, answer, after_hand_back, when_it_starts.
  *  - `stop`: ends everything on the computer, paused jobs included: `{ ok: true, view }`.
  *  - `stop_all` (confirmedJobIds, round 8 D2; `stop` takes it too): ends ONLY the live jobs in the set the person confirmed (1 to 50 ids; ids over or unknown are skipped) on the FIRST dispatch:
@@ -105,7 +107,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       case 'resume':
         return answer(await resumeJob(id, ownerId, body.jobId, new Date(), control));
       case 'cancel': {
-        const cancelled = await cancelJob(id, ownerId, body.jobId, new Date(), control);
+        // Without an expectation the call is exactly the one it always was
+        const cancelled = body.expected ? await cancelJob(id, ownerId, body.jobId, new Date(), control, body.expected) : await cancelJob(id, ownerId, body.jobId, new Date(), control);
         // The job is still live after the bounded tries: nothing is kept as done, and the same command id asked again ends it, like a Stop that is `not_ended` (CodeRabbit on #1025, N11)
         if (!cancelled.ok && cancelled.reason === 'not_ended') return NextResponse.json({ ok: false, reason: 'not_ended', retry: true }, { status: 503 });
         return answer(cancelled);
