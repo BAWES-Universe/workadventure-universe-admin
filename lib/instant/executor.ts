@@ -869,7 +869,8 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
     if (line && !run.providerLogId) await tx.instantRun.update({ where: { id: run.id }, data: { providerLogId: line.id } });
     if (line && line.chargeMicros !== null) {
       if (run.state === 'succeeded') await settleSuccess({ ...run, providerLogId: line.id }, tx, line.chargeMicros, 'measured', limits, ctx);
-      else await settleProvider(run, tx, line.chargeMicros, 'measured', now);
+      // A request Composio would not take never ran: what its log says it charged is all that is owed, with no call fee on top
+      else await settleProvider(run, tx, line.chargeMicros, 'measured', now, { nothingRan: run.reason === 'invalid_request' });
       return;
     }
     if (now >= deadline) {

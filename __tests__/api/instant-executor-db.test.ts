@@ -725,7 +725,14 @@ run('the bounded Instant executor, in a real database', () => {
       p.script.runs.push({ kind: 'invalid', status: 400, code: 'Bad' });
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
       expect(outcome).toMatchObject({ status: 'failed', reason: 'invalid_request' });
-      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'released', providerState: 'pending', reason: 'invalid_request' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row).toMatchObject({ customerState: 'released', providerState: 'pending', reason: 'invalid_request' });
+      // The log settles it at what it says was charged, with no call fee on top: nothing ran
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', 0)]);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 60 * MIN) });
+      expect(await runOf(row.id)).toMatchObject({ providerState: 'settled', providerBasis: 'measured', customerState: 'released' });
+      expect(Number((await runOf(row.id)).providerMicros)).toBe(0);
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('details Composio would not take never count toward the failure rate, and only one waits at a time for a person', async () => {
