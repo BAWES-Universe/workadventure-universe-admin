@@ -1423,6 +1423,9 @@ model BotMcpServer {
   // lost fields above are then read from the connection and never copied, and what is kept here is the Brick's own: its
   // four headings, its tools and their confirmations, its switch. Null for every app set up on a bot as before.
   connectionId       String?   @map("connection_id")
+  // A ready-made App's grant whose rows are the App's actions (lib/app-actions): the version of the App's list they were made from. Null
+  // until a reader that knows App actions (GET .../tools?actions=1) first reads it: until then its rows stay as the bot server saved them.
+  appActionsVersion  Int?      @map("app_actions_version")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1892,6 +1895,9 @@ model BotMcpTool {
   movedById       String?   @map("moved_by_id")
   confirmedById   String?   @map("confirmed_by_id")
   confirmedAt     DateTime? @map("confirmed_at")
+  // An App action's own choice over its heading's (rightAway | asksFirst | off). Null follows the heading. Only on a ready-made App's
+  // grant, whose rows are the App's actions (lib/app-actions): a bot's own server never has one.
+  setting         String?   @db.VarChar(20)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
@@ -1901,6 +1907,53 @@ model BotMcpTool {
 
   @@unique([serverId, name])
   @@map("bot_mcp_tools")
+}
+
+// What a ready-made App can do (lib/app-actions): its actions as the provider lists them, each sorted by Universe once under one of the four
+// headings, shared by every person and Brick. A Brick's grant of the App holds one tool row per action (BotMcpTool), made from this list.
+model AppAction {
+  id          String   @id @default(uuid())
+  toolkit     String   @db.VarChar(60)
+  slug        String   @db.VarChar(255)
+  // Plain words for people, made from the slug ("Fetch emails"), and the provider's own description with its name taken out
+  title       String   @db.VarChar(255)
+  description String?  @db.Text
+  // looksUp | makesNew | changesThings | deletesOrSends
+  heading     String   @db.VarChar(20)
+  // What decided the heading: name (a send, delete, pay... in the slug) | tag (the provider's own tag) | sorter (the small model) |
+  // fallback (nothing yet: the strictest heading until the sorter answers)
+  source      String   @db.VarChar(20)
+  // The provider's version of the action when it was last read
+  catalogVersion String? @map("catalog_version") @db.VarChar(60)
+  // Where it is in the provider's list: a grant keeps the first 500 by this order
+  position    Int
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([toolkit, slug])
+  @@index([toolkit, position])
+  @@index([source])
+  @@map("app_actions")
+}
+
+// When each App's list of actions was last read from the provider, and who is reading it now (one reader at a time, across Orbit's processes)
+model AppActionCatalog {
+  toolkit      String    @id @db.VarChar(60)
+  refreshedAt  DateTime? @map("refreshed_at")
+  // A refresh in progress holds this until it ends or the time passes
+  claimedUntil DateTime? @map("claimed_until")
+  // After a read that failed (or a list not believed yet): the provider is not asked again before this
+  retryAfter   DateTime? @map("retry_after")
+  actionCount  Int       @default(0) @map("action_count")
+  // Goes up whenever an action of the App is added, removed or sorted differently: a grant made from this version needs no new look
+  version      Int       @default(0)
+  // Since when the provider keeps answering a list much shorter than the one kept: once that lasts, the shorter list is believed
+  shrunkSince  DateTime? @map("shrunk_since")
+  // How many reads in a row since then gave the shorter list
+  shrunkReads  Int       @default(0) @map("shrunk_reads")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("app_action_catalogs")
 }
 
 // AI Providers
