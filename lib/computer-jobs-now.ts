@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { cleanStepLabel } from '@/lib/computer-redact';
 import { cleanEndNote, fileNameOf, filesMadeBy } from '@/lib/computer-report';
@@ -55,11 +56,23 @@ const LIVE = ['running', 'waiting', 'queued'];
 
 /** The jobs of `personId` on `botId` now: the live ones in the order the line takes them, then the latest few that ended (within a week), newest first. */
 export async function jobsNow(botId: string, personId: string, now: Date = new Date()): Promise<JobsNow> {
-  const liveRows = await prisma.computerJob.findMany({
-    where: { botId, personId, status: { in: LIVE } },
-    orderBy: [{ queueRank: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    select: { title: true, status: true, queuedFor: true, waitingFor: true, control: true, stepDone: true, stepTotal: true, stepLabel: true, createdAt: true, startedAt: true },
-  });
+  // Both lists from one snapshot: a job that ends between two reads must not show as both working and finished
+  const [liveRows, endedRows] = await prisma.$transaction(
+    [
+      prisma.computerJob.findMany({
+        where: { botId, personId, status: { in: LIVE } },
+        orderBy: [{ queueRank: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        select: { title: true, status: true, queuedFor: true, waitingFor: true, control: true, stepDone: true, stepTotal: true, stepLabel: true, createdAt: true, startedAt: true },
+      }),
+      prisma.computerJob.findMany({
+        where: { botId, personId, status: { in: ['done', 'failed', 'stopped'] }, endedAt: { gte: new Date(now.getTime() - JOBS_NOW_ENDED_WITHIN_MS) } },
+        orderBy: [{ endedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        take: JOBS_NOW_ENDED_MAX,
+        select: { id: true, title: true, status: true, endedBy: true, endedAt: true, endNote: true, writes: true, endFiles: true, startFiles: true },
+      }),
+    ],
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   // A job that holds the computer comes first, as the bar shows it
   const holding = (status: string) => (status === 'running' || status === 'waiting' ? 0 : 1);
   const live: LiveJobNow[] = liveRows
@@ -77,12 +90,6 @@ export async function jobsNow(botId: string, personId: string, now: Date = new D
       askedAt: row.createdAt,
       startedAt: row.startedAt,
     }));
-  const endedRows = await prisma.computerJob.findMany({
-    where: { botId, personId, status: { in: ['done', 'failed', 'stopped'] }, endedAt: { gte: new Date(now.getTime() - JOBS_NOW_ENDED_WITHIN_MS) } },
-    orderBy: [{ endedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
-    take: JOBS_NOW_ENDED_MAX,
-    select: { id: true, title: true, status: true, endedBy: true, endedAt: true, endNote: true, writes: true, endFiles: true, startFiles: true },
-  });
   const handedRows =
     endedRows.length === 0
       ? []

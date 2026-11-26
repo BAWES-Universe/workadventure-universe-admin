@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+// The real lookup of who a look is for, behind a jest.fn: one test makes it fail
+jest.mock('@/lib/usage-person', () => {
+  const actual = jest.requireActual('@/lib/usage-person');
+  return { ...actual, resolveUsagePerson: jest.fn((...args: unknown[]) => actual.resolveUsagePerson(...args)) };
+});
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 
 import { NextRequest } from 'next/server';
@@ -18,6 +23,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { giveComputer } from '@/lib/computer';
 import { JOBS_NOW_ENDED_MAX, jobsNow } from '@/lib/computer-jobs-now';
 import { GET } from '@/app/api/bots/[id]/computer-jobs/route';
+import { resolveUsagePerson } from '@/lib/usage-person';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -107,6 +113,23 @@ run('a Brick sees its own computer jobs, live and lately ended, in a real databa
     for (let n = 1; n <= JOBS_NOW_ENDED_MAX + 1; n++) await job(khalid, `Job ${n}`, { status: 'done', endedAt: minutes(-60 + n) });
     const now = await jobsNow(khalid.brickId, khalid.id, NOW);
     expect(now.ended.map((one) => one.title)).toEqual(['Job 4', 'Job 3', 'Job 2']);
+  });
+
+  it('an ended job older than a week is not told, even when there is room for it', async () => {
+    const khalid = await person('k-old');
+    await job(khalid, 'Old one', { status: 'done', endedAt: new Date(NOW.getTime() - 8 * 24 * 60 * 60_000) });
+    await job(khalid, 'New one', { status: 'done', endedAt: minutes(-5) });
+    const { jobs } = await look(khalid);
+    expect(jobs.ended.map((one: { title: string }) => one.title)).toEqual(['New one']);
+  });
+
+  it('a look whose person could not be looked up is a retryable 503, never "no jobs"', async () => {
+    const khalid = await person('k-lookup');
+    await job(khalid, 'Visa form', { status: 'running', startedAt: minutes(-1) });
+    (resolveUsagePerson as jest.Mock).mockResolvedValueOnce({ personId: null, lookupFailed: true });
+    const response = await GET(new NextRequest(`http://orbit.test/api/bots/${khalid.brickId}/computer-jobs?userId=${encodeURIComponent(khalid.uuid)}&jobs=1`), { params: Promise.resolve({ id: khalid.brickId }) });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ retry: true });
   });
 
   it("another person's look at this Brick sees none of its owner's jobs", async () => {
