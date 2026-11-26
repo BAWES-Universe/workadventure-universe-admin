@@ -914,6 +914,18 @@ describe('getting a machine ready for a job', () => {
       expect(asks).toBe(refusedAt);
     });
 
+    it('ready: true before and false right after a start: the start was sent once, WakeReplaced is thrown, and no health poll, universe-up or mark follows (freshBoot start, then the restart a part asked for)', async () => {
+      for (const refusedAt of [3, 6]) {
+        const { w, p } = await prepare();
+        let asks = 0;
+        await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks !== refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+        const at = w.calls.lastIndexOf('start:m1');
+        expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(refusedAt === 3 ? 1 : 2);
+        // Nothing follows the start: no health poll (getInstance), no exec of any kind, no other power call
+        expect(w.calls.slice(at + 1)).toEqual([]);
+      }
+    });
+
     it('ready: a start that still owns its wake asks before each of the four calls and after each start, and every call is sent once', async () => {
       const { w, p } = await prepare();
       const order: string[] = [];

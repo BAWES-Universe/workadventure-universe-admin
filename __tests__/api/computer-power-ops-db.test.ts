@@ -754,6 +754,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         expect(await settleTurnHold(sara.brickId)).toBe(true);
         expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
         const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+        const callsBefore = fake.calls.length;
         // The sender resumes: its start reaches the machine (awake), and it is told it lost its wake as soon as the request returned
         fake.heldAfterCheck.splice(0).forEach((release) => release());
         await until(() => fake.calls.filter((call) => call.name === 'stop').length > stopsBefore, 4_000);
@@ -761,8 +762,12 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         // Nothing waited for the machine to be healthy under a wake that was lost
         expect(healthHeld).toEqual([]);
         await starting;
+        // After the late start, the provider is asked for exactly one thing: one stop (no readiness step, no second start)
+        expect(fake.calls.slice(callsBefore).map((call) => call.name)).toEqual(['stop']);
+        expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+        // The row is proved stopped, the hold stays lifted, nothing was written `working` or `broken`, no job was made ready or failed
         expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
-        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, title: 'A', status: 'failed' } })).toBe(0);
+        expect(await prisma.computerJob.findMany({ where: { botId: sara.brickId, title: 'A' }, select: { status: true, stretchStarted: true } })).toEqual([{ status: 'done', stretchStarted: null }]);
         fake.afterStartForTests = null;
       }, 30_000);
 
