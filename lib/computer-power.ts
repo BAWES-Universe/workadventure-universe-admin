@@ -90,13 +90,22 @@ export async function takeRowOrYield(tx: Db, botId: string): Promise<void> {
   await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE NOWAIT`;
 }
 
-/** How many times a pause is tried when the row is taken again between the wait and its transaction (a second leader's stop right behind the first). */
-const ROW_TRIES = 3;
+/**
+ * How long a pause keeps trying when the row is taken again between the wait and its transaction (a second leader's stop right behind the first, wake beats): longer than the longest hold of the row (a leader's stop holds it up to 120 s) and
+ * the wait that follows it, so a pause that meets one busy row after another is not given up on after three tries (Sentry on #1040: it would end in an error where the person only had to wait). Every try waits for the row first, holding nothing, so
+ * trying again never spins. A count also bounds it.
+ */
+let rowRetryBudgetMs = 330_000;
+const ROW_TRIES_MAX = 25;
+/** Test seam: the time a pause keeps trying (null restores the real one). */
+export function setRowRetryBudgetForTests(ms: number | null): void {
+  rowRetryBudgetMs = ms === null ? 330_000 : ms;
+}
 
 /**
  * Runs the transaction of a pause (`run`: one `prisma.$transaction`, nothing after it, nothing sent to a provider) so that a take-over leader's stop on the Brick computer's row never makes the pause fail with a timeout
  * (post-0.5.0: pause during take-over). The first try goes straight in: the pause takes the row without waiting (`takeRowOrYield`) the moment it knows it will write it. One that did not get the row (or timed out) wrote nothing:
- * the row is waited for here, outside any transaction, holding nothing, and the same pause is tried again. Any other error is the caller's, and a third failure is too.
+ * the row is waited for here, outside any transaction, holding nothing, and the same pause is tried again, for as long as the budget lasts (`rowRetryBudgetMs`) and at most `ROW_TRIES_MAX` times. Any other error is the caller's, and so is the last failure of a pause that used its budget up.
  *
  * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives a `clock`: the caller's `now` moved on by the real time spent since the ask, for the pause to read once it holds its locks (Sentry and CodeRabbit on #1040: a stretch ended at
  * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
@@ -110,7 +119,7 @@ export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock:
     try {
       return await run(clock);
     } catch (error) {
-      if (!(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES) throw error;
+      if (!(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs) throw error;
       await untilRowFree(botId);
     }
   }

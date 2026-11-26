@@ -24,7 +24,7 @@ import { moveJobFirst, pauseJob, pauseJobAs } from '@/lib/computer-job-controls'
 import { pauseForLimit } from '@/lib/computer-limit-pause';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
 import * as Sentry from '@sentry/nextjs';
-import { isRowBusy, isTransactionTimeout, pauseWhenRowFree, setRowLockWaitForTests, takeRowOrYield, untilRowFree } from '@/lib/computer-power';
+import { isRowBusy, isTransactionTimeout, pauseWhenRowFree, setRowLockWaitForTests, setRowRetryBudgetForTests, takeRowOrYield, untilRowFree } from '@/lib/computer-power';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -323,10 +323,10 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     const { job } = await running('f4');
     const real = prisma.$transaction.bind(prisma);
     let calls = 0;
-    // Tries 1, 2 and 3 fail with a timeout; the waits between them (calls 2 and 4) are the real ones
+    // Every try fails with a timeout (until the count that bounds them is used up); the waits between them (the even calls) are the real ones
     jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
       calls++;
-      if (calls % 2 === 1 && calls <= 5) return Promise.reject(new Prisma.PrismaClientKnownRequestError('Transaction API error: timeout', { code: 'P2028', clientVersion: 'test' }));
+      if (calls % 2 === 1) return Promise.reject(new Prisma.PrismaClientKnownRequestError('Transaction API error: timeout', { code: 'P2028', clientVersion: 'test' }));
       return (real as (...a: unknown[]) => unknown)(...args);
     }) as never);
     const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -408,12 +408,32 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       expect(other).toHaveBeenCalledTimes(1);
     });
 
-    it('a third timeout is the caller\'s: three tries at most', async () => {
-      const sara = await owner('three');
-      const tries = jest.fn().mockRejectedValue(timeout());
-      const failed = await pauseWhenRowFree(sara.brickId, NOW, tries).catch((error: unknown) => error);
-      expect(isTransactionTimeout(failed)).toBe(true);
-      expect(tries).toHaveBeenCalledTimes(3);
+    it('Sentry on #1040: a row that is taken again and again (more than three times) is waited for each time and the pause still happens, instead of ending in an error after the third try', async () => {
+      const sara = await owner('many');
+      const busy = () => new Error('could not obtain lock on row in relation "brick_computers"');
+      const tries = jest.fn().mockRejectedValueOnce(timeout()).mockRejectedValueOnce(busy()).mockRejectedValueOnce(timeout()).mockRejectedValueOnce(busy()).mockRejectedValueOnce(timeout()).mockResolvedValueOnce('paused');
+      expect(await pauseWhenRowFree(sara.brickId, NOW, tries)).toBe('paused');
+      expect(tries).toHaveBeenCalledTimes(6);
+    });
+
+    it('a pause that keeps failing is the caller\'s once its time is up (and never more than the count): the last failure is thrown', async () => {
+      const sara = await owner('budget');
+      setRowRetryBudgetForTests(80);
+      try {
+        const slow = jest.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          throw timeout();
+        });
+        const failed = await pauseWhenRowFree(sara.brickId, NOW, slow).catch((error: unknown) => error);
+        expect(isTransactionTimeout(failed)).toBe(true);
+        expect(slow).toHaveBeenCalledTimes(2);
+      } finally {
+        setRowRetryBudgetForTests(null);
+      }
+      const forever = jest.fn().mockRejectedValue(timeout());
+      const failedAlways = await pauseWhenRowFree(sara.brickId, NOW, forever).catch((error: unknown) => error);
+      expect(isTransactionTimeout(failedAlways)).toBe(true);
+      expect(forever).toHaveBeenCalledTimes(25);
     });
 
     it('a pause that asks for the row while another holds it yields at once instead of waiting (Postgres 55P03), and the error is recognised as a busy row', async () => {
