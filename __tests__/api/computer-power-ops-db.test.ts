@@ -29,7 +29,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
-import { controlInternals } from '@/lib/computer';
+import { controlInternals, wakeTimingForTests } from '@/lib/computer';
 import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
@@ -132,6 +132,8 @@ const until = async (what: () => Promise<boolean> | boolean, ms = 5_000) => {
   }
 };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The watch time of an abandoned wake's turn hold has passed (the hold's date is now behind the clock). */
+const watchPassed = (sara: { brickId: string }) => prisma.$executeRaw`UPDATE "brick_computers" SET "turn_unproven_since" = ((NOW() AT TIME ZONE 'UTC') - interval '1 second') WHERE "bot_id" = ${sara.brickId} AND "turn_unproven_since" IS NOT NULL`;
 const machineOf = async (sara: Owner) => prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
 const callNames = () => fake.calls.map((call) => call.name).filter((name) => name === 'stop' || name === 'wake');
 
@@ -557,8 +559,18 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state, turnUnprovenSince: NOW } });
       await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
       const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
-      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      // The stop of an abandoned wake is proved, and the hold stays for the watch time: the wake call that was in flight may still land
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+      const held = await machineOf(sara);
+      expect(held.machine).toBe('stopped');
+      expect(held.turnUnprovenSince!.getTime()).toBeGreaterThan(Date.now() + 30_000);
+      // Inside the watch time the machine is stopped again every pass and the hold stays; once it has passed, one more proved stop lifts it
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 2);
+      await watchPassed(sara);
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 3);
       expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
     });
 
@@ -577,15 +589,78 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
       await sleep(600);
-      expect(await settleTurnHold(sara.brickId)).toBe(true);
-      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: expect.any(Date) });
       expect((await machineOf(sara)).wakeEpoch).toBeGreaterThan(ticket);
       // The original wake comes back: its ticket is no longer the Brick's, so it writes nothing over the stop; no job needs the machine any more, so it is not woken again for nobody (Sentry on #1040)
       fake.heldReady.splice(0).forEach((release) => release());
       await starting;
-      expect(callNames()).toEqual(['wake', 'wake', 'stop']);
+      // (the stop after the resumed wake's own look: `ready` may have restarted the machine, so a start that lost its ticket stops what the row calls stopped, Opus on #1040)
+      expect(callNames()).toEqual(['wake', 'wake', 'stop', 'stop']);
       expect(await fake.awake(sara.ref)).toBe(false);
     }, 30_000);
+
+    it('Opus on #1040: a wake call that reaches the provider inside the watch time after the stop of an abandoned wake (its sender may be dead) is stopped again by the next pass, and the hold lifts only after the watch time', async () => {
+      const sara = await owner('abandoned-dead-sender');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
+      // The abandoned wake's stop is proved; its hold is pushed out
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      // The dead sender's wake call lands now (nothing of its own will ever clean up after it)
+      await fake.wake(sara.ref);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      // Inside the watch time: the next pass stops it again and the hold stays
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      expect((await machineOf(sara)).turnUnprovenSince).not.toBeNull();
+      // After the watch time, a stop sent after it lifts the hold
+      await watchPassed(sara);
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+    });
+
+    it('Opus on #1040: a live sender whose beats failed and whose `ready` restarts the machine after the stop of its abandoned wake was proved leaves the machine asleep (nobody wants it)', async () => {
+      const sara = await owner('abandoned-ready-restarts');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'first', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      setWakeTimingForTests({ beatMs: 60_000, staleMs: 400 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      fake.holdReady = 1;
+      const starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      await until(() => fake.heldReady.length === 1);
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      await sleep(600);
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(await fake.awake(sara.ref)).toBe(false);
+      // `ready` restarts the machine after the stop was proved, and returns
+      await fake.wake(sara.ref);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      fake.heldReady.splice(0).forEach((release) => release());
+      await starting;
+      expect(await fake.awake(sara.ref)).toBe(false);
+    }, 30_000);
+
+    it('Opus on #1040: an ordinary turn hold on a `stopped` machine lifts after one proved stop', async () => {
+      const sara = await owner('hold-stopped');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+    });
+
+    it('Opus on #1040: a wake is judged abandoned only after its late call can no longer land (stale time beyond a beat plus the provider margin)', () => {
+      const { beatMs, staleMs, watchMs } = wakeTimingForTests();
+      expect(staleMs).toBeGreaterThan(beatMs + PROVIDER_MARGIN_MS);
+      expect(watchMs).toBe(PROVIDER_MARGIN_MS);
+    });
 
     it('CodeRabbit on #1040: an abandoned wake whose wake call reaches the provider only AFTER the stop was proved stops the machine it woke, and does not wake it again for nobody', async () => {
       const sara = await owner('abandoned-wake-lands-after-stop');
@@ -599,8 +674,8 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
       await sleep(600);
-      expect(await settleTurnHold(sara.brickId)).toBe(true);
-      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: expect.any(Date) });
       const stopsAfterProof = fake.calls.filter((call) => call.name === 'stop').length;
       // The wake call reaches the machine now, after the stop was proved
       fake.heldWake.splice(0).forEach((release) => release());
@@ -622,7 +697,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
       await sleep(600);
-      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
       const stopsAfterProof = fake.calls.filter((call) => call.name === 'stop').length;
       fake.failWakeAfterLanding = true;
       fake.heldWake.splice(0).forEach((release) => release());
@@ -751,7 +826,7 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
       await sleep(600);
-      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
       expect(await fake.awake(sara.ref)).toBe(false);
       // The wake that was given up on still lands at the provider (the machine is awake again), and its readiness check fails
       await fake.wake(sara.ref);

@@ -328,6 +328,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
     expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
     expect(await givenBack(started.job.id)).toBe(true);
+    // The test's clock is ahead of the database's: the hold the ending wrote is dated in the test's future, and a hold lifts only on a stop proved after its date (Opus on #1040), so it is dated as the real clock would have
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId, NOT: { turnUnprovenSince: null } }, data: { turnUnprovenSince: new Date(Date.now() - 1000) } });
     // And it used none of the bound (1): the next runner give-back is refused only because of the first one
     const next = await job(sara, ours);
     expect(next).toMatchObject({ status: 'failed', endedBy: null });

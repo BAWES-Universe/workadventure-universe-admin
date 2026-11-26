@@ -87,7 +87,7 @@ import { fenceCommand } from '@/lib/computer-fence-script';
 import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
-import { endPowerOp, openPowerOpOf, pauseWhenRowFree, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
+import { endPowerOp, openPowerOpOf, pauseWhenRowFree, powerTiming, PROVIDER_MARGIN_MS, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -419,7 +419,9 @@ async function claimStop(botId: string, ref: string, only?: string[], ticket?: n
   const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : abandoned ? Prisma.sql`AND "wake_epoch" = ${abandoned.epoch} AND "updated_at" <= ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${abandoned.staleMs / 1000}))` : Prisma.empty;
   return prisma.$transaction(async (tx) => {
     // The stop of an abandoned wake takes the next epoch in the same write (CodeRabbit on #1040): the wake that was given up on may still resume (it only missed its beats), and its ticket then no longer matches, so its final write, its beat and its own failure stop all land on nothing
-    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1` : Prisma.empty;
+    // The same write also pushes a turn hold out by the watch time (Opus on #1040): the wake that was given up on may still reach the provider after this stop is proved (and its sender may be dead, so nothing of its own cleans up), so the
+    // hold is not lifted on this proof but only on a proof from a stop sent after the watch time has passed. In the same write as the claim: a crash between the two would leave the hole open
+    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1, "turn_unproven_since" = CASE WHEN "turn_unproven_since" IS NULL THEN NULL ELSE (NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${ABANDONED_WAKE_WATCH_MS / 1000}) END` : Prisma.empty;
     const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC')${fence} WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
   }, rowLockWait());
@@ -479,6 +481,12 @@ export const takeWakeTicketForTests = takeWakeTicket;
  * image update, a restart of the instance), so no fixed limit of that wait is assumed.
  */
 let wakeTiming = { beatMs: 30_000, staleMs: 2 * 60_000 };
+/** How long after the stop of an abandoned wake its turn hold is kept: a wake call that was in flight can still land at the provider inside the provider's margin, and the sweep stops the machine again each pass until that time has passed. */
+const ABANDONED_WAKE_WATCH_MS = PROVIDER_MARGIN_MS;
+/** Test seam: the wake timings in force and the watch time, to prove a stale wake is never judged abandoned before its late call can no longer land. */
+export function wakeTimingForTests(): { beatMs: number; staleMs: number; watchMs: number } {
+  return { ...wakeTiming, watchMs: ABANDONED_WAKE_WATCH_MS };
+}
 /** Test seam: shorter beat and stale times (null restores the real ones). */
 export function setWakeTimingForTests(timing: { beatMs: number; staleMs: number } | null): void {
   wakeTiming = timing ?? { beatMs: 30_000, staleMs: 2 * 60_000 };
@@ -2281,6 +2289,9 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       return true;
     }, rowLockWait());
     if (wrote) return;
+    // A start whose beats failed can be in `ready` when its wake is given up on, and `ready` can restart the machine after the stop was proved: the row says stopped, nobody wants it, and the machine is awake. It is stopped against the
+    // state the row has (a replacement's waking row is never stopped), as when the wake call itself lands late (Opus on #1040)
+    await stopLateWake(botId, ref, provider, mine);
     // Replaced: the machine is the replacement's to make ready. A job runs only on a machine that is `working`: if it is, this start has nothing more to do; if it is not (the replacement's wake is still going, or it failed and the machine
     // was stopped) the loop waits for it like any start that arrives then, and wakes it with its own ticket when no wake is in flight
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
@@ -4071,15 +4082,19 @@ export async function underTurnHold(botId: string): Promise<boolean> {
  */
 export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
   try {
+    // The database's clock before anything is decided: a hold lifts only on proof that is NEWER than the hold (a stop claimed after this moment and proved asleep, with the hold itself dated no later than this moment), so the hold
+    // that the stop of an abandoned wake pushes out (see `claimStop`) outlasts the wake call that may still land (Opus on #1040)
+    const [{ now: t0 }] = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT (NOW() AT TIME ZONE 'UTC') AS now`;
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true } });
     if (!row?.turnUnprovenSince) return true;
     const seen = row.turnUnprovenSince;
-    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays
-    const lift = () => prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen }, data: { turnUnprovenSince: null } });
-    if (await agentCannotRun(botId)) {
-      await lift();
-      await clearFirstTurnMarks(botId);
-      return true;
+    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays; and one dated after the moment this looked (the watch of an abandoned wake) stays
+    const lift = async () => (await prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen, AND: [{ turnUnprovenSince: { lte: t0 } }] }, data: { turnUnprovenSince: null } })).count === 1;
+    // No machine at all (none was made, or the row has no provider ref): nothing can be running, so the hold goes at once. A machine that is `stopped` is asked again (below): its stop is proved afresh, after the hold was set
+    if (!row.providerRef || row.machine === 'none') {
+      const lifted = await lift();
+      if (lifted) await clearFirstTurnMarks(botId);
+      return lifted;
     }
     const holders = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, ...(exceptJobId ? { id: { not: exceptJobId } } : {}) } });
     if (holders > 0) return false;
@@ -4093,9 +4108,10 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     // (a machine `resting` or `broken` under a hold is stopped and the hold lifted, as before). A machine in any other state is not touched: a live wake has a running job (counted above), a park's wake has none and is not stopped
     // One exception (CodeRabbit on #1040): a wake that took its ticket and then died (no job holds the machine, nothing beats the row) leaves it `waking` or `restoring` for good, and every queued job waits for this hold to lift. A wake whose beat has
     // been missed for the whole stale time is abandoned, and is stopped like any machine: claimed against the wake epoch that was seen AND the beat still being stale in the same write, so a live wake, or a replacement that took the next ticket, is never stopped
-    if (!abandoned && !(['working', 'stopping', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
+    if (!abandoned && !(['working', 'stopping', 'stopped', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
     if (!(await stopMachine(botId, row.providerRef, provider, [row.machine], undefined, abandoned ? { epoch: row.wakeEpoch, staleMs: wakeTiming.staleMs } : undefined))) return false;
-    await lift();
+    // The hold of an abandoned wake was pushed out by its stop: it lifts only on a stop sent after that time, by a later pass (the sweep walks the holds every pass and stops the machine again each time)
+    if (!(await lift())) return false;
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
     await clearFirstTurnMarks(botId);
     return true;
