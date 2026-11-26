@@ -33,10 +33,10 @@ const SECOND_LEVEL = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or
 
 /** Hosting services: an address under one of these is registered under the name before it, never the service's own. */
 const HOSTED = [
-  'vercel.app', 'netlify.app', 'netlify.com', 'github.io', 'gitlab.io', 'supabase.co', 'supabase.in', 'herokuapp.com', 'onrender.com', 'up.railway.app', 'railway.app',
+  'vercel.app', 'netlify.app', 'github.io', 'gitlab.io', 'supabase.co', 'supabase.in', 'herokuapp.com', 'onrender.com', 'up.railway.app', 'railway.app',
   'fly.dev', 'workers.dev', 'pages.dev', 'trycloudflare.com', 'glitch.me', 'repl.co', 'replit.app', 'replit.dev', 'ngrok.app', 'ngrok.io', 'ngrok-free.app', 'ngrok.dev',
   'azurewebsites.net', 'cloudfunctions.net', 'appspot.com', 'run.app', 'amazonaws.com', 'on.aws', 'deno.dev', 'modal.run', 'smithery.ai', 'web.app', 'firebaseapp.com',
-  'pipedream.net', 'val.run', 'vercel.sh', 'render.com', 'koyeb.app', 'northflank.app', 'azurecontainerapps.io', 'cloudrun.dev', 'hf.space',
+  'pipedream.net', 'val.run', 'vercel.sh', 'koyeb.app', 'northflank.app', 'azurecontainerapps.io', 'cloudrun.dev', 'hf.space',
 ];
 
 /** The name an address is registered under, read loosely, as the only word of it that can name an App ([] when it names nothing). */

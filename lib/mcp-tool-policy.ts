@@ -330,7 +330,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       if (!before) {
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
-      } else if (before.fingerprint !== tool.fingerprint && universeSorts && before.movedById && before.heading) {
+      } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && before.movedById && before.heading) {
         // On a person's own App a tool they moved keeps their heading when it changes, never looser than Universe's rule for the new version,
         // and is confirmed by Universe (lib/app-own-tools.ts): what they decided is never overwritten by a re-sort
         await tx.botMcpTool.update({

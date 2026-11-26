@@ -25,6 +25,9 @@ describe('the same App (lib/app-same.ts)', () => {
     expect(addressWords('https://user.github.io')).toEqual(['user']);
     expect(addressWords('https://abc.supabase.co/functions/v1/mcp')).toEqual(['abc']);
     expect(addressWords('https://mcp.vercel.app')).toEqual([]);
+    // A service's own address is the service, even where apps it hosts live under a sibling name
+    expect(addressWords('https://mcp.render.com/mcp')).toEqual(['render']);
+    expect(addressWords('https://mcp.netlify.com/mcp')).toEqual(['netlify']);
     expect(sameApp({ name: 'Tool', serverUrl: 'https://my-tool.vercel.app/mcp' }, { key: 'vercel', name: 'Vercel' })).toBe(false);
     expect(sameApp({ name: 'Site', serverUrl: 'https://user.github.io' }, { key: 'github', name: 'GitHub' })).toBe(false);
     expect(sameApp({ name: 'Search', serverUrl: 'https://mcp.search.ai/mcp' }, { key: 'mcp', name: 'MCP' })).toBe(false);
