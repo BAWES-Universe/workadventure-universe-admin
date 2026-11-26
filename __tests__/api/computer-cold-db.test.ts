@@ -32,6 +32,7 @@ import * as meter from '@/lib/meter';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { bringBackFromCold, coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
+import { readOutsideManifest } from '@/lib/computer-outside';
 import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
 import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
@@ -756,6 +757,19 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await coldStatus()).failing).toBe(1);
     });
 
+    it('a file name that is not valid UTF-8 would be refused by the database; the computer reports it as blocked first, so the pack-away keeps the computer and no copy row is written', async () => {
+      // The premise: a lone surrogate (what such a name reads as) cannot be kept in a JSON column
+      const odd = { outside: { files: [['f', '/opt/x-\udcff', 1, 0o644, 'a'.repeat(64)]], packages: [] } };
+      const brick = await idleBrick();
+      await expect(storeArchive(brick.botId, new Response('x').body as ReadableStream<Uint8Array>, { manifest: odd })).rejects.toBeDefined();
+      // What Orbit does with such a list: it is not one (readOutsideManifest), and the provider turns that into a blocked computer
+      expect(readOutsideManifest(odd.outside)).toBeNull();
+      provider.inventory = { ...provider.inventory, blocked: 'outside_name_not_utf8' };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('failed');
+      expect(names()).not.toContain(`streamFiles:${brick.ref}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'stopped', packFailures: 1 });
+    });
+
     it('keeps the computer when the copy cannot be read or stored (a stream that fails)', async () => {
       const brick = await idleBrick();
       provider.coldFail.stream = true;
@@ -869,6 +883,35 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await fetchCopy(copy.id, { authorization: 'Bearer nonsense' })).status).toBe(401);
     });
 
+    it('Opus on #1025 (universe-cold): the list prepack printed is kept on the copy’s row, handed to the proof on the throwaway computer, and handed back when the computer comes back; a copy with no list is handed null', async () => {
+      const brick = await idleBrick();
+      const outside = { files: [['f', '/etc/app.conf', 4, 0o640, 'c'.repeat(64)], ['l', '/opt/tool/latest', 0, 0, 'run.sh']] as Array<['f' | 'l', string, number, number, string]>, packages: ['ffmpeg'] };
+      provider.inventory = { ...provider.inventory, outsideFiles: 2, packages: ['ffmpeg'], outside };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const [copy] = await verifiedArchives(brick.botId);
+      // On the row (beside the counts, which no longer carry it), and handed to the proof
+      expect(copy.manifest).toMatchObject({ outside, inventory: { outsideFiles: 2, packages: ['ffmpeg'] } });
+      expect((copy.manifest as { inventory: Record<string, unknown> }).inventory).not.toHaveProperty('outside');
+      expect(provider.restored[0].source.outside).toEqual(outside);
+      // And back again when a job needs the computer
+      provider.restored.length = 0;
+      expect((await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW)).ok).toBe(true);
+      expect(provider.restored[0].source.outside).toEqual(outside);
+    });
+
+    it('Opus on #1025 (universe-cold): a copy with no list (made before the list was kept) is handed null on its proof and on its return', async () => {
+      const brick = await idleBrick();
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const [copy] = await verifiedArchives(brick.botId);
+      expect((copy.manifest as { outside: unknown }).outside).toBeNull();
+      // An older row with no `outside` key at all reads the same
+      await prisma.computerArchive.update({ where: { id: copy.id }, data: { manifest: { inventory: { homeFiles: 1 } } } });
+      expect(provider.restored[0].source.outside).toBeNull();
+      provider.restored.length = 0;
+      expect((await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW)).ok).toBe(true);
+      expect(provider.restored[0].source.outside).toBeNull();
+    });
+
     it('does not give a copy that failed its check or one that is not there', async () => {
       const brick = await idleBrick();
       const stored = await storeArchive(brick.botId, new Response('x').body as ReadableStream<Uint8Array>);
@@ -917,6 +960,32 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(back.restoredFrom?.toISOString()).toBe('2026-10-30T10:00:00.000Z');
       expect(started.ok && started.restoredFrom?.toISOString()).toBe('2026-10-30T10:00:00.000Z');
       expect(await computerView(brick.botId, brick.personId, NOW)).toMatchObject({ olderCopyUsed: true });
+    });
+
+    it('a computer that cannot be made ready for the newest copy (restoreInto THROWS) ends the return: the older copy is not tried, the computer is removed, and the next job tries the newest copy again', async () => {
+      const brick = await idleBrick();
+      const older = await storeArchive(brick.botId, new Response('older').body as ReadableStream<Uint8Array>);
+      await markVerified(older.id, 5);
+      const newer = await storeArchive(brick.botId, new Response('newer').body as ReadableStream<Uint8Array>);
+      await markVerified(newer.id, 5);
+      await prisma.computerArchive.update({ where: { id: older.id }, data: { createdAt: new Date('2026-10-30T10:00:00Z') } });
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', providerRef: null } });
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async () => {
+        throw new Error('The computer could not take the current script');
+      };
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW);
+      expect(started).toMatchObject({ ok: false, reason: 'broken_start' });
+      // One computer was made and removed; the older copy never went on a computer
+      expect(names().filter((call) => call.startsWith('remove:') || call.startsWith('confirmRemoved:') || call.startsWith('create:'))).toEqual([`create:${brick.botId}`, `remove:fake-${brick.botId}`, `confirmRemoved:fake-${brick.botId}`]);
+      expect(provider.restored).toEqual([]);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null, olderCopyUsed: false });
+      // Later the NEWEST copy is the one tried again
+      provider.restoreInto = original;
+      provider.restoreResults = [];
+      const again = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Try again' }, new Date(NOW.getTime() + 2 * 60 * 60_000));
+      expect(again).toMatchObject({ ok: true });
+      expect(provider.restored.map((entry) => entry.source.sha256)).toEqual([newer.sha256]);
     });
 
     it('leaves the Brick cold, with no computer left billing, when no copy restores', async () => {
