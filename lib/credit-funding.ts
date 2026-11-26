@@ -176,3 +176,31 @@ export async function exposureOf(accountId: string, now: Date = new Date(), sett
     chargedThisMonthMicros: asNumber(charged[0]?.micros),
   };
 }
+
+/** The UTC month of a moment, "2026-12". */
+export const monthKeyOf = (now: Date): string => now.toISOString().slice(0, 7);
+
+/**
+ * The rollout budget this UTC month, for the Limits screen: what the platform issued from defaults and gifts, and how many people were due a
+ * default and were not given it because it would have passed the budget. Never silent when it runs out.
+ */
+export async function rolloutThisMonth(now: Date = new Date()): Promise<{ issuedMicros: number; notGivenPeople: number; perPersonMicros: number; accountBudgetMicros: number | null }> {
+  const issuedMicros = await issuedInMonth(prisma, PLATFORM_ACCOUNT_ID, now);
+  // The platform funding account's own budget, when one is set, is the one issuing goes by (`budgetOf`), not the Limits number
+  const accountBudgetMicros = (await getFundingAccount(PLATFORM_ACCOUNT_ID))?.budgetMicros ?? null;
+  const rows = await prisma.creditIssueSkip.findMany({ where: { monthKey: monthKeyOf(now), reason: 'over_budget' }, distinct: ['personId'], select: { personId: true } });
+  // What one more person is given from the budget this month: the current defaults Universe pays for, each person's own share of each
+  const defaults = await prisma.grantRule.findMany({
+    where: {
+      state: 'current',
+      fundingAccountId: PLATFORM_ACCOUNT_ID,
+      share: 'each',
+      claimStartsAt: { lte: now },
+      OR: [{ claimEndsAt: null }, { claimEndsAt: { gt: now } }],
+      program: { kind: 'default', status: 'active' },
+    },
+    select: { amount: true },
+  });
+  const perPersonMicros = defaults.reduce((sum, rule) => sum + Number(rule.amount), 0);
+  return { issuedMicros, notGivenPeople: rows.length, perPersonMicros, accountBudgetMicros };
+}

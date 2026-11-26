@@ -87,42 +87,49 @@ In Coolify application settings:
 - **Port**: `3333`
 - **Exposed Port**: `3333`
 
-## Step 6: Configure Prisma Migrations
+## Step 6: Prisma Migrations
 
-You have three options:
+Nothing to configure. The image's CMD (`sh scripts/start.sh`) applies every pending migration with
+`prisma migrate deploy` and starts the app only when that succeeded. If a migration fails, the
+container exits non-zero and Orbit does not start; see docs/PRISMA-DEPLOYMENT.md for recovering.
 
-### Option A: Automatic Migrations (Recommended)
+What happens when a migration fails depends on Coolify's health check:
 
-Update the Dockerfile to use the startup script:
+- **Health check ON**: the new container never becomes healthy, so Coolify keeps the old container
+  serving and marks the deploy failed. Nothing goes down. The old version then runs on a database where
+  the release's earlier migrations did apply, so migrations must only add things (new tables, nullable
+  or defaulted columns) and never rename or drop what the old code uses. (This relies on Coolify's
+  rolling update: no fixed host port mapping and no custom container name.)
+- **Health check OFF**: Coolify waits a fixed few seconds and removes the old container anyway, so a
+  failed migration means Orbit is **down** until a fixed image is deployed. The new container exits
+  and Docker restarts it in a loop (each attempt refuses again; it changes nothing).
 
-1. Fork/clone the repository
-2. Edit `Dockerfile` - change the last line from:
-   ```dockerfile
-   CMD ["npm", "start"]
-   ```
-   to:
-   ```dockerfile
-   CMD ["sh", "scripts/start.sh"]
-   ```
-3. Commit and push (this will rebuild the image)
+The app does not listen until the migrations have finished, so the health check's start period must be
+longer than the longest migration. If Coolify gives up first, it removes the new container in the middle
+of a migration, which is then usually committed by Postgres but recorded as failed by Prisma (see
+docs/PRISMA-DEPLOYMENT.md, "Troubleshooting"). With the check off, a long migration is a gap with
+nothing serving.
 
-### Option B: Post-Deploy Command
+Health check settings (turn the check ON before deploying an image that migrates at start):
 
-In Coolify, set **Post-Deploy Command**:
-```bash
-npx prisma migrate deploy
-```
+| Setting | Value |
+| --- | --- |
+| Method / path | `GET /admin` (not `/`: `/` answers 307 to `/admin`; `/admin` answers 200 without the database) |
+| Expected code | `200` |
+| Host / port | `127.0.0.1` / `3333` |
+| Start period | `120` s (60 s at the very least) |
+| Interval / retries | 5 to 10 s / 3 or more |
 
-### Option C: Manual Migration
+`next start` is given no `-H`, so Node listens on every address (`::`, which also accepts IPv4, or
+`0.0.0.0` where the host has no IPv6): `127.0.0.1` always reaches it, while `localhost` can resolve to
+`::1` on some hosts. The image has busybox `wget` and no `curl`, which Coolify's check falls back to.
 
-After deployment, run migrations manually:
-```bash
-# Get container name
-docker ps | grep workadventure-universe-admin
-
-# Run migrations
-docker exec <container-name> npx prisma migrate deploy
-```
+Do not configure a post-deploy migration command (`npx prisma migrate deploy`): the container
+already applies migrations at startup, a post-deploy hook only runs after the new code is serving, and
+`npx` is not a pinned path to the Prisma CLI bundled in the image. If one is set today, drop it after the
+first good deploy of an image that migrates at start; until then it finds nothing pending (if it ever
+overlapped a running migration, it would wait on Prisma's database lock and fail without changing
+anything).
 
 ## Step 7: Deploy
 
@@ -139,7 +146,7 @@ docker exec <container-name> npx prisma migrate deploy
 
 2. **Verify migrations**:
    ```bash
-   docker exec <container-name> npx prisma migrate status
+   docker exec <container-name> node node_modules/prisma/build/index.js migrate status
    ```
 
 3. **Test endpoints**:
@@ -153,7 +160,7 @@ When you push new code to the main branch:
 1. GitHub Actions automatically builds a new image
 2. Image is tagged as `latest` and pushed to GHCR
 3. In Coolify, click "Redeploy" to pull the latest image
-4. Migrations run automatically (if using startup script or post-deploy command)
+4. Migrations run automatically when the new container starts; if they fail, it does not start
 
 ## Troubleshooting
 
@@ -180,15 +187,11 @@ docker logs <container-name>
 
 ### Migration Errors
 
-**Run migrations manually**:
-```bash
-docker exec <container-name> npx prisma migrate deploy
-```
-
-**Check migration status**:
-```bash
-docker exec <container-name> npx prisma migrate status
-```
+The container applies migrations itself every time it starts, so there is nothing to run by hand. If they
+fail, its log ends with `Orbit is NOT starting`. With the health check OFF the container then stops (or
+keeps restarting) and Orbit is down; with it ON, Coolify removes it and the old version keeps serving.
+`docker exec` cannot reach the failed container either way. Check and resolve from a one-off container of the
+same image instead: the commands are in docs/PRISMA-DEPLOYMENT.md under "Troubleshooting".
 
 ### Redis Connection Failed
 

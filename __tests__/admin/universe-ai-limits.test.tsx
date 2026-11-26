@@ -15,10 +15,11 @@ import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
 // What /api/admin/instant says for two of its limits: money held in millionths of a dollar, shares in hundredths of a percent
-const instant: { on?: boolean; goodwillMaxMicros?: number | null; markupBps?: number | null } = {};
+const instant: { on?: boolean; goodwillMaxMicros?: number | null; markupBps?: number | null; maxRunsPerQuestion?: number | null } = {};
 const instantViews = () => ({
   goodwillMaxMicros: { value: instant.goodwillMaxMicros ?? null, range: { min: 0, max: 1_000_000_000 }, recommended: null, label: 'Most one give-back may be', hint: 'Empty: nothing is given back for “Didn’t work”.', unit: 'micros', required: false },
   markupBps: { value: instant.markupBps ?? null, range: { min: 0, max: 100_000 }, recommended: null, label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent.', unit: 'bps', required: false },
+  maxRunsPerQuestion: { value: instant.maxRunsPerQuestion === undefined ? 8 : instant.maxRunsPerQuestion, range: { min: 1, max: 1000 }, recommended: null, label: 'Most research runs for one question', hint: 'Empty: no bound per question.', unit: 'count', required: false },
 });
 
 function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED, memberAllowanceMicros: number | null = null) {
@@ -237,6 +238,30 @@ describe('Universe AI limits', () => {
     expect(screen.getByLabelText('Bricks').querySelectorAll('[data-testid^="limit-"]')[0]).toBe(row);
   });
 
+  it('a saved rollout budget whose standing could not be read drops the old figures instead of pairing them with the new budget', async () => {
+    answer();
+    const ok = fetchMock.getMockImplementation()!;
+    let budget = 20_000_000;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url !== '/api/admin/meter-settings') return ok(url, init);
+      if (init?.method === 'PATCH') {
+        budget = JSON.parse(String(init.body)).rolloutBudgetMicros;
+        // Saved, but this month's standing could not be read
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: null, rolloutBudgetMicros: budget }, rollout: null }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: null, rolloutBudgetMicros: budget }, rollout: { issuedMicros: 5_000_000, notGivenPeople: 0 }, missing: [] }) });
+    });
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-rolloutBudget');
+    await waitFor(() => expect(screen.getByTestId('limit-rolloutBudget').textContent).toContain('Issued $5.00 of $20.00 this month'));
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Rollout budget for grants.*in dollars/), { target: { value: '40' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByTestId('limit-rolloutBudget').textContent).toContain('$40'));
+    expect(screen.getByTestId('limit-rolloutBudget').textContent).not.toContain('Issued');
+  });
+
   it('takes a computer allowance of its own in dollars and cents', async () => {
     answer(SERVER_LIMITS_RECOMMENDED, VOICE_LIMITS_RECOMMENDED, 5_000_000);
     render(<UniverseAiLimits />);
@@ -264,6 +289,19 @@ describe('Universe AI limits', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
     expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ markupBps: 0 });
+  });
+
+  it('the most research runs for one question can be emptied again: "No bound" saves it empty', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-maxRunsPerQuestion');
+    expect(row.textContent).toContain('8 runs');
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByRole('radio', { name: /No bound/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ maxRunsPerQuestion: null });
+    await waitFor(() => expect(screen.getByTestId('limit-maxRunsPerQuestion').textContent).toContain('Not set'));
   });
 
   it('reads Instant limits only when each row has its value, its recommendation and whether it is required', () => {

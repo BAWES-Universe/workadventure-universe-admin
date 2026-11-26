@@ -2681,6 +2681,22 @@ model CreditLot {
   @@map("credit_lots")
 }
 
+// A person who was due a default and was not given it this UTC month because the month's budget would be passed: one row per person,
+// program and month, so the Limits screen can say how many people the rollout budget left out ("N people not given credit this month").
+// Written by issuing, never read by it.
+model CreditIssueSkip {
+  personId  String   @map("person_id")
+  programId String   @map("program_id")
+  // A UTC month, "2026-12"
+  monthKey  String   @map("month_key") @db.VarChar(7)
+  reason    String   @db.VarChar(20)
+  firstAt   DateTime @default(now()) @map("first_at")
+
+  @@id([personId, programId, monthKey])
+  @@index([monthKey])
+  @@map("credit_issue_skips")
+}
+
 // Room kept for a paid step against a person's credit, once per operation + attempt, and the ledger line it becomes. The customer's
 // amount and the provider's cost are different columns on purpose. A hold never goes away: it ends settled or released.
 model CreditHold {
@@ -4276,6 +4292,7 @@ model InstantRun {
   @@index([providerState, createdAt])
   @@index([personId, createdAt])
   @@index([personId, argsHash, state])
+  @@index([personId, taskKey])
   @@map("instant_runs")
 }
 

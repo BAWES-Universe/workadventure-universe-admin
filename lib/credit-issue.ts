@@ -1,8 +1,8 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
-import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
-import { budgetOf, issuedInMonth, platformAccount, getFundingAccount } from '@/lib/credit-funding';
+import { currentRules, usableLots, poolOpenTo, peopleFacts, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
+import { budgetOf, issuedInMonth, platformAccount, getFundingAccount, monthKeyOf, PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
 /**
@@ -38,8 +38,18 @@ export interface IssuedLot {
 
 export interface IssueResult {
   issued: IssuedLot[];
-  skipped: { programId: string; reason: SkipReason }[];
+  /**
+   * `categoryId` is the skipped rule's program category and `covers` every category its credit pays for (a gift can cover research and
+   * computers together), so spending can tell "never given this period" from "used up" for each category it would have paid for.
+   */
+  skipped: { programId: string; categoryId?: string; covers?: readonly string[]; reason: SkipReason }[];
 }
+
+/** One skip, said the same way wherever a rule is left out. */
+const skipOf = (rule: Pick<RuleFacts, 'programId' | 'categoryId' | 'covers'>, reason: SkipReason): IssueResult['skipped'][number] => ({ programId: rule.programId, categoryId: rule.categoryId, covers: [...rule.covers], reason });
+
+/** Whether a skip is about credit that would have paid for this category: everything the rule covers (its own category when that is not known). */
+export const skipCovers = (skip: IssueResult['skipped'][number], category: string): boolean => (skip.covers && skip.covers.length > 0 ? skip.covers.includes(category) : skip.categoryId === category);
 
 interface Plan {
   rule: RuleFacts;
@@ -58,7 +68,7 @@ function plansFor(rules: readonly RuleFacts[], person: Parameters<typeof reaches
   for (const candidates of reachingBase.values()) {
     const picked = pickBase(candidates);
     if (picked.winner) plans.push({ rule: picked.winner, base: true });
-    else if (picked.clash) for (const rule of picked.clash) skipped.push({ programId: rule.programId, reason: 'clash' });
+    else if (picked.clash) for (const rule of picked.clash) skipped.push(skipOf(rule, 'clash'));
   }
   return plans;
 }
@@ -93,6 +103,12 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
     const early: IssueResult['skipped'] = [];
     const planned = plansFor(await currentRules(prisma, { now }), first, early);
     if (planned.length === 0) return { issued: [], skipped: early };
+    // Everything due this period is issued already (the answer on every look after the first one of a period, such as each chat turn's list
+    // of research Apps), or what is missing was already left out by this month's rollout budget and still does not fit: nothing to lock and
+    // nothing to write, so no transaction takes the funding account's lock. A shared pool always takes the full way, which also answers this
+    // person's asks from a pool someone else's look made
+    const settled = await settledWithoutLocks(personId, planned, now);
+    if (settled) return { issued: [], skipped: [...early, ...settled] };
     const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
       // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
       // the rules of each category this person is due something from under a shared lock that a save of that category's rules waits for, so a
@@ -114,7 +130,11 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
       for (const { rule } of plans) {
         const done = await issueOne(tx, rule, personId, now, settings);
         if (done.lot) out.push(done.lot);
-        else if (done.skipped) skipped.push({ programId: rule.programId, reason: done.skipped });
+        else if (done.skipped) skipped.push(skipOf(rule, done.skipped));
+        // Left out by the rollout budget: said on the Limits screen as people not given credit this month (once per person, program and month)
+        if (done.skipped === 'over_budget' && rule.fundingAccountId === PLATFORM_ACCOUNT_ID) {
+          await tx.$executeRaw`INSERT INTO "credit_issue_skips" ("person_id", "program_id", "month_key", "reason", "first_at") VALUES (${personId}, ${rule.programId}, ${monthKeyOf(now)}, 'over_budget', (${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')) ON CONFLICT DO NOTHING`;
+        }
       }
       await answerAsksFromPools(tx, person, now);
       return { issued: out, skipped };
@@ -140,13 +160,59 @@ async function answerAsksFromPools(tx: Tx, person: PersonFacts, now: Date): Prom
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
 
+/**
+ * Whether this look has nothing to do, read without locks: null when it must take the full way under the locks. Otherwise the skips to give
+ * back (empty when every per-person lot of this period is there). A missing lot counts as settled only when this person was already left out
+ * by the platform's rollout budget this month (the Limits screen's row) and it still does not fit: the platform account is active, has a
+ * budget, and what it issued this month plus this lot is past it. Lots are never taken away, so the month's issued total only goes up: a read
+ * without locks can only find it lower than it is, which sends the person the full way (never a wrong "no"), and a budget raised a moment
+ * ago is seen on the next look. A shared pool, any other skip reason, or anything that cannot be read takes the full way.
+ */
+async function settledWithoutLocks(personId: string, plans: readonly Plan[], now: Date): Promise<IssueResult['skipped'] | null> {
+  const skipped: IssueResult['skipped'] = [];
+  let room: { budget: number; issued: number } | null | undefined;
+  for (const { rule } of plans) {
+    if (rule.share !== 'each') return null;
+    const plan = planLot(rule, now);
+    if (!plan) continue;
+    const lot = await prisma.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey: subjectKeyFor(rule, personId), periodKey: plan.periodKey } }, select: { id: true } });
+    if (lot) continue;
+    if (rule.fundingAccountId !== PLATFORM_ACCOUNT_ID) return null;
+    const left = await prisma.creditIssueSkip.findUnique({ where: { personId_programId_monthKey: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } }, select: { reason: true } });
+    if (left?.reason !== 'over_budget') return null;
+    if (room === undefined) room = await platformRoom(now);
+    if (!room || room.issued + plan.amountMicros <= room.budget) return null;
+    skipped.push(skipOf(rule, 'over_budget'));
+  }
+  return skipped;
+}
+
+/** The platform account's budget in force this month and what it issued, read without locks; null when it is not active, has no budget, or cannot be read. */
+async function platformRoom(now: Date): Promise<{ budget: number; issued: number } | null> {
+  try {
+    const account = await getFundingAccount(PLATFORM_ACCOUNT_ID);
+    if (!account || account.status !== 'active') return null;
+    const budget = budgetOf(account, await getMeterSettingsStrict(prisma));
+    if (budget === null) return null;
+    return { budget, issued: await issuedInMonth(prisma, account.id, now) };
+  } catch {
+    return null;
+  }
+}
+
 /** One rule's lot for one person, inside the locks. `skipped: null` means it was already issued (the quiet, normal answer). */
 async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, settings: MeterSettings): Promise<Issued> {
   const plan = planLot(rule, now);
   if (!plan) return { skipped: null };
   const subjectKey = subjectKeyFor(rule, personId);
-  const already = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
-  if (already) return { skipped: null };
+  const already = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true, ruleVersion: true } });
+  // Already there (for a shared pool, made when someone else arrived first): this person has it, so they are not among the people left out.
+  // A pool is theirs only when the rule version it was issued under reaches them (as spending decides it), not a later edit that added them
+  if (already) {
+    const theirs = rule.share !== 'shared' || (await poolOpenTo(tx, { programId: rule.programId, ruleVersion: already.ruleVersion }, personId));
+    if (theirs) await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey: monthKeyOf(now) } });
+    return { skipped: null };
+  }
   const account = await getFundingAccount(rule.fundingAccountId, tx);
   if (!account || account.status !== 'active') return { skipped: 'account_inactive' };
   const budget = budgetOf(account, settings);
@@ -184,12 +250,27 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
     skipDuplicates: true,
   });
   if (count === 0) return { skipped: null };
+  // Given after all (the rollout budget was raised this month): no longer among the people it left out. A shared pool is credit for everyone
+  // the rule reaches, so each of them left out earlier this month is cleared too; anyone it does not reach stays counted
+  await clearSkipsFor(tx, rule, personId, now);
   const lot = await tx.creditLot.findUniqueOrThrow({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
   // Credit for Instant Apps arrived (a gift or a renewal): what the person asked for before now is answered, so a later ask is a new one
   if (rule.covers.includes('instant_apps') && rule.share === 'each') {
     await tx.meterRequest.updateMany({ where: { personId, what: 'apps', answeredAt: null, createdAt: { lte: now } }, data: { answeredAt: now, grantKey: `lot:${lot.id}` } });
   }
   return { lot: { lotId: lot.id, programId: rule.programId, periodKey: plan.periodKey, subjectKey, amountMicros: plan.amountMicros } };
+}
+
+/** Clears this month's "left out" records that a new lot answers: the person's own, and for a shared pool everyone the rule reaches. */
+async function clearSkipsFor(tx: Tx, rule: RuleFacts, personId: string, now: Date): Promise<void> {
+  const monthKey = monthKeyOf(now);
+  await tx.creditIssueSkip.deleteMany({ where: { personId, programId: rule.programId, monthKey } });
+  if (rule.share !== 'shared') return;
+  const others = await tx.creditIssueSkip.findMany({ where: { programId: rule.programId, monthKey }, select: { personId: true } });
+  // Everyone left out read at once (two reads, however long the list), so a long backlog cannot hold the locks for long
+  const facts = await peopleFacts(tx, others.map((row) => row.personId));
+  const reached = others.map((row) => row.personId).filter((other) => { const f = facts.get(other); return !!f && reaches(rule, f); });
+  if (reached.length > 0) await tx.creditIssueSkip.deleteMany({ where: { personId: { in: reached }, programId: rule.programId, monthKey } });
 }
 
 /** Issues for several people (a rollout, a migration run, a gift to people you pick): each one the same exactly-once way. */

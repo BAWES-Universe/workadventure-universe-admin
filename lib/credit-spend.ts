@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { getMeterSettings } from '@/lib/meter';
-import { ensureIssued, type IssueResult } from '@/lib/credit-issue';
+import { ensureIssued, skipCovers, type IssueResult } from '@/lib/credit-issue';
 import type { MeterSettings } from '@/lib/meter-values';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
 import { lockAll, lockOfEffect, lockOfHoldKey, lockOfPerson, lockOfPool, lotBalances, usableLots, type LotRow, type Tx } from '@/lib/credit-store';
@@ -22,6 +22,11 @@ export type NoCredit =
   | { ok: false; reason: 'credit_used_up'; availableMicros: number }
   /** Nothing is set up to give credit yet (no funded budget), so nothing was ever issued. */
   | { ok: false; reason: 'not_set'; availableMicros: 0 }
+  /**
+   * The person was due credit for this category this period and was not given it (this month's budget ran out, a cap was reached, two rules
+   * clash, or the account is paused), and they have nothing else that pays for it. Never told as "used up": they never had it.
+   */
+  | { ok: false; reason: 'not_given'; availableMicros: 0 }
   /** The charge class is not one this category pays for, or nested work is in the wrong class (it would be charged twice). */
   | { ok: false; reason: 'wrong_class' }
   /** The key was used for someone else: the first stands, and whoever asked has a bug to find. */
@@ -186,7 +191,13 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
     const takes = allocate(lots, input.amountMicros);
     if (!takes) {
       const available = lots.reduce((sum, lot) => sum + lot.availableMicros, 0);
-      if (lots.length === 0 && issued.skipped.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
+      // Nothing left at all (lots spent to nothing count as none) and what was due this period was not given: "not given", never "used up".
+      // Some credit left that is not enough stays "used up"
+      // Only a skip of a rule whose credit would have paid for this category counts (a gift can cover more than its own category): a rule
+      // for other categories left out says nothing about this one
+      const mine = issued.skipped.filter((s) => skipCovers(s, input.category));
+      if (available <= 0 && mine.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
+      if (available <= 0 && mine.length > 0) return { ok: false, reason: 'not_given', availableMicros: 0 };
       return { ok: false, reason: 'credit_used_up', availableMicros: available };
     }
     const row = await tx.creditHold.create({
@@ -449,8 +460,23 @@ export async function lapsedHolds(now: Date = new Date(), limit = 100): Promise<
 
 /** What a person has available for a category right now, issuing what is due first. Held room is already taken out. */
 export async function availableCredit(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number }> {
-  await ensureIssued(personId, now);
+  const standing = await creditStanding(personId, category, now);
+  return { availableMicros: standing.availableMicros, totalMicros: standing.totalMicros, heldMicros: standing.heldMicros };
+}
+
+/**
+ * `availableCredit` and why there may be none, in the words a hold would refuse with: `notGiven` when the person has nothing that pays for this
+ * category because what they were due this period was not issued (the month's budget ran out, a cap, a clash, a paused account, or no budget
+ * set), never "used up". `renewsAt` is when their monthly credit of this category comes again (the earliest end of a monthly lot they hold), or null.
+ */
+export async function creditStanding(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number; notGiven: boolean; renewsAt: Date | null }> {
+  const issued = await ensureIssued(personId, now);
   const lots = await usableLots(prisma, personId, category, now);
+  // Only a skip of a rule whose credit would have paid for this category counts, whatever the reason (no budget set, the month's budget ran
+  // out, a cap, a clash)
+  const skipped = issued.skipped.some((s) => skipCovers(s, category));
+  const monthly = lots.filter((lot) => /^\d{4}-\d{2}$/.test(lot.lot.periodKey) && lot.expiresAt !== null).map((lot) => lot.expiresAt!.getTime());
+  const renewsAt = monthly.length > 0 ? new Date(Math.min(...monthly)) : null;
   const balances = await lotBalances(prisma, lots.map((lot) => lot.id));
   let available = 0;
   let total = 0;
@@ -462,5 +488,7 @@ export async function availableCredit(personId: string, category: MoneyCategory,
     total += b.amountMicros - b.usedMicros;
     held += b.heldMicros;
   }
-  return { availableMicros: available, totalMicros: total, heldMicros: held };
+  // Nothing left (lots spent to nothing count as none) and what was due this period was not given; some credit left that is short stays "used up"
+  const notGiven = available <= 0 && skipped;
+  return { availableMicros: available, totalMicros: total, heldMicros: held, notGiven, renewsAt };
 }
