@@ -14,6 +14,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, reviewAppSteps, startJob, startWindDown } from '@/lib/computer';
+import { connectedApp } from '@/lib/computer-route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -87,6 +88,76 @@ run('choosing the way by expected cost, in a real database', () => {
     expect(started).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
     expect(await prisma.computerJob.count({ where: { personId: person.id } })).toBe(0);
     expect(woke()).toBe(0);
+  });
+
+  describe('the person\'s own copy of an App comes first', () => {
+    /** The person's own App added by its link, given to the Brick. */
+    async function connectOwn(owner: string, botId: string, name: string, serverUrl: string) {
+      const connection = await prisma.appConnection.create({ data: { ownerId: owner, name, serverUrl, source: 'link' } });
+      await prisma.botMcpServer.create({ data: { botId, name, serverUrl: '', authType: 'none', connectionId: connection.id } });
+    }
+    /** This person's own Limit for paid App steps is used up, so the ready-made copy is no way at all. */
+    const useUpLimit = (person: { id: string; brickId: string }) =>
+      prisma.meterEvent.create({
+        data: { eventId: `ev-${randomUUID()}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${person.id}`, personId: person.id, botId: person.brickId, brick: true, payerKind: 'universe', route: 'app', quantity: BigInt(1), unit: 'call', costMicros: BigInt(5_000_000), basis: 'measured' },
+      });
+
+    it('takes the person\'s own copy of the same name over the ready-made one, at no cost to Universe, whichever was given first', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Notion', toolkit: 'notion' });
+      await connectOwn(person.id, person.brickId, 'Notion', 'https://mcp.notion.com/mcp');
+      await useUpLimit(person);
+      expect(await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan: { app: 'Notion', steps: 3 } }, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+      expect(await prisma.computerJob.count({ where: { personId: person.id } })).toBe(0);
+    });
+
+    it('takes the person\'s own copy when the model names the ready-made one and theirs has another name (matched by its address)', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
+      await useUpLimit(person);
+      expect(await startJob({ botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } }, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+    });
+
+    it('takes the person\'s working own copy under another name even when the named ready-made one is signed out, and nothing when neither works', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'ready_made' }, data: { signInLostAt: NOW } });
+      expect(await connectedApp(person.brickId, 'Exa')).toEqual({ name: 'My search', stepMicros: 0 });
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
+    });
+
+    it('never weighs an own copy the bot server saw fail, also when it has the very name asked for: with no working way the job takes the computer', async () => {
+      const person = await sara();
+      await connectOwn(person.id, person.brickId, 'Exa', 'https://mcp.exa.ai/mcp');
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      // Alone: a link that is not signed in through the App's site counts as connected, but its key was refused
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
+      // With a ready-made Exa that is signed out too: neither works
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'ready_made' }, data: { signInLostAt: NOW } });
+      expect(await connectedApp(person.brickId, 'Exa')).toBeNull();
+      const plan = { botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } };
+      expect(await startJob(plan, NOW)).toMatchObject({ ok: true });
+    });
+
+    it('never takes an own copy the bot server saw fail (a refused key, or no answer) over a working ready-made one', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId, { name: 'Exa', toolkit: 'exa' });
+      await connectOwn(person.id, person.brickId, 'My search', 'https://mcp.exa.ai/mcp');
+      const plan = { botId: person.brickId, personId: person.id, title: 'Look it up', plan: { app: 'Exa', steps: 3 } };
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+      // Its key refused: the ready-made one is the way again
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: NOW, signInLostStatus: 401 } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'Exa' });
+      // Mended, then its server stops answering on this Brick: the same
+      await prisma.appConnection.updateMany({ where: { ownerId: person.id, source: 'link' }, data: { signInLostAt: null, signInLostStatus: null } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'My search' });
+      await prisma.botMcpServer.updateMany({ where: { botId: person.brickId, connection: { source: 'link' } }, data: { noAnswerAt: NOW } });
+      expect(await startJob(plan, NOW)).toEqual({ ok: false, reason: 'cheaper_route', app: 'Exa' });
+  });
   });
 
   it('sends the job to the computer when the App is the cheaper way but its spending stop would refuse the step: the month\u2019s Limit used up, this person\u2019s own, or no Limit set', async () => {

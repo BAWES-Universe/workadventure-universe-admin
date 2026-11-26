@@ -175,7 +175,7 @@
   ],
   "shipping": {
     "lastMigration": "20261126130000_app_action_choice_by_person",
-    "count": 208,
+    "count": 209,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -384,6 +384,7 @@
       "20261125000000_computer_mark_in_orbit",
       "20261125100000_computer_take_over_check",
       "20261126000000_app_actions",
+      "20261126120000_tool_person_heading",
       "20261126130000_app_action_choice_by_person"
     ]
   }
