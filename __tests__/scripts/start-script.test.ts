@@ -221,6 +221,9 @@ describe('scripts/start.sh decides (stand-in migration tool)', () => {
     // With the health check on, the failed container is gone: the runbook says which image to use then.
     expect(runbook).toMatch(/health check ON\*\*, Coolify removes the failed new container/);
     expect(runbook).toMatch(/image of the failed deploy/);
+    // ...and that its docker stop line must be skipped there: $C is then the old version that still serves.
+    expect(runbook).toMatch(/Skip the `docker stop "\$C"` line: here `\$C` is the old version that is still\s+serving/);
+    expect(runbook).toMatch(/Check ON: skip this docker stop line/);
   });
 
   it('has no way to continue after a failed migration', () => {

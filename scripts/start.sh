@@ -36,6 +36,9 @@
 #   - all of its changes are there:  --applied <migration name>
 #   - none of them are:              --rolled-back <migration name>, and deploy a fixed image
 #   - only some are:                 undo those, then --rolled-back, and deploy a fixed image
+# Before --rolled-back, stop a failed container that Docker keeps restarting (health check OFF), or its
+# next start runs the bad migration again. Never stop the old container that is still serving (check ON).
+# Commands, including how to run the CLI when this container will not start: docs/PRISMA-DEPLOYMENT.md.
 # Never --rolled-back a migration whose changes are there: the next start would run it again.
 set -eu
 
@@ -65,7 +68,8 @@ if ! node "$PRISMA_CLI" migrate deploy; then
   refuse \
     "Database migrations did not apply (the reason is above)." \
     "Starting now would run this version on a database it was not written for." \
-    "Fix the database connection, or resolve a failed migration: check whether its changes are in the database, then 'migrate resolve --applied <name>' if all are, or undo any that are and 'migrate resolve --rolled-back <name>' before deploying a fixed image."
+    "Fix the database connection, or resolve a failed migration: check whether its changes are in the database, then 'migrate resolve --applied <name>' if all are, or undo any that are and 'migrate resolve --rolled-back <name>' before deploying a fixed image." \
+    "Read the runbook first (docs/PRISMA-DEPLOYMENT.md, Troubleshooting): it has the commands, and when to stop this container."
 fi
 
 log "Database is up to date. Starting Orbit..."

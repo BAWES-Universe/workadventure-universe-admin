@@ -188,8 +188,9 @@ docker logs <container-name>
 ### Migration Errors
 
 The container applies migrations itself every time it starts, so there is nothing to run by hand. If they
-fail, its log ends with `Orbit is NOT starting` and the container stops (or keeps restarting).
-`docker exec` cannot reach a container in that state. Check and resolve from a one-off container of the
+fail, its log ends with `Orbit is NOT starting`. With the health check OFF the container then stops (or
+keeps restarting) and Orbit is down; with it ON, Coolify removes it and the old version keeps serving.
+`docker exec` cannot reach the failed container either way. Check and resolve from a one-off container of the
 same image instead: the commands are in docs/PRISMA-DEPLOYMENT.md under "Troubleshooting".
 
 ### Redis Connection Failed

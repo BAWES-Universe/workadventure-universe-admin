@@ -110,10 +110,19 @@ Use a separate init container that runs migrations before the main app starts.
 
 ### "Database migrations did not apply ... Orbit is NOT starting"
 
-The container stops on purpose: this version needs a database change that did not happen. Read the
-reason above that line (`docker logs <container-name>`). Then:
+The new container refuses on purpose: this version needs a database change that did not happen. What
+happens next depends on the Coolify health check:
 
-1. If the database could not be reached, fix the connection and start the container again.
+- **Health check OFF** (production as of 26 Nov 2026): the old container is already gone, so Orbit is
+  down. The new container stops, or Docker keeps restarting it. Read the reason above that line with
+  `docker logs <container-name>`.
+- **Health check ON**: Coolify removes the new container, marks the deploy failed, and the old version
+  keeps serving. Read the reason in that deploy's log in Coolify.
+
+Then:
+
+1. If the database could not be reached, fix the connection, then start the container again (check OFF)
+   or redeploy (check ON).
 2. If a migration failed, it is recorded as failed and every later start refuses (Prisma error P3009)
    until it is resolved. Migrations that applied before the failing one stay applied.
    - **First check whether the failed migration's changes are in the database.** A migration that
@@ -128,19 +137,20 @@ reason above that line (`docker logs <container-name>`). Then:
        ```bash
        node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
        ```
-     - none of them are: stop the failed container first, then `migrate resolve --rolled-back <migration name>`,
-       and deploy an image with the fixed migration;
-     - only some are: stop the failed container, undo those by hand, then `--rolled-back`, and deploy the
-       fixed image.
+     - none of them are: `migrate resolve --rolled-back <migration name>`, and deploy an image with the
+       fixed migration. With the check OFF, stop the failed container before that; with it ON there is no
+       failed container, and the one running is the old version that serves, so never stop it;
+     - only some are: undo those by hand, then the same as "none of them are".
    - Never `--rolled-back` a migration whose changes are in the database: the next start would run it
      again, and it fails again or applies twice.
 
 ### Running the Prisma CLI when the container will not start
 
-A container that refused to start has stopped, or Docker keeps restarting it, so `docker exec` cannot
-reach it. Run the Prisma CLI shipped in the same image in a one-off container instead, on the same
-Docker network and with the same `DATABASE_URL`. On the server, with `C` set to the Orbit container's
-name (`docker ps -a`):
+A container that refused to start has stopped, or Docker keeps restarting it (check OFF), or Coolify
+removed it (check ON), so `docker exec` cannot reach it. Run the Prisma CLI shipped in the failed release's
+image in a one-off container instead, on the same Docker network and with the same `DATABASE_URL`.
+The commands below are written for the health check OFF. **With the check ON, read the paragraph after
+them first**: two lines differ. On the server, with `C` set to the Orbit container's name (`docker ps -a`):
 
 ```bash
 C=<container-name>
@@ -157,25 +167,27 @@ docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/p
 # then, only after checking the database as described above, ONE of:
 #   all of its changes are there:
 docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --applied <migration name>
-#   none of them are (after undoing any partial ones). Stop the failed container FIRST: if it restarts
-#   after this, it runs the bad migration again, and then the fixed image refuses to start too.
+#   none of them are (after undoing any partial ones). Check OFF: stop the failed container FIRST; if it
+#   restarts after this, it runs the bad migration again, and then the fixed image refuses to start too.
+#   Check ON: skip this docker stop line (there $C is the old version that is still serving).
 docker stop "$C"
 docker run --rm --network "$NET" --env-file "$ENVF" "$IMAGE" node node_modules/prisma/build/index.js migrate resolve --rolled-back <migration name>
 
 rm -f "$ENVF"
 ```
 
-This uses the image's own Prisma CLI by path, not `npx prisma`, which is not tied to that copy. After
-`--applied`, a restarting container picks it up on its next start, and one that stopped starts with
-`docker start "$C"`. After `--rolled-back`, leave that container stopped and deploy the image with the
-fixed migration.
+This uses the image's own Prisma CLI by path, not `npx prisma`, which is not tied to that copy. With the
+check OFF: after `--applied`, a restarting container picks it up on its next start, and one that stopped
+starts with `docker start "$C"`; after `--rolled-back`, leave that container stopped and deploy the image
+with the fixed migration.
 
 **With the Coolify health check ON**, Coolify removes the failed new container and keeps the old version
 serving, so `docker ps -a` shows only the old one. Its image does not have the new migration
 (`migrate resolve` would say the migration could not be found). Set `C` to the running old container for
 the network and `DATABASE_URL` above, but set `IMAGE` to the image of the failed deploy (the newest Orbit
-image in `docker images`). There is no failed container left to stop. After `--applied`, redeploy that
-same release; after `--rolled-back`, deploy the fixed one.
+image in `docker images`). Skip the `docker stop "$C"` line: here `$C` is the old version that is still
+serving, and stopping it takes Orbit down. After `--applied`, redeploy that same release; after
+`--rolled-back`, deploy the fixed one.
 
 ### "Prisma Client not found"
 
