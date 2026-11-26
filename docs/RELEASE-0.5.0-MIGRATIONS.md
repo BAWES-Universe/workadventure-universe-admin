@@ -41,6 +41,7 @@ already ran part of the 0.5.0 work (development, staging): there they run agains
 | `20261119120000_meter_allowance_history` | Writes the allowance saved today into `meter_allowance_changes` (from 1970), and a later-dated one from its day |
 | `20261114120000_visiting_bricks_on_by_default` | Sets `allow_visiting_bricks` on every universe |
 | `20261120090000_archive_deletion_since` | Marks copies already `superseded` as waiting for deletion from the moment of the migration |
+| `20261126100000_research_on_by_default` | Only while each is still exactly the seeded value: raises the Instant ceiling (`instant-limits.exposureCeilingMicros`) from $1.00 to $200.00 a month, adds `maxRunsPerQuestion` 8 when absent, and supersedes the seeded Instant Apps default (`seed-default-instant_apps-v1`, $0.10 once) with version 2 ($2.00 a month for everyone, from now). Anything a super admin saved is left as it is |
 
 Three migrations build an index and say so in their own header: `20261119090001` and `20261119090002` use `CREATE INDEX CONCURRENTLY` (one statement each, so
 Prisma runs them outside a transaction and checkouts in flight are never blocked), and `20261119230000_ai_usage_report_key` builds a **non-concurrent** unique
@@ -295,4 +296,5 @@ the statements it sends keep working against the new columns, which are all null
 205. `20261125000000_computer_mark_in_orbit`
 206. `20261125100000_computer_take_over_check`
 207. `20261126000000_app_actions`
+208. `20261126100000_research_on_by_default`
 <!-- migrations:end -->

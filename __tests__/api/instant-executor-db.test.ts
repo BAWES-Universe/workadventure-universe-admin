@@ -7,6 +7,8 @@ import type { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 
+const mockSession: { current: { id: string } | null } = { current: null };
+jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockSession.current) }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
 
 import { prisma } from '@/lib/db';
@@ -17,13 +19,14 @@ import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { customerAmountOf, instantReportingGaps, instantRunsUnsettled, reportInstantRun, repairInstantReporting } from '@/lib/instant/report';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
-import { admitInstantTool } from '@/lib/instant/values';
+import { admitInstantTool, instantCallFeeMicros } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 import { dollars } from '@/lib/task-receipt-words';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
+import { GET as readyToUseRoute } from '@/app/api/me/apps/instant/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -113,6 +116,10 @@ let brick = '';
 let omarBrick = '';
 const envBefore = { service: process.env.BOT_SERVICE_TOKEN };
 const callId = () => `call-${randomUUID()}`;
+/** Composio's call fee, counted against the person's own credit on every run that worked (the money call of 26 Nov 2026). */
+const FEE = instantCallFeeMicros();
+/** What the person pays for Exa's 7,000 with a 10% markup: the charge and the fee, marked up, rounded up. */
+const MARKED = Math.ceil(((7_000 + FEE) * 11_000) / 10_000);
 const ask = (over: Record<string, unknown> = {}) => ({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: { query: 'weather' }, callId: callId(), ...over });
 const setLimits = (over: Record<string, number | null> = {}) =>
   saveInstantLimits({ maxRunMicros: 50_000, exposureCeilingMicros: 1_000_000, pauseFailureRateBps: 5_000, pauseMinRuns: 10, ...over }, sara);
@@ -140,7 +147,6 @@ run('the bounded Instant executor, in a real database', () => {
     forgetDriftClock();
     await resumeInstant(sara);
     await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-reporting-cursor'] } } });
-    await giveApp(brick, sara, 'exa');
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
@@ -275,13 +281,13 @@ run('the bounded Instant executor, in a real database', () => {
         return { ok: true, chargedMicros: input.chargeMicros };
       });
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
-      expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000, pending: false, data: { hits: 1 } });
+      expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000 + FEE, pending: false, data: { hits: 1 } });
       // The hold was the top price, taken before the provider was called
       expect(f.funds.reserve.mock.invocationCallOrder[0]).toBeLessThan(p.instant.run.mock.invocationCallOrder[0]);
       expect(f.funds.reserve.mock.calls[0][0]).toMatchObject({ amountMicros: TOP, charge: { class: 'instant', route: 'composio', provider: 'composio' } });
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       expect(row).toMatchObject({ state: 'succeeded', customerState: 'charged', providerState: 'settled', providerBasis: 'measured' });
-      expect(Number(row.customerMicros)).toBe(7_000);
+      expect(Number(row.customerMicros)).toBe(7_000 + FEE);
       expect(Number(row.providerMicros)).toBe(7_000);
       expect(Number(row.topMicros)).toBe(TOP);
       // Sent through the Instant path under an opaque id, never a person's id
@@ -306,7 +312,7 @@ run('the bounded Instant executor, in a real database', () => {
       try {
         await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
         const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
-        expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000 });
+        expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000 + FEE });
         const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
         expect(row).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'charged' });
         expect(Number(row.providerMicros)).toBe(7_000);
@@ -321,7 +327,7 @@ run('the bounded Instant executor, in a real database', () => {
       const events = await prisma.meterEvent.findMany({ where: { personId: sara } });
       expect(events).toHaveLength(1);
       expect(Number(events[0].costMicros)).toBe(7_000);
-      expect(events[0].detail).toMatchObject({ customerMicros: 7_000, runId: (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id });
+      expect(events[0].detail).toMatchObject({ customerMicros: 7_000 + FEE, runId: (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id });
       // And a sweep after that writes nothing more
       await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
       expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(1);
@@ -360,7 +366,7 @@ run('the bounded Instant executor, in a real database', () => {
       const event = await eventOf(rowId);
       expect(event).toMatchObject({ kind: 'app_use', route: 'instant', pool: 'chat', payerKind: 'universe', personId: sara, botId: brick, basis: 'measured', quantity: BigInt(1) });
       expect(Number(event?.costMicros)).toBe(7_000);
-      expect(customerOf(event)).toBe(7_000);
+      expect(customerOf(event)).toBe(7_000 + FEE);
       // The day the run was settled, never the day it was mended
       expect(event?.occurredAt.getTime()).toBe(row.finishedAt?.getTime());
       // Again: nothing is written, corrected or called
@@ -371,14 +377,14 @@ run('the bounded Instant executor, in a real database', () => {
       expect({ run: p.instant.run.mock.calls.length, reserve: f.funds.reserve.mock.calls.length, settle: f.funds.settle.mock.calls.length, release: f.funds.release.mock.calls.length }).toEqual(calls);
     });
 
-    it('the usage event says what the credit books confirmed (6,000), never the amount worked out for the hold (7,700): pending until then, and a wrong one is corrected and kept in the event', async () => {
+    it('the usage event says what the credit books confirmed (6,000), never the amount worked out for the hold (8,360: the charge and the call fee, with the markup): pending until then, and a wrong one is corrected and kept in the event', async () => {
       await setLimits({ markupBps: 1_000 });
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       // The books took an earlier charge for this hold and answer with it
       let seenWhileSettling: unknown = 'not asked';
       f.funds.settle.mockImplementation(async (input: { key: string; chargeMicros: number }) => {
-        expect(input.chargeMicros).toBe(7_700);
+        expect(input.chargeMicros).toBe(MARKED);
         const [mine] = await prisma.meterEvent.findMany({ where: { personId: sara } });
         seenWhileSettling = mine ? customerOf(mine) : 'no event';
         const hold = f.holds.get(input.key)!;
@@ -556,11 +562,11 @@ run('the bounded Instant executor, in a real database', () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
-      expect(outcome).toMatchObject({ status: 'done', chargedMicros: 7_700 });
+      expect(outcome).toMatchObject({ status: 'done', chargedMicros: MARKED });
       expect(f.funds.reserve.mock.calls[0][0].amountMicros).toBe(Math.ceil(TOP * 1.1));
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       expect(Number(row.providerMicros)).toBe(7_000);
-      expect(Number(row.customerMicros)).toBe(7_700);
+      expect(Number(row.customerMicros)).toBe(MARKED);
     });
 
     it('reads the charge from Composios log when the answer does not carry it', async () => {
@@ -569,7 +575,7 @@ run('the bounded Instant executor, in a real database', () => {
       const f = fakeFunds(1_000_000);
       p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'log-x', chargeMicros: null });
       p.script.logs.set('log-x', p.line('whatever', 'success', 6_500, 'log-x'));
-      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done', chargedMicros: 6_500, pending: false });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done', chargedMicros: 6_500 + FEE, pending: false });
     });
 
     it('with no charge anywhere, hands the answer over and keeps the top price pending, then settles on the log, or at the top price after the wait', async () => {
@@ -605,7 +611,7 @@ run('the bounded Instant executor, in a real database', () => {
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date() });
       const row = await runOf(rowId);
       expect(row).toMatchObject({ customerState: 'charged', providerState: 'settled', providerBasis: 'measured' });
-      expect(Number(row.customerMicros)).toBe(5_000);
+      expect(Number(row.customerMicros)).toBe(5_000 + FEE);
     });
 
     it('a charge above the top price still settles, the person pays the hold at most, and Instant stops', async () => {
@@ -759,7 +765,7 @@ run('the bounded Instant executor, in a real database', () => {
       await sweepInstant({ funds: f.funds, adapter: p.adapter });
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       expect(row.customerState).toBe('charged');
-      expect(Number(row.customerMicros)).toBe(7_000);
+      expect(Number(row.customerMicros)).toBe(7_000 + FEE);
     });
   });
 
@@ -817,7 +823,7 @@ run('the bounded Instant executor, in a real database', () => {
       p.script.logs.set('log-late', p.line(row.providerUserId, 'success', 7_000, 'log-late'));
       p.script.responses.set('log-late', { successful: true, data: { hits: 42 } });
       const outcome = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
-      expect(outcome).toMatchObject({ status: 'done', recovered: true, data: { hits: 42 }, chargedMicros: 7_000 });
+      expect(outcome).toMatchObject({ status: 'done', recovered: true, data: { hits: 42 }, chargedMicros: 7_000 + FEE });
       expect(p.instant.run).toHaveBeenCalledTimes(1);
       expect(p.instant.findLogs.mock.calls[0][0]).toMatchObject({ userId: row.providerUserId });
       expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', customerState: 'charged', providerState: 'settled' });
@@ -1013,66 +1019,164 @@ run('the bounded Instant executor, in a real database', () => {
     });
   });
 
-  describe('nothing is on for a Brick unless its owner switched that App on for it', () => {
-    const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name).sort();
+  describe('research Apps are on for every Brick’s owner by default, and their own App of the same service wins', () => {
+    const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+    const liveTools = (p: ReturnType<typeof fakeProvider>) => p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
+    /** An App of the owner's own, by its link (a sign-in or a key in the link), granted to a Brick. */
+    async function ownLink(botId: string, ownerId: string, serverUrl: string, over: Record<string, unknown> = {}, grant: Record<string, unknown> = {}) {
+      const connection = await prisma.appConnection.create({ data: { ownerId, name: `own-${randomUUID().slice(0, 6)}`, serverUrl, authType: 'none', source: 'link', ...over } as never });
+      await prisma.botMcpServer.create({ data: { botId, name: connection.name, serverUrl, connectionId: connection.id, enabled: true, ...grant } as never });
+      return connection;
+    }
 
-    it('a Brick with no App on is offered nothing and refused anything, and the provider and the credit books are never touched', async () => {
-      await setLimits();
-      await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
-      setInstantFunds(fakeFunds(1_000_000).funds);
-      const p = fakeProvider();
-      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
-      setAdapterForTests(p.adapter);
-      expect(await toolNames()).toEqual([]);
-      const f = fakeFunds(1_000_000);
-      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
-      expect(p.instant.run).not.toHaveBeenCalled();
-      expect(f.funds.reserve).not.toHaveBeenCalled();
-    });
-
-    it('only the Apps the owner switched on are offered and run: one App, not all of them', async () => {
+    it('a Brick with nothing connected is offered every research App, cheapest first, and runs one with no connect and no switch', async () => {
       await setLimits();
       setInstantFunds(fakeFunds(1_000_000).funds);
       const p = fakeProvider();
-      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
+      liveTools(p);
       setAdapterForTests(p.adapter);
-      const names = await toolNames();
-      expect(names).toEqual(['EXA_ANSWER', 'EXA_GET_CONTENTS_ACTION', 'EXA_SEARCH']);
+      expect(await toolNames()).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);
+      const listed = (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; app: string; strength: string }[] };
+      // Each tool says which App it is and what that App is good at: what the Brick picks by. Never the provider that runs it
+      expect(listed.tools.find((tool) => tool.name === 'TAVILY_SEARCH')).toMatchObject({ app: 'Tavily', strength: 'Fresh news and quick facts' });
+      expect(JSON.stringify(listed)).not.toMatch(/composio/i);
       // The schema a Brick is offered is cut to the arguments a run may carry: no contents, no result count past the limit
       p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: { type: 'object', properties: { query: {}, contents: {}, type: {} }, required: ['query'] }, instantSupported: true, priceWords: null })) as never);
       const { forgetToolSchemas } = await import('@/lib/instant/tools');
       forgetToolSchemas();
-      const listed = (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; inputSchema: { properties: Record<string, unknown>; required: string[] } }[] };
-      const search = listed.tools.find((tool) => tool.name === 'EXA_SEARCH');
+      const cut = (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; inputSchema: { properties: Record<string, unknown>; required: string[] } }[] };
+      const search = cut.tools.find((tool) => tool.name === 'EXA_SEARCH');
       expect(Object.keys(search?.inputSchema.properties ?? {})).toEqual(['query']);
       expect(search?.inputSchema.required).toEqual(['query']);
+      const firstUses = async () => Object.fromEntries(((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; firstUse: boolean }[] }).tools.map((tool) => [tool.name, tool.firstUse]));
+      // Nothing used yet: every App is new to the owner, so its first use may say once that their own account has no Universe limit
+      expect(await firstUses()).toEqual({ EXA_GET_CONTENTS_ACTION: true, EXA_ANSWER: true, EXA_SEARCH: true, TAVILY_SEARCH: true });
       const f = fakeFunds(1_000_000);
-      // Exa is on: it runs. Tavily is not on: it is refused without a hold.
+      // A run that failed is not a use
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-fail', chargeMicros: null });
+      expect(await runInstant(ask({ arguments: { query: 'failed' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed' });
+      expect((await firstUses()).EXA_SEARCH).toBe(true);
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      // Exa worked once (any of its tools): no longer new. Tavily still is
+      expect(await firstUses()).toEqual({ EXA_GET_CONTENTS_ACTION: false, EXA_ANSWER: false, EXA_SEARCH: false, TAVILY_SEARCH: true });
+      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      expect((await firstUses()).TAVILY_SEARCH).toBe(false);
+      forgetToolSchemas();
+    });
+
+    it('the owner’s own App of the same service, on for this Brick, wins: the Universe-paid one is neither offered nor run, and nothing is held for it', async () => {
+      await setLimits();
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      liveTools(p);
+      setAdapterForTests(p.adapter);
+      // Their own Tavily by its link (the key in the link): Tavily is theirs on this Brick, Exa is still Universe's
+      await ownLink(brick, sara, 'https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-x');
+      expect(await toolNames()).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH']);
+      const f = fakeFunds(1_000_000);
       expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
       expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(p.instant.run).not.toHaveBeenCalled();
       expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
-    });
-
-    it('an App the owner switched off for the Brick, or only has on another Brick, is not on for this one', async () => {
-      await setLimits();
+      // A key app of theirs for Exa (its origin is the service's own API) wins the same way
       await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
-      await giveApp(brick, sara, 'tavily', false);
-      const other = (await prisma.bot.create({ data: { name: `Other ${tag}`, ownerId: sara, roomId: null } as never })).id;
-      await giveApp(other, sara, 'exa');
-      const f = fakeFunds(1_000_000);
-      const p = fakeProvider();
-      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_offered' });
-      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_offered' });
-      expect(f.funds.reserve).not.toHaveBeenCalled();
-      await prisma.bot.delete({ where: { id: other } });
+      await ownLink(brick, sara, 'https://api.exa.ai', { kind: 'direct', source: 'direct', keyCipher: 'sealed', definition: {}, definitionHash: 'h' });
+      expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+      // An App set up on the Brick itself before Apps were connected once counts as the owner's own too
+      await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
+      await prisma.botMcpServer.create({ data: { botId: brick, name: 'my exa', serverUrl: 'https://mcp.exa.ai/mcp', enabled: true } as never });
+      expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+      await prisma.botMcpServer.deleteMany({ where: { botId: brick } });
     });
 
-    it("matches an App's name loosely (the provider's spelling, any case)", async () => {
+    it('their own App only wins where it can work: switched off for this Brick, only on another Brick, a sign-in not finished or refused all leave the Universe-paid one on', async () => {
       await setLimits();
-      await giveApp(brick, sara, 'TAVILY');
-      const f = fakeFunds(1_000_000);
+      setInstantFunds(fakeFunds(1_000_000).funds);
       const p = fakeProvider();
-      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).not.toMatchObject({ reason: 'not_offered' });
+      liveTools(p);
+      setAdapterForTests(p.adapter);
+      const all = ['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH'];
+      const other = (await prisma.bot.create({ data: { name: `Other ${tag}`, ownerId: sara, roomId: null } as never })).id;
+      try {
+        await ownLink(brick, sara, 'https://mcp.exa.ai/mcp', {}, { enabled: false });
+        await ownLink(other, sara, 'https://mcp.tavily.com/mcp');
+        // (Someone else's App can never be granted to this Brick: the database refuses it, so it is not a case here)
+        // A ready-made sign-in that was never finished, and a link whose sign-in the App refused
+        await giveApp(brick, sara, 'exa');
+        await ownLink(brick, sara, 'https://mcp.exa.ai/mcp?login', { signInLostAt: new Date() });
+        expect(await toolNames()).toEqual(all);
+        // The ready-made one finishes its sign-in: now Exa is theirs on this Brick (the App's name matched loosely, any case)
+        await prisma.appConnection.updateMany({ where: { ownerId: sara, source: 'ready_made' }, data: { providerConfirmedAt: new Date(), providerToolkit: 'EXA' } });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+      } finally {
+        await prisma.bot.delete({ where: { id: other } });
+      }
+    });
+
+    it('the Apps page lists them as ready to use for the person: name and one line, cheapest first, never a price or the provider; theirs is not listed beside their own; 404 while none can run', async () => {
+      const readyToUse = async () => {
+        const response = await readyToUseRoute(new NextRequest('http://localhost/api/me/apps/instant'));
+        return { status: response.status, body: (await response.json()) as { apps?: { key: string; name: string; blurb: string }[] } };
+      };
+      mockSession.current = { id: sara };
+      try {
+        // Instant cannot run (no limits, no credit source, no provider): nothing is listed
+        expect((await readyToUse()).status).toBe(404);
+        await setLimits();
+        setInstantFunds(fakeFunds(1_000_000).funds);
+        const p = fakeProvider();
+        liveTools(p);
+        setAdapterForTests(p.adapter);
+        const listed = await readyToUse();
+        expect(listed).toEqual({
+          status: 200,
+          body: { apps: [{ key: 'exa', name: 'Exa', blurb: 'Papers, companies and people' }, { key: 'tavily', name: 'Tavily', blurb: 'Fresh news and quick facts' }] },
+        });
+        expect(JSON.stringify(listed.body)).not.toMatch(/composio|\$|micros|price/i);
+        // Their own Tavily (on any Brick, or none): listed under Connected, so not here
+        await prisma.appConnection.create({ data: { ownerId: sara, name: 'My Tavily', serverUrl: 'https://mcp.tavily.com/mcp', authType: 'none', source: 'link' } as never });
+        expect((await readyToUse()).body.apps?.map((app) => app.key)).toEqual(['exa']);
+        // Paused: nothing is ready to use
+        p.instant.tool.mockImplementation((async () => null) as never);
+        const { forgetToolSchemas } = await import('@/lib/instant/tools');
+        forgetToolSchemas();
+        expect((await readyToUse()).status).toBe(404);
+        // A guest has no Apps page of their own
+        const guest = await prisma.user.create({ data: { uuid: `guest-${tag}`, email: null, name: 'guest', isGuest: true } as never });
+        mockSession.current = { id: guest.id };
+        expect((await readyToUse()).status).toBe(403);
+        await prisma.user.delete({ where: { id: guest.id } });
+      } finally {
+        mockSession.current = null;
+      }
+    });
+
+    it('a question stops at the most runs one question may have: counted per task, refused runs do not count, another question starts again', async () => {
+      await setLimits({ maxRunsPerQuestion: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const task = `task-${randomUUID()}`;
+      expect(await runInstant(ask({ taskKey: task }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      // A run refused for its arguments never went out: it does not count
+      expect(await runInstant(ask({ taskKey: task, arguments: { query: 'x', contents: true } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'unbounded' });
+      // Nor does one the credit did not cover (it is saved, as refused, and never went out)
+      f.state.reserveReason = 'credit_used_up';
+      expect(await runInstant(ask({ taskKey: task, arguments: { query: 'no credit' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'credit_used_up' });
+      expect(await prisma.instantRun.count({ where: { personId: sara, taskKey: task, state: 'refused' } })).toBe(1);
+      f.state.reserveReason = null;
+      expect(await runInstant(ask({ taskKey: task, tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      const reserves = f.funds.reserve.mock.calls.length;
+      const third = await runInstant(ask({ taskKey: task, arguments: { query: 'third' } }), { adapter: p.adapter, funds: f.funds });
+      expect(third).toMatchObject({ status: 'refused', reason: 'question_limit' });
+      // Nothing was held or sent for it
+      expect(f.funds.reserve.mock.calls.length).toBe(reserves);
+      expect(p.instant.run).toHaveBeenCalledTimes(2);
+      // A new question, and a run that belongs to no task, are not held back by it
+      expect(await runInstant(ask({ taskKey: `task-${randomUUID()}` }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      expect(await runInstant(ask({ arguments: { query: 'no task' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      // Empty: no bound per question
+      await setLimits({ maxRunsPerQuestion: null });
+      expect(await runInstant(ask({ taskKey: task, arguments: { query: 'unbounded now' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
     });
   });
 
@@ -1098,7 +1202,7 @@ run('the bounded Instant executor, in a real database', () => {
       const f = fakeFunds(1_000_000);
       const id = callId();
       await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
-      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done', chargedMicros: 7_000 });
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done', chargedMicros: 7_000 + FEE });
       expect(p.instant.run).toHaveBeenCalledTimes(1);
     });
 
@@ -2803,14 +2907,14 @@ run('the bounded Instant executor, in a real database', () => {
         await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS instant_test_lost_write ON instant_runs');
         await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS instant_test_lost_write()');
       }
-      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
+      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 + FEE });
       expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
       // The retry asks again, the books answer with the first amount, and that is what is recorded
       await sweepInstant({ funds: f.funds, adapter: p.adapter });
       const after = await runOf(row.id);
       expect(after).toMatchObject({ customerState: 'charged' });
-      expect(Number(after.customerMicros)).toBe(7_000);
-      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
+      expect(Number(after.customerMicros)).toBe(7_000 + FEE);
+      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 + FEE });
     });
 
     it('the credit books are never asked from inside a database transaction', async () => {
@@ -2860,7 +2964,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(row.customerState).toBe('held');
       await sweepInstant({ funds: f.funds, adapter: p.adapter });
       expect(await runOf(row.id)).toMatchObject({ customerState: 'charged' });
-      expect(Number((await runOf(row.id)).customerMicros)).toBe(7_000);
+      expect(Number((await runOf(row.id)).customerMicros)).toBe(7_000 + FEE);
     });
 
     it('a give-back the books already made is finished even when the goodwill limits were cleared afterwards', async () => {
@@ -2955,8 +3059,8 @@ run('the bounded Instant executor, in a real database', () => {
       await sweepInstant({ funds: f.funds, adapter: p.adapter });
       const asked = f.funds.settle.mock.calls.map((call) => call[0].chargeMicros);
       expect(asked.length).toBeGreaterThanOrEqual(2);
-      expect(new Set(asked)).toEqual(new Set([7_700]));
-      expect(Number((await runOf(row.id)).customerMicros)).toBe(7_700);
+      expect(new Set(asked)).toEqual(new Set([MARKED]));
+      expect(Number((await runOf(row.id)).customerMicros)).toBe(MARKED);
     });
 
     it('a run whose reservation was never answered is closed but kept marked as holding on a plain "no", and cleared only when the books confirm nothing is held', async () => {

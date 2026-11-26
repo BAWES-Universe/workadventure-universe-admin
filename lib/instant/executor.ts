@@ -147,7 +147,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   const admitted = admitInstantTool(input.tool, input.arguments);
   if (!admitted.ok) return refuse(admitted.reason);
-  // Nothing is on for a Brick by default: only an App its owner switched on for this Brick can run
+  // Research Apps are on for every Brick's owner by default; one whose own App of the same service is on for this Brick uses that instead
   if (!(await brickHasApp(input.botId, admitted.toolkit))) return refuse('not_offered');
   if (admitted.topMicros > (limits.maxRunMicros ?? 0)) return refuse('too_costly');
 
@@ -184,6 +184,13 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
       // Two asks that arrive together with different call ids both passed the check above: only one gets past this one
       const sameAsk = await openTwin(tx, input.personId, fingerprint);
       if (sameAsk) return { kind: 'refused', outcome: refuse('already_checking', { runId: sameAsk }) };
+      // One question (one task) has at most so many runs, counted under this lock so two runs of one question at once cannot both slip past it.
+      // A run that was refused never went out, so it does not count
+      const taskKey = taskKeyOf(input);
+      if (taskKey && limits.maxRunsPerQuestion !== null) {
+        const runs = await tx.instantRun.count({ where: { personId: input.personId, taskKey, state: { not: 'refused' } } });
+        if (runs >= limits.maxRunsPerQuestion) return { kind: 'refused', outcome: refuse('question_limit') };
+      }
       const exposure = await exposureIn(tx, now);
       if (exposure + admitted.topMicros > (limits.exposureCeilingMicros ?? 0)) return { kind: 'refused', outcome: refuse('exposure_full') };
       const id = crypto.randomUUID();

@@ -4189,6 +4189,7 @@ model InstantRun {
   @@index([providerState, createdAt])
   @@index([personId, createdAt])
   @@index([personId, argsHash, state])
+  @@index([personId, taskKey])
   @@map("instant_runs")
 }
 

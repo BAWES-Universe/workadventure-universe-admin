@@ -1203,7 +1203,7 @@ export type InstantLimitView = {
 };
 export type InstantLimitViews = Record<string, InstantLimitView>;
 
-const INSTANT_COUNT_WORDS: Record<string, string> = { pauseMinRuns: 'runs', goodwillPerPersonPerMonth: 'give-backs' };
+const INSTANT_COUNT_WORDS: Record<string, string> = { pauseMinRuns: 'runs', goodwillPerPersonPerMonth: 'give-backs', maxRunsPerQuestion: 'runs' };
 const instantScale = (unit: InstantLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bps' ? 100 : 1);
 const instantUnit = (key: string, unit: InstantLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bps' ? 'percent' : unit === 'minutes' ? 'minutes' : (INSTANT_COUNT_WORDS[key] ?? 'times'));
 
