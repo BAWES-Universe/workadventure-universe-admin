@@ -1020,6 +1020,26 @@ run('the bounded Instant executor, in a real database', () => {
   });
 
   describe('research Apps are on for every Brick’s owner by default, and their own App of the same service wins', () => {
+    let meterBefore: Prisma.JsonValue | null = null;
+    /** This month's rollout budget, the cap on all default credit issued (the seeded $20 lets about 8 people a month have the $2). */
+    const setBudget = async (micros: number) => {
+      const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      const value = { ...((row?.value as Record<string, unknown> | null) ?? {}), rolloutBudgetMicros: micros };
+      await prisma.appSetting.upsert({ where: { key: 'meter' }, create: { key: 'meter', value: value as never }, update: { value: value as never } });
+    };
+    // Every owner here is given their monthly research credit, however many people other tests were already given some this month
+    beforeAll(async () => {
+      meterBefore = (await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value ?? null;
+      await setBudget(1_000_000_000_000);
+    });
+    afterAll(async () => {
+      // Listing research issues the owner's monthly credit: theirs goes with them
+      await prisma.creditAllocation.deleteMany({ where: { hold: { personId: { in: [sara, omar] } } } });
+      await prisma.creditHold.deleteMany({ where: { personId: { in: [sara, omar] } } });
+      await prisma.creditLot.deleteMany({ where: { personId: { in: [sara, omar] } } });
+      if (meterBefore === null) await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      else await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: meterBefore as never } });
+    });
     const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name);
     const liveTools = (p: ReturnType<typeof fakeProvider>) => p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
     /** An App of the owner's own, by its link (a sign-in or a key in the link), granted to a Brick. */
@@ -1064,7 +1084,7 @@ run('the bounded Instant executor, in a real database', () => {
       forgetToolSchemas();
     });
 
-    it('nothing is offered to a bot that cannot run Instant: a room bot, a deleted Brick, an unknown Brick or no Brick at all', async () => {
+    it('nothing is offered to a bot that cannot run Instant: a room bot, a deleted or switched-off Brick, an unknown Brick or no Brick at all', async () => {
       await setLimits();
       setInstantFunds(fakeFunds(1_000_000).funds);
       const p = fakeProvider();
@@ -1078,10 +1098,15 @@ run('the bounded Instant executor, in a real database', () => {
       const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
       const roomBot = (await prisma.bot.create({ data: { name: `Room ${tag}`, roomId: room.id } as never })).id;
       const gone = (await prisma.bot.create({ data: { name: `Gone ${tag}`, ownerId: sara, roomId: null, deletedAt: new Date(), goneAt: new Date(Date.now() + 86_400_000), enabled: false } as never })).id;
+      const off = (await prisma.bot.create({ data: { name: `Off ${tag}`, ownerId: sara, roomId: null, enabled: false } as never })).id;
       try {
-        for (const id of [roomBot, gone, randomUUID(), null]) expect(await listFor(id)).toMatchObject({ ready: true, tools: [] });
+        for (const id of [roomBot, gone, off, randomUUID(), null]) expect(await listFor(id)).toMatchObject({ ready: true, tools: [] });
+        // A Brick its owner switched off does not run one either
+        const f = fakeFunds(1_000_000);
+        expect(await runInstant(ask({ botId: off }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_owner' });
+        expect(f.funds.reserve).not.toHaveBeenCalled();
       } finally {
-        await prisma.bot.deleteMany({ where: { id: { in: [roomBot, gone] } } });
+        await prisma.bot.deleteMany({ where: { id: { in: [roomBot, gone, off] } } });
         await prisma.universe.delete({ where: { id: universe.id } });
       }
     });
@@ -1199,6 +1224,100 @@ run('the bounded Instant executor, in a real database', () => {
       // Empty: no bound per question
       await setLimits({ maxRunsPerQuestion: null });
       expect(await runInstant(ask({ taskKey: task, arguments: { query: 'unbounded now' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+    });
+
+    it('five runs of one question at the same moment with a bound of 2: exactly 2 go out', async () => {
+      await setLimits({ maxRunsPerQuestion: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const task = `task-${randomUUID()}`;
+      const outs = await Promise.all([0, 1, 2, 3, 4].map((i) => runInstant(ask({ taskKey: task, arguments: { query: `q${i}` } }), { adapter: p.adapter, funds: f.funds })));
+      expect(outs.filter((out) => out.status === 'done')).toHaveLength(2);
+      expect(outs.filter((out) => out.status === 'refused' && out.reason === 'question_limit')).toHaveLength(3);
+      expect(p.instant.run).toHaveBeenCalledTimes(2);
+      await setLimits({ maxRunsPerQuestion: null });
+    });
+
+    describe('an owner with no research credit is offered none and told why once, never "used up" for credit they were never given', () => {
+      const people: string[] = [];
+      const bricks: string[] = [];
+      const newOwner = async (name: string) => {
+        const person = (await prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } })).id;
+        const bot = (await prisma.bot.create({ data: { name: `${name} ${tag}`, ownerId: person, roomId: null } as never })).id;
+        people.push(person);
+        bricks.push(bot);
+        return { person, bot };
+      };
+      const listFor = async (botId: string) =>
+        (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${botId}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { ready: boolean; tools: { name: string }[]; research?: { state: string; renewsAt: string | null } };
+      const readyToUseFor = async (personId: string) => {
+        mockSession.current = { id: personId };
+        try {
+          return (await readyToUseRoute(new NextRequest('http://localhost/api/me/apps/instant'))).status;
+        } finally {
+          mockSession.current = null;
+        }
+      };
+
+      afterAll(async () => {
+        await setBudget(1_000_000_000_000);
+        await prisma.instantRun.deleteMany({ where: { personId: { in: people } } });
+        await prisma.creditAllocation.deleteMany({ where: { hold: { personId: { in: people } } } });
+        await prisma.creditHold.deleteMany({ where: { personId: { in: people } } });
+        await prisma.creditLot.deleteMany({ where: { personId: { in: people } } });
+        await prisma.bot.deleteMany({ where: { id: { in: bricks } } });
+        await prisma.user.deleteMany({ where: { id: { in: people } } });
+      });
+
+      it('with the month’s budget gone: no research tools, "not given" said once, a run refused as not given (no carry-on), and nothing ready to use', async () => {
+        await setLimits();
+        const { createInstantFunds } = await import('@/lib/funding/instant-funds');
+        setInstantFunds(createInstantFunds());
+        const p = fakeProvider();
+        liveTools(p);
+        setAdapterForTests(p.adapter);
+        // Nothing more may be issued this month: the next person is due $2 and is not given it
+        await setBudget(1);
+        const { person, bot } = await newOwner('noor');
+        expect(await listFor(bot)).toEqual({ ready: true, reason: null, tools: [], research: { state: 'not_given', renewsAt: null } });
+        // A run asked anyway is refused in words that do not say their credit is used up (they never had it), and nothing goes out
+        const out = await runInstant({ botId: bot, personId: person, tool: 'EXA_SEARCH', arguments: { query: 'weather' }, callId: callId() }, { adapter: p.adapter, funds: createInstantFunds() });
+        expect(out).toMatchObject({ status: 'refused', reason: 'credit_not_given' });
+        expect(p.instant.run).not.toHaveBeenCalled();
+        expect(await readyToUseFor(person)).toBe(404);
+        // Raised: the same person is given their $2 on the next look and is offered research again
+        await setBudget(1_000_000_000_000);
+        expect((await listFor(bot)).tools.map((tool) => tool.name)).toEqual(['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH']);
+        expect(await readyToUseFor(person)).toBe(200);
+        const { forgetToolSchemas } = await import('@/lib/instant/tools');
+        forgetToolSchemas();
+      });
+
+      it('an owner who spent their monthly credit is offered none until it comes back on the 1st (UTC), and gets it back as soon as room frees up', async () => {
+        await setLimits();
+        const { createInstantFunds } = await import('@/lib/funding/instant-funds');
+        setInstantFunds(createInstantFunds());
+        const p = fakeProvider();
+        liveTools(p);
+        setAdapterForTests(p.adapter);
+        await setBudget(1_000_000_000_000);
+        const { person, bot } = await newOwner('lina');
+        const { availableCredit, holdCredit, releaseHold } = await import('@/lib/credit-spend');
+        const { availableMicros } = await availableCredit(person, 'instant_apps');
+        expect(availableMicros).toBe(2_000_000);
+        // All but a sliver is spoken for: less than the cheapest search holds
+        const spendKey = `spend-${randomUUID()}`;
+        const held = await holdCredit({ holdKey: spendKey, personId: person, category: 'instant_apps', amountMicros: availableMicros - 100, chargeClass: 'instant_run' });
+        expect(held.ok).toBe(true);
+        const now = new Date();
+        const firstOfNext = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+        expect(await listFor(bot)).toEqual({ ready: true, reason: null, tools: [], research: { state: 'used_up', renewsAt: firstOfNext } });
+        expect(await readyToUseFor(person)).toBe(404);
+        await releaseHold({ holdKey: spendKey });
+        expect((await listFor(bot)).tools).toHaveLength(4);
+        const { forgetToolSchemas } = await import('@/lib/instant/tools');
+        forgetToolSchemas();
+      });
     });
   });
 

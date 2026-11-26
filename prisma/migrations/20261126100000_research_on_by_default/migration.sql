@@ -20,14 +20,14 @@ CREATE INDEX IF NOT EXISTS "instant_runs_person_id_task_key_idx" ON "instant_run
 -- ---------------------------------------------------------------------------------------------------------------------
 -- exposureCeilingMicros  200000000  $200.00 the most Instant may owe the provider in a month, everyone together (was the seeded $1.00)
 UPDATE "app_settings"
-SET "value" = jsonb_set("value", '{exposureCeilingMicros}', '200000000'::jsonb), "updated_at" = now()
+SET "value" = jsonb_set("value", '{exposureCeilingMicros}', '200000000'::jsonb), "updated_at" = (now() AT TIME ZONE 'UTC')
 WHERE "key" = 'instant-limits'
   AND jsonb_typeof("value") = 'object'
   AND "value"->'exposureCeilingMicros' = '1000000'::jsonb;
 
 -- maxRunsPerQuestion  8  a Brick may try another research App when the first answer is thin; one question stops at 8 runs (a count, not money)
 UPDATE "app_settings"
-SET "value" = "value" || '{"maxRunsPerQuestion":8}'::jsonb, "updated_at" = now()
+SET "value" = "value" || '{"maxRunsPerQuestion":8}'::jsonb, "updated_at" = (now() AT TIME ZONE 'UTC')
 WHERE "key" = 'instant-limits'
   AND jsonb_typeof("value") = 'object'
   AND NOT ("value" ? 'maxRunsPerQuestion');
@@ -42,7 +42,7 @@ DECLARE
   funding TEXT;
 BEGIN
   UPDATE "grant_rules"
-  SET "state" = 'superseded', "superseded_at" = now()
+  SET "state" = 'superseded', "superseded_at" = (now() AT TIME ZONE 'UTC')
   WHERE "id" = 'seed-default-instant_apps-v1'
     AND "program_id" = 'seed-default-instant_apps'
     AND "state" = 'current'
@@ -56,6 +56,6 @@ BEGIN
 
   IF funding IS NOT NULL THEN
     INSERT INTO "grant_rules" ("id", "program_id", "version", "state", "funding_account_id", "covers", "benefit_kind", "amount", "schedule", "share", "recipient_type", "claim_starts_at", "settlement", "created_by_id", "created_at")
-    VALUES ('seed-default-instant_apps-v2', 'seed-default-instant_apps', 2, 'current', funding, ARRAY['instant_apps']::TEXT[], 'replace', 2000000, 'monthly', 'each', 'all', now(), 'free', 'system', now());
+    VALUES ('seed-default-instant_apps-v2', 'seed-default-instant_apps', 2, 'current', funding, ARRAY['instant_apps']::TEXT[], 'replace', 2000000, 'monthly', 'each', 'all', (now() AT TIME ZONE 'UTC'), 'free', 'system', (now() AT TIME ZONE 'UTC'));
   END IF;
 END $$;

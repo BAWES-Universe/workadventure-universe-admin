@@ -137,8 +137,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   if (known) return known.personId === input.personId ? describeKnown(known, { funds, adapter, now }) : refuse('not_owner');
 
   // Instant is always the Brick's owner's own, on their own Brick: no room, owner is who asked, Brick not deleted
-  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
-  if (!bot || bot.roomId !== null || bot.deletedAt !== null || bot.ownerId !== input.personId) return refuse('not_owner');
+  const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, deletedAt: true, enabled: true } });
+  if (!bot || bot.roomId !== null || bot.deletedAt !== null || !bot.enabled || bot.ownerId !== input.personId) return refuse('not_owner');
 
   if (!instant) return refuse('not_set');
   const limits = await getInstantLimits();

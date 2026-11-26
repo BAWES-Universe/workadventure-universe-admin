@@ -22,6 +22,11 @@ export type NoCredit =
   | { ok: false; reason: 'credit_used_up'; availableMicros: number }
   /** Nothing is set up to give credit yet (no funded budget), so nothing was ever issued. */
   | { ok: false; reason: 'not_set'; availableMicros: 0 }
+  /**
+   * The person was due credit for this category this period and was not given it (this month's budget ran out, a cap was reached, two rules
+   * clash, or the account is paused), and they have nothing else that pays for it. Never told as "used up": they never had it.
+   */
+  | { ok: false; reason: 'not_given'; availableMicros: 0 }
   /** The charge class is not one this category pays for, or nested work is in the wrong class (it would be charged twice). */
   | { ok: false; reason: 'wrong_class' }
   /** The key was used for someone else: the first stands, and whoever asked has a bug to find. */
@@ -187,6 +192,7 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
     if (!takes) {
       const available = lots.reduce((sum, lot) => sum + lot.availableMicros, 0);
       if (lots.length === 0 && issued.skipped.some((s) => s.reason === 'not_set')) return { ok: false, reason: 'not_set', availableMicros: 0 };
+      if (lots.length === 0 && issued.skipped.some((s) => s.categoryId === input.category)) return { ok: false, reason: 'not_given', availableMicros: 0 };
       return { ok: false, reason: 'credit_used_up', availableMicros: available };
     }
     const row = await tx.creditHold.create({
@@ -449,8 +455,21 @@ export async function lapsedHolds(now: Date = new Date(), limit = 100): Promise<
 
 /** What a person has available for a category right now, issuing what is due first. Held room is already taken out. */
 export async function availableCredit(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number }> {
-  await ensureIssued(personId, now);
+  const standing = await creditStanding(personId, category, now);
+  return { availableMicros: standing.availableMicros, totalMicros: standing.totalMicros, heldMicros: standing.heldMicros };
+}
+
+/**
+ * `availableCredit` and why there may be none, in the words a hold would refuse with: `notGiven` when the person has nothing that pays for this
+ * category because what they were due this period was not issued (the month's budget ran out, a cap, a clash, a paused account, or no budget
+ * set), never "used up". `renewsAt` is when their monthly credit of this category comes again (the earliest end of a monthly lot they hold), or null.
+ */
+export async function creditStanding(personId: string, category: MoneyCategory, now: Date = new Date()): Promise<{ availableMicros: number; totalMicros: number; heldMicros: number; notGiven: boolean; renewsAt: Date | null }> {
+  const issued = await ensureIssued(personId, now);
   const lots = await usableLots(prisma, personId, category, now);
+  const notGiven = lots.length === 0 && issued.skipped.some((s) => s.reason === 'not_set' || s.categoryId === category);
+  const monthly = lots.filter((lot) => /^\d{4}-\d{2}$/.test(lot.lot.periodKey) && lot.expiresAt !== null).map((lot) => lot.expiresAt!.getTime());
+  const renewsAt = monthly.length > 0 ? new Date(Math.min(...monthly)) : null;
   const balances = await lotBalances(prisma, lots.map((lot) => lot.id));
   let available = 0;
   let total = 0;
@@ -462,5 +481,5 @@ export async function availableCredit(personId: string, category: MoneyCategory,
     total += b.amountMicros - b.usedMicros;
     held += b.heldMicros;
   }
-  return { availableMicros: available, totalMicros: total, heldMicros: held };
+  return { availableMicros: available, totalMicros: total, heldMicros: held, notGiven, renewsAt };
 }

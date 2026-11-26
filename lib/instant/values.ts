@@ -467,6 +467,7 @@ export type InstantReason =
   | 'too_costly' // the top price is above the most one run may cost
   | 'exposure_full' // our own limit with the provider is reached
   | 'credit_used_up' // the person's Instant Apps credit does not cover it
+  | 'credit_not_given' // the person was not given Instant Apps credit this period (the month's budget ran out) and has none
   | 'credit_unavailable' // the credit books could not be read: nothing ran
   | 'not_owner' // only the Brick's owner's own requests run Instant
   | 'already_checking' // the very same ask is still being looked up
@@ -494,6 +495,7 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   too_costly: 'That would cost more than one run may.',
   exposure_full: 'This is not available right now.',
   credit_used_up: 'Your Instant Apps credit does not cover it.',
+  credit_not_given: 'Research on Universe’s account isn’t available right now. Your own free account on Apps has no Universe limit.',
   credit_unavailable: 'I cannot read your credit right now, so nothing ran.',
   not_owner: 'Only my owner can have me run that.',
   already_checking: 'I am still checking the same request.',

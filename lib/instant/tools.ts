@@ -3,7 +3,8 @@ import { getAdapter } from '@/lib/app-adapter';
 import { appKeyOf, brickOwnResearch, personOwnResearch } from '@/lib/instant/asker';
 import { instantFundsAreWired } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause } from '@/lib/instant/state';
-import { instantAllowedArguments, instantAppOf, instantCatalog, missingInstantLimits } from '@/lib/instant/values';
+import { holdFor, instantAllowedArguments, instantAppOf, instantCatalog, missingInstantLimits } from '@/lib/instant/values';
+import { creditStanding } from '@/lib/credit-spend';
 
 /**
  * What a Brick may be offered: the research Apps of the table, on for every Brick's owner by default (none of them when the owner's own App of
@@ -93,15 +94,47 @@ function tighten(own: unknown, limit: Record<string, unknown>): unknown {
   return merged;
 }
 
-export async function offeredInstantTools(botId: string | null): Promise<{ ready: boolean; reason: string | null; tools: OfferedTool[] }> {
-  // Only a person's own Brick runs Instant (no room, an owner, not deleted), exactly as the executor refuses everything else: nothing is
-  // offered to any other bot, so a model is never invited to call what would only be refused
-  const bot = botId ? await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } }) : null;
-  const ownerId = bot && bot.roomId === null && bot.deletedAt === null && bot.ownerId ? bot.ownerId : null;
+/**
+ * Why research on Universe's account is not offered to a person who would otherwise have it: they were not given credit for it this period
+ * (`not_given`: the month's budget ran out, for one) or they spent it (`used_up`, back at `renewsAt` when it is monthly). The Brick says it once
+ * and points to their own free account on Apps, instead of running searches that would each be refused.
+ */
+export interface ResearchStanding {
+  state: 'not_given' | 'used_up';
+  renewsAt: string | null;
+}
+
+export type InstantListing = { ready: boolean; reason: string | null; tools: OfferedTool[]; research?: ResearchStanding };
+
+/**
+ * Whether the person's Instant Apps credit pays for at least the cheapest of these tools; when it does not, why. Unreadable books are not a reason
+ * to hide the tools (a run then says the books could not be read, as before).
+ */
+async function researchStanding(personId: string, tools: readonly OfferedTool[]): Promise<ResearchStanding | null> {
+  try {
+    const cheapest = Math.min(...tools.map((tool) => tool.fromMicros));
+    const { markupBps } = await getInstantLimits();
+    const standing = await creditStanding(personId, 'instant_apps');
+    if (standing.availableMicros >= holdFor(cheapest, markupBps)) return null;
+    return { state: standing.notGiven ? 'not_given' : 'used_up', renewsAt: standing.notGiven ? null : (standing.renewsAt?.toISOString() ?? null) };
+  } catch (error) {
+    console.error('[Instant] Could not read research credit:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
+}
+
+export async function offeredInstantTools(botId: string | null): Promise<InstantListing> {
+  // Only a person's own Brick runs Instant (no room, an owner, not deleted, switched on), exactly as the executor refuses everything else:
+  // nothing is offered to any other bot, so a model is never invited to call what would only be refused
+  const bot = botId ? await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true, enabled: true } }) : null;
+  const ownerId = bot && bot.roomId === null && bot.deletedAt === null && bot.enabled && bot.ownerId ? bot.ownerId : null;
   // A Brick's owner's own App of the same service is on for it: the Universe-paid one is not offered beside it
   const own = botId && ownerId ? await brickOwnResearch(botId) : new Set<string>();
   const offered = await instantToolsWhere((toolkit) => !!ownerId && !own.has(appKeyOf(toolkit)));
   if (offered.tools.length === 0 || !ownerId) return offered;
+  // No credit that pays for even the cheapest run: nothing is offered (every search would be refused), and the Brick is told why, once
+  const research = await researchStanding(ownerId, offered.tools);
+  if (research) return { ...offered, tools: [], research };
   const used = await appsUsedBy(ownerId);
   return { ...offered, tools: offered.tools.map((tool) => ({ ...tool, firstUse: !used.has(tool.toolkit) })) };
 }
@@ -153,6 +186,8 @@ async function instantToolsWhere(wanted: (toolkit: string) => boolean): Promise<
 export async function instantAppsForPerson(personId: string): Promise<{ key: string; name: string; blurb: string }[]> {
   const own = await personOwnResearch(personId);
   const offered = await instantToolsWhere((toolkit) => !own.has(appKeyOf(toolkit)));
+  // Not shown as ready to use while the person has no credit that pays for a search
+  if (offered.tools.length === 0 || (await researchStanding(personId, offered.tools))) return [];
   const apps: { key: string; name: string; blurb: string }[] = [];
   for (const tool of offered.tools) {
     if (apps.some((app) => app.key === tool.toolkit)) continue;

@@ -60,4 +60,15 @@ const emptied = await scenario(`
   UPDATE app_settings SET value = value - 'exposureCeilingMicros' WHERE key = 'instant-limits';
 `);
 
-console.log(JSON.stringify({ seeded, own, ended, emptied }));
+// A database whose own time zone is not UTC (Kuwait, three hours ahead): every time written is UTC, as the columns hold, so the monthly
+// credit starts now, not three hours from now
+const kuwait = await (async () => {
+  const db = await start(null);
+  await db.exec(`SET TIME ZONE 'Asia/Kuwait'`);
+  await db.exec(targetSql);
+  const row = (await db.query(`SELECT to_char(claim_starts_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS starts, to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created FROM grant_rules WHERE id = 'seed-default-instant_apps-v2'`)).rows[0];
+  const v1 = (await db.query(`SELECT to_char(superseded_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS superseded FROM grant_rules WHERE id = 'seed-default-instant_apps-v1'`)).rows[0];
+  return { startsAt: row?.starts ?? null, createdAt: row?.created ?? null, supersededAt: v1?.superseded ?? null, checkedAt: new Date().toISOString() };
+})();
+
+console.log(JSON.stringify({ seeded, own, ended, emptied, kuwait }));

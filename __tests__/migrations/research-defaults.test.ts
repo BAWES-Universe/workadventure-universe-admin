@@ -11,7 +11,7 @@ import { missingInstantLimits, readInstantLimits } from '@/lib/instant/values';
 type Rule = { id: string; program_id: string; version: number; state: string; funding_account_id: string; covers: string[]; benefit_kind: string; amount: string; schedule: string; share: string; recipient_type: string; settlement: string; created_by_id: string; superseded: boolean; started: boolean };
 type State = { limits: Record<string, unknown> | null; rules: Rule[]; index: string[] };
 type Scenario = { before: State; once: State; twice: State };
-type Result = { seeded: Scenario; own: Scenario; ended: Scenario; emptied: Scenario };
+type Result = { seeded: Scenario; own: Scenario; ended: Scenario; emptied: Scenario; kuwait: { startsAt: string | null; createdAt: string | null; supersededAt: string | null; checkedAt: string } };
 
 let result: Result;
 
@@ -60,7 +60,7 @@ describe('research on by default: a deploy that still has the seeded values', ()
   });
 
   it('changes nothing when run a second time', () => {
-    for (const scenario of Object.values(result)) expect(scenario.twice).toEqual(scenario.once);
+    for (const scenario of [result.seeded, result.own, result.ended, result.emptied]) expect(scenario.twice).toEqual(scenario.once);
   });
 });
 
@@ -77,5 +77,18 @@ describe('research on by default: what a super admin saved stays', () => {
   it('a ceiling they emptied stays empty (Instant then waits for one), while the seeded default still moves to $2.00 a month', () => {
     expect(result.emptied.once.limits).not.toHaveProperty('exposureCeilingMicros');
     expect(result.emptied.once.rules.find((rule) => rule.state === 'current')).toMatchObject({ amount: '2000000', schedule: 'monthly' });
+  });
+});
+
+describe('research on by default: a database whose own time zone is not UTC', () => {
+  it('writes UTC times (as the columns hold), so the $2.00 a month starts now and the old $0.10 stops now, not hours later', () => {
+    const { startsAt, createdAt, supersededAt, checkedAt } = result.kuwait;
+    const checked = Date.parse(checkedAt);
+    for (const at of [startsAt, createdAt, supersededAt]) {
+      expect(at).not.toBeNull();
+      // Written moments before the check, never three hours ahead of it
+      expect(Date.parse(at as string)).toBeLessThanOrEqual(checked);
+      expect(checked - Date.parse(at as string)).toBeLessThan(10 * 60 * 1000);
+    }
   });
 });

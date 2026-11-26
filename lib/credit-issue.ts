@@ -38,7 +38,8 @@ export interface IssuedLot {
 
 export interface IssueResult {
   issued: IssuedLot[];
-  skipped: { programId: string; reason: SkipReason }[];
+  /** `categoryId` is the category the skipped rule gives credit for, so spending can tell "never given this period" from "used up". */
+  skipped: { programId: string; categoryId?: string; reason: SkipReason }[];
 }
 
 interface Plan {
@@ -58,7 +59,7 @@ function plansFor(rules: readonly RuleFacts[], person: Parameters<typeof reaches
   for (const candidates of reachingBase.values()) {
     const picked = pickBase(candidates);
     if (picked.winner) plans.push({ rule: picked.winner, base: true });
-    else if (picked.clash) for (const rule of picked.clash) skipped.push({ programId: rule.programId, reason: 'clash' });
+    else if (picked.clash) for (const rule of picked.clash) skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: 'clash' });
   }
   return plans;
 }
@@ -114,7 +115,7 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
       for (const { rule } of plans) {
         const done = await issueOne(tx, rule, personId, now, settings);
         if (done.lot) out.push(done.lot);
-        else if (done.skipped) skipped.push({ programId: rule.programId, reason: done.skipped });
+        else if (done.skipped) skipped.push({ programId: rule.programId, categoryId: rule.categoryId, reason: done.skipped });
       }
       await answerAsksFromPools(tx, person, now);
       return { issued: out, skipped };
