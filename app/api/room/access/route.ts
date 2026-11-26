@@ -84,7 +84,7 @@ export async function GET(request: NextRequest) {
       
       // Authenticate user - always call authenticateRequest to get proper status
       // It will return null (if Bearer token invalid) or an object with isAuthenticated flag
-      let authenticatedUser = await authenticateRequest(request);
+      const authenticatedUser = await authenticateRequest(request);
       
       // Determine if this is a guest user (no authentication)
       // Guest = no accessToken in query params OR authenticateRequest returned null OR isAuthenticated is false
@@ -130,7 +130,7 @@ export async function GET(request: NextRequest) {
               name: userName,
               lastIpAddress: ipAddress || null,
               isGuest: false,
-            } as any,
+            },
           });
           // Update userName and userEmail from created user record (prefer user record)
           if (user) {
@@ -378,7 +378,7 @@ export async function GET(request: NextRequest) {
       let visitCardUrl: string | null = null;
       if (account) {
         try {
-          const visitCard = await (prisma as any).visitCard.findUnique({
+          const visitCard = await prisma.visitCard.findUnique({
             where: { userId: account.id },
           });
           
@@ -407,7 +407,7 @@ export async function GET(request: NextRequest) {
           worldId: worldData.id,
           tags: [], // Empty tags for all non-members (guests)
           joinedAt: new Date(),
-        } as any;
+        };
       }
       
       // Get play service URL for texture validation
@@ -571,7 +571,7 @@ export async function GET(request: NextRequest) {
       // Bots join rooms through this same check. Their joins are reconnects, not visits, so they aren't recorded.
       // (The Discord notification below still goes out as before.)
       if (!isBotIdentifier(finalUuid)) {
-        await (prisma as any).roomAccess.create({
+        await prisma.roomAccess.create({
           data: {
             userUuid: visitorUuid,
             userId: account?.id || null,
