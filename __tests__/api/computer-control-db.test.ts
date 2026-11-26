@@ -212,23 +212,22 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
     });
 
-    it('a read-only job alongside another one is the person’s too: nothing runs under Brick’s hands, and both come back together', async () => {
+    it('a read-only job alongside another one: the take over is refused as shared (the keyboard rule, GPT audit finding 5), nothing is fenced, both keep running under Brick', async () => {
       const { sara, jobId } = await running();
       // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
       await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
       if (!reader.ok) throw new Error('no reader');
-      expect((await takeOver(sara.brickId, sara.id, NOW)).ok).toBe(true);
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toEqual({ ok: false, reason: 'shared' });
+      expect(fences()).toBe(0);
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
-      expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
-      expect(jobs.map((job) => `${job.status}/${job.control}`).sort()).toEqual(['waiting/person', 'waiting/person']);
-      expect((await handBack(sara.brickId, sara.id)).ok).toBe(true);
-      const after = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
-      expect(after.map((job) => `${job.status}/${job.control}`).sort()).toEqual(['running/brick', 'running/brick']);
-      expect(after.find((job) => job.id === jobId)).toBeTruthy();
+      expect(jobs.map((job) => `${job.status}/${job.control}/${job.writes}`).sort()).toEqual(['running/brick/false', 'running/brick/false']);
+      expect((await readControl(sara.brickId))?.state).toBe('agent');
+      // The agent's keys still work: nothing was taken from it
+      expect(await mintJobToken(jobId, 'model', NOW)).toMatchObject({ token: expect.any(String) });
     });
 
-    it('a job asked for while the fence is pending waits in line, and runs after the hand back', async () => {
+    it('a job asked for while the fence is pending waits in line, and runs once the job the person had ends', async () => {
       const { sara, jobId } = await running();
       await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const release = slowFence();
@@ -240,6 +239,10 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       await first;
       await handBack(sara.brickId, sara.id);
       await sweepComputers(new Date(NOW.getTime() + 60_000));
+      // The job the person had became a writer when they took it (GPT audit finding 5): the reader waits until it ends and its browser is cleared
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', writes: true });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'queued' });
+      await finishJob(jobId, 'done', new Date(NOW.getTime() + 120_000));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'running' });
     });
 
