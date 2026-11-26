@@ -74,6 +74,10 @@ COPY --from=builder /app/package.json ./package.json
 # Copy seed file and prisma.config.ts for seeding
 COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+# The start script applies migrations with this CLI. prisma is a devDependency, copied in from the builder
+# and kept through the tsx install above: fail the BUILD here if it (or its config) cannot load, rather
+# than shipping an image that refuses to start. No database is reached: --version only loads the config.
+RUN DATABASE_URL="postgresql://build:check@localhost:5432/none" node node_modules/prisma/build/index.js --version
 # Copy lib directory (needed for seed script imports)
 COPY --from=builder /app/lib ./lib
 # Copy config directory (needed for woka.json and companions.json validation)

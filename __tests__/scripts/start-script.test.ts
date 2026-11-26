@@ -74,6 +74,19 @@ describe('the production Dockerfile', () => {
     expect(dockerfile).toContain('COPY --from=builder /app/prisma ./prisma');
     expect(dockerfile).toContain('COPY --from=builder /app/prisma.config.ts ./prisma.config.ts');
   });
+
+  it('fails the build, not the start, when that tool cannot load: checked after everything it needs is in place', () => {
+    const lines = dockerfile.split('\n');
+    const check = lines.findIndex((line) => /^RUN .*node node_modules\/prisma\/build\/index\.js --version$/.test(line));
+    expect(check).toBeGreaterThan(-1);
+    for (const needed of ['npm install tsx', 'COPY --from=builder /app/node_modules/dotenv', 'COPY --from=builder /app/prisma.config.ts', 'COPY --from=builder /app/node_modules/prisma ']) {
+      const at = lines.findIndex((line) => line.includes(needed));
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(check);
+    }
+    // Nothing after the check may install or remove packages again
+    expect(lines.slice(check + 1).some((line) => /^RUN .*\bnpm (install|ci|prune|uninstall)\b/.test(line))).toBe(false);
+  });
 });
 
 describe('scripts/start.sh decides (stand-in migration tool)', () => {
