@@ -416,6 +416,39 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       expect(tries).toHaveBeenCalledTimes(6);
     });
 
+    it('Sentry on #1040: the wait for the row can time out itself (a second leader\'s hold right behind the first): that is one more try used, not an end: the pause goes on and happens', async () => {
+      const sara = await owner('waittimeout');
+      const real = prisma.$transaction.bind(prisma);
+      let waits = 0;
+      // The first wait for the row (the only transaction this test opens through `untilRowFree`) times out; the next ones are real
+      jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        waits++;
+        if (waits === 1) return Promise.reject(timeout());
+        return (real as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+      const tries = jest.fn().mockRejectedValueOnce(timeout()).mockRejectedValueOnce(timeout()).mockResolvedValueOnce('paused');
+      try {
+        expect(await pauseWhenRowFree(sara.brickId, NOW, tries)).toBe('paused');
+      } finally {
+        jest.restoreAllMocks();
+      }
+      expect(tries).toHaveBeenCalledTimes(3);
+    });
+
+    it('Sentry on #1040: waits that keep timing out are bounded by the same count: the last error is thrown, never an endless loop', async () => {
+      const sara = await owner('waitforever');
+      jest.spyOn(prisma, '$transaction').mockImplementation((() => Promise.reject(timeout())) as never);
+      const tries = jest.fn().mockRejectedValue(timeout());
+      let failed: unknown;
+      try {
+        failed = await pauseWhenRowFree(sara.brickId, NOW, tries).catch((error: unknown) => error);
+      } finally {
+        jest.restoreAllMocks();
+      }
+      expect(isTransactionTimeout(failed)).toBe(true);
+      expect(tries).toHaveBeenCalledTimes(25);
+    });
+
     it('a pause that keeps failing is the caller\'s once its time is up (and never more than the count): the last failure is thrown', async () => {
       const sara = await owner('budget');
       setRowRetryBudgetForTests(80);

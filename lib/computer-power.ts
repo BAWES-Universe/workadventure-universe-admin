@@ -115,12 +115,19 @@ export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock:
   // Read by the pause once it holds every lock it needs (`decidePauseIn`), so a wait for the job's lock counts too, not only the wait for the row
   // Moved on in whole seconds only (the books count whole seconds, and the few milliseconds of an ordinary pause that waited for nothing are not a wait: a pause that did not wait keeps the caller's time exactly)
   const clock = () => new Date(now.getTime() + Math.floor((Date.now() - began) / 1000) * 1000);
+  // An error that is not a busy row or a timeout is the caller's at once; so is the last one of a pause that used its time or its count up
+  const giveUp = (error: unknown, attempt: number) => !(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs;
   for (let attempt = 1; ; attempt++) {
     try {
       return await run(clock);
     } catch (error) {
-      if (!(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs) throw error;
+      if (giveUp(error, attempt)) throw error;
+    }
+    try {
       await untilRowFree(botId);
+    } catch (error) {
+      // The wait itself can time out (a second leader's hold right behind the first, past the wait): it wrote nothing, so it is one more try used, and the pause goes on within the same time and count (Sentry on #1040)
+      if (giveUp(error, attempt)) throw error;
     }
   }
 }
