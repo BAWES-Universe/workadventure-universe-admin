@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { corsHeaders } from '@/lib/cors';
+import { newBricksRefusal, type NewBricksLimit } from '@/lib/brick-new-limit';
 
 /** An answer for the game, which calls from its own origin. */
 export const brickJson = (request: NextRequest, body: unknown, status = 200) =>
@@ -18,4 +19,15 @@ export async function brickOwner(request: NextRequest): Promise<{ response: Next
   const account = await prisma.user.findUnique({ where: { id: session.id }, select: { isGuest: true } });
   if (!account || account.isGuest) return { response: brickJson(request, { error: 'Sign in to have a Brick' }, 403) };
   return { userId: session.id };
+}
+
+/**
+ * The answer for a person over "New Bricks per hour" (nothing was made): 429 with the kind line in their own clock, `retryAt`
+ * for a caller that formats it itself, and Retry-After in seconds.
+ */
+export async function newBricksAnswer(request: NextRequest, ownerId: string, refused: NewBricksLimit): Promise<NextResponse> {
+  const refusal = await newBricksRefusal(ownerId, refused);
+  const response = brickJson(request, refusal.body, refusal.status);
+  response.headers.set('Retry-After', String(refusal.retryAfterSeconds));
+  return response;
 }

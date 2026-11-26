@@ -42,6 +42,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * The new Brick belongs to that person, and only the owner of Brick :id gets one.
  *
  *   201 { made: true, brick, bricks }   made now
+ *   429 { error, code: 'new_bricks_limit', retryAt }  they have made too many new Bricks this hour; `error` is the kind line to say
  *   200 { made: false, brick, bricks }  they already have a Brick of that name: here it is, and nothing was made
  *                                       (`evenIfThere: true` makes a second one, when they asked for one on purpose)
  *
@@ -54,7 +55,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const parsed = chatBrickSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     const answer = await makeBrickFromChat(id, parsed.data);
-    if (!answer.ok) return NextResponse.json({ error: answer.error }, { status: answer.status });
+    if (!answer.ok) {
+      if (answer.status === 429) {
+        const limited = NextResponse.json({ error: answer.error, code: answer.code, retryAt: answer.retryAt }, { status: 429 });
+        limited.headers.set('Retry-After', String(answer.retryAfterSeconds));
+        return limited;
+      }
+      return NextResponse.json({ error: answer.error }, { status: answer.status });
+    }
     return NextResponse.json({ made: answer.made, brick: answer.brick, bricks: answer.bricks }, { status: answer.made ? 201 : 200 });
   } catch (error) {
     return failed(error, 'Making from a chat');
