@@ -220,6 +220,29 @@ run('a ready-made App’s actions on a Brick, in a real database', () => {
       });
       expect(await refreshAppActions(KEY)).toBe(false);
       expect(await catalogRow()).toMatchObject({ claimedUntil: later, retryAfter: null });
+      // A claim that ran out with nobody taking it over (the read took longer than the claim): that read writes nothing either, list or wait
+      await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+      // Only the clock moves (no timers are faked): the claim stays exactly as this reader set it
+      jest.useFakeTimers({ now: Date.now(), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] });
+      try {
+        const runOut = () => jest.setSystemTime(Date.now() + 7 * 60_000);
+        adapter.actions.mockImplementationOnce(async () => {
+          runOut();
+          return [action('ONLY_NEW', ['readOnlyHint']), ...GMAIL_LIKE()];
+        });
+        expect(await refreshAppActions(KEY)).toBe(false);
+        expect(await prisma.appAction.count({ where: { toolkit: KEY, slug: `${U}_ONLY_NEW` } })).toBe(0);
+        expect((await catalogRow()).version).toBe(before.version);
+        await prisma.appActionCatalog.update({ where: { toolkit: KEY }, data: { claimedUntil: null } });
+        adapter.actions.mockImplementationOnce(async () => {
+          runOut();
+          throw new Error('down');
+        });
+        expect(await refreshAppActions(KEY)).toBe(false);
+        expect((await catalogRow()).retryAfter).toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('stamps a grant with the list its rows came from, never with one a read saves in between', async () => {

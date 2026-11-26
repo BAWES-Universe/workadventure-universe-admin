@@ -15,8 +15,12 @@ import { acceptSorterPick, actionTitle, sortAction, withoutProvider } from '@/li
 export const CATALOG_MAX_AGE_MS = 24 * 60 * 60_000;
 /** An action the list does not have makes it be read again, at most this often. */
 export const UNKNOWN_SLUG_RETRY_MS = 10 * 60_000;
-/** How long a reader holds an App's list before another may read it. */
-const CLAIM_MS = 2 * 60_000;
+/**
+ * How long a reader holds an App's list before another may read it. Longer than the longest read of the provider (10 pages of at
+ * most 30 seconds each, retries included), so a reader that is still working never loses its claim; a reader that died frees the
+ * list after this long. A read that ends after its claim ran out writes nothing.
+ */
+const CLAIM_MS = 6 * 60_000;
 /** After a read that failed, how long before the provider is asked again (every poll would ask it otherwise). */
 const RETRY_AFTER_FAILURE_MS = 5 * 60_000;
 /**
@@ -60,9 +64,11 @@ async function readAndSave(toolkit: string): Promise<boolean> {
     data: { claimedUntil: claim },
   });
   if (claimed.count !== 1) return false;
+  // This reader's claim, as a filter: still this reader's (no one took it over) and not run out
+  const mine = () => ({ equals: claim, gt: new Date() });
   // After a failed read the provider is not asked again for a while (retry_after), so the next polls do not each ask it
   const backOff = () =>
-    prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: claim }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
+    prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
   let listed: ProviderAction[];
   try {
     listed = await adapter.actions(toolkit);
@@ -74,14 +80,14 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   const kept = await prisma.appAction.count({ where: { toolkit } });
   if (kept > 0 && (listed.length === 0 || (kept >= SHRINK_CHECK_FROM && listed.length < kept * SHRINK_LIMIT))) {
     // This read counts as one more in a row that gave the shorter list (the first one starts the clock)
-    const bumped = await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: claim }, data: { shrunkReads: { increment: 1 } } }).catch(() => null);
+    const bumped = await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine() }, data: { shrunkReads: { increment: 1 } } }).catch(() => null);
     // Another reader holds the list now: this read counts for nothing
     if (bumped?.count === 0) return false;
     const counted = bumped ? await prisma.appActionCatalog.findUnique({ where: { toolkit }, select: { shrunkSince: true, shrunkReads: true } }).catch(() => null) : null;
     const since = counted?.shrunkSince ?? null;
     if (!counted || !since || Date.now() - since.getTime() < SHRINK_BELIEVED_AFTER_MS || counted.shrunkReads < SHRINK_BELIEVED_READS) {
       console.error(`[AppActions] The provider listed ${listed.length} actions for an App that had ${kept}: the list is kept as it was for now`);
-      if (counted && !since) await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: claim, shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
+      if (counted && !since) await prisma.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: mine(), shrunkSince: null }, data: { shrunkSince: now } }).catch(() => undefined);
       await backOff();
       return false;
     }
@@ -92,7 +98,7 @@ async function readAndSave(toolkit: string): Promise<boolean> {
     return true;
   } catch (error) {
     if (error instanceof ClaimLost) {
-      console.error('[AppActions] A read of an App’s actions took longer than its claim: another reader’s list stands');
+      console.error('[AppActions] A read of an App’s actions ended after its claim ran out: nothing of it is written');
       return false;
     }
     Sentry.captureException(error, { tags: { area: 'app-actions' } });
@@ -106,7 +112,7 @@ async function save(toolkit: string, listed: readonly ProviderAction[], claim: D
   await prisma.$transaction(
     async (tx) => {
       // Only while this reader still holds the list: the row stays locked to the end, so no other reader can take it in between
-      const held = await tx.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: claim }, data: { claimedUntil: claim } });
+      const held = await tx.appActionCatalog.updateMany({ where: { toolkit, claimedUntil: { equals: claim, gt: new Date() } }, data: { claimedUntil: claim } });
       if (held.count !== 1) throw new ClaimLost();
       const before = await tx.appAction.findMany({ where: { toolkit }, select: { id: true, slug: true, title: true, description: true, heading: true, source: true, catalogVersion: true, position: true } });
       const bySlug = new Map(before.map((row) => [row.slug, row]));
