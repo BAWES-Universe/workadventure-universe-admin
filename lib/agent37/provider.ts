@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
-import { readTurn } from '@/lib/agent37/turn-events';
 import * as Sentry from '@sentry/nextjs';
+import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
+import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
@@ -87,6 +88,9 @@ const AWAKE_STATUSES = ['running', 'starting', 'restarting', 'updating', 'waking
  */
 const ASLEEP_STATUSES = ['stopped', 'sleeping', 'stopping'];
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
+
+/** What reads the boot id (as the normal user; the mark reads the same file). */
+const BOOT_ID_COMMAND = 'cat /proc/sys/kernel/random/boot_id';
 
 export class Agent37ComputerProvider implements ComputerProvider {
   readonly kind = 'real' as const;
@@ -345,8 +349,22 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string): Promise<void> {
+  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null> {
     let instance = await this.settle(ref);
+    // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
+    // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
+    // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
+    // the mark on the boot the earlier jobs ran on, with a clock reading after what they left running, and the fence would keep it as the computer's own). `null`: not asked for.
+    let was: string | null | undefined;
+    if (options?.freshBoot) {
+      const read = await this.client.exec(ref, BOOT_ID_COMMAND, { timeoutMs: 15_000 }).catch(() => null);
+      const seen = read && read.exitCode === 0 ? read.stdout.trim() : '';
+      was = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seen) ? seen : null;
+      await this.client.stopInstance(ref);
+      await this.untilDown(ref, true);
+      await this.client.startInstance(ref);
+      instance = await this.untilHealthy(ref, instance.url);
+    }
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
@@ -363,11 +381,25 @@ export class Agent37ComputerProvider implements ComputerProvider {
       up = await again(await this.up(ref));
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
-    // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
-    // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
-    // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
-    const marked = await this.client.exec(ref, 'universe-mark', { user: 'root', timeoutMs: 30_000 });
-    if (!/(^|\n)marked=1\b/.test(marked.stdout)) throw new Error(`The computer could not be marked${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1] ? ` (${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1]})` : ''}`);
+    // Last, once the computer is as it should be and before any job has used it: the mark the take-over fence tells the agent's processes by (everything already
+    // running is the computer's own, everything started after is the agent's), read here and kept by Orbit, never by the computer: the agent has admin rights there and could
+    // rewrite a note. Read as the normal user (root cannot read what the agent's processes are). A computer that cannot be marked cannot be fenced, so it is not ready.
+    const done = await this.client.exec(ref, markCommand(), { timeoutMs: 30_000 });
+    const mark = done.exitCode === 0 ? parseMark(done.stdout) : null;
+    if (!mark) {
+      const reason = /marked=0 reason=([a-z_]+)/.exec(done.stdout)?.[1];
+      throw new Error(`The computer could not be marked${reason ? ` (${reason})` : ''}`);
+    }
+    // A fresh boot that is not proved (the old boot could not be read, or the mark is of the same one): the computer is ready for its job, but this mark is not to be trusted, because the boot it names
+    // may be the one earlier jobs ran on, with a clock reading taken after what they left running. So NO mark is answered (Orbit saves none and the row stays unmarked): a take-over on this computer finds
+    // no mark, cannot prove the fence, and stops the machine; the next wake asks for the fresh boot again. The job is never refused for it. Told to Sentry, with both boot ids and the machine, so it is seen.
+    if (was !== undefined && (was === null || mark.bootId === was)) {
+      const message = was === null ? 'A computer could not be proved to have started afresh: its boot before the restart was not read' : 'A computer could not be proved to have started afresh: its boot did not change';
+      console.error('[Computer]', message, { ref, before: was, after: mark.bootId });
+      Sentry.captureMessage(message, { level: 'error', tags: { area: 'computer', step: 'fresh-boot' }, extra: { ref, before: was, after: mark.bootId } });
+      return null;
+    }
+    return mark;
   }
 
   /** Runs `universe-up` and reads what it says. */

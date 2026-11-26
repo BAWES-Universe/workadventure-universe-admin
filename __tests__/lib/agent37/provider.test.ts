@@ -1,11 +1,16 @@
 import * as Sentry from '@sentry/nextjs';
-jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn() }));
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
+import { isMarkCommand } from '@/lib/computer-fence-script';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
+
+const BOOT = '3f2b6c1e-8a44-4d0b-9c15-5e7d2a9b1c33';
+/** What a command is, in a word: the mark command carries a whole script. */
+const labelled = (command: string) => (isMarkCommand(command) ? 'mark' : command);
 
 /** A pretend Agent37: instances that keep a status, and a record of every call. */
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
@@ -14,7 +19,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
   let execOut: (command: string) => string = () => 'ok';
-  let markOut = 'marked=1\n';
+  let markOut = `boot=${BOOT}\nticks=1234\npart=77:500:p\nrunner=${'a'.repeat(64)}\nmarked=1\n`;
   let revisionAfterUpdate = 2;
   /** What Agent37 holds as each machine's managed budget: the monthly cap and the remaining one-time credit (a machine not here has both at zero). */
   const budgets = new Map<string, { cap: number; credit: number }>();
@@ -87,7 +92,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
+      return { exitCode: 0, stdout: isMarkCommand(command) ? markOut : execOut(command), stderr: '', truncated: false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -634,10 +639,11 @@ describe('getting a machine ready for a job', () => {
     const p = provider(w);
     await p.create('bot-1');
     w.setExec(() => 'ready=1 restart=0\n');
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    // The note the take-over fence tells the agent's processes by is written last, as root
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
-    expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    // The mark the take-over fence tells the agent's processes by is read last, and handed to Orbit (which keeps it): the computer writes nothing, and the command runs as the normal user
+    await expect(p.ready('m1')).resolves.toEqual({ bootId: BOOT, ticks: 1234, parts: [{ pid: 77, start: 500, kind: 'part' }], runners: ['a'.repeat(64)] });
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'mark']);
+    expect(w.execs[1].options).not.toHaveProperty('user');
+    expect(w.execs[1].command).not.toMatch(/\/run\/universe|mkdir|chown|>\s*"?\$DIR/);
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
   });
 
@@ -678,7 +684,7 @@ describe('getting a machine ready for a job', () => {
     });
   });
 
-  it('is not ready when the note for the fence cannot be written: a computer that cannot be fenced is never handed to a job', async () => {
+  it('is not ready when the mark for the fence cannot be read: a computer that cannot be fenced is never handed to a job', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
@@ -697,8 +703,68 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
     await p.ready('m1');
     // The note is written once, after the restart (a note from before it would be for the old boot)
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', 'mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  describe('a fresh boot', () => {
+    const OLD_BOOT = '11111111-2222-4333-8444-555555555555';
+    const reading = (boot: string) => (command: string) => (command === 'cat /proc/sys/kernel/random/boot_id' ? `${boot}\n` : 'ready=1 restart=0\n');
+
+    it('starts the machine afresh before anything else when asked for it, and never otherwise (a computer that worked before and has no mark saved by Orbit)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(OLD_BOOT));
+      await p.ready('m1');
+      expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+      await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+      // The restart comes before the screen and browser are brought up and before the mark is read: the mark is of the new boot, taken with nothing of an earlier job running
+      const second = w.calls.slice(w.calls.lastIndexOf('stop:m1'));
+      const kinds = second.flatMap((call) => (call.startsWith('stop:') ? ['stop'] : call.startsWith('start:') ? ['start'] : call.startsWith('exec:m1:') ? [labelled(call.slice('exec:m1:'.length)) === 'universe-up' ? 'up' : isMarkCommand(call.slice('exec:m1:'.length)) ? 'mark' : 'other'] : []));
+      expect(kinds).toEqual(['stop', 'start', 'up', 'mark']);
+    });
+
+    it('answers no mark when the boot did not change, and is still ready: a stop that became a sleep, or a start that resumed the same boot, never leaves a mark on the boot the jobs ran on, and never refuses the job (Opus on #1033)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(BOOT));
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('did not change'), expect.objectContaining({ level: 'error', extra: expect.objectContaining({ ref: 'm1', before: BOOT, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    it('answers no mark when the boot before the restart could not be read: nothing proves the restart gave a new one, and the job still runs', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? 'cat: no such file\n' : 'ready=1 restart=0\n'));
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('was not read'), expect.objectContaining({ extra: expect.objectContaining({ ref: 'm1', before: null, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    it('asks nothing of the boot when no fresh boot is asked for', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(BOOT));
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.execs.some((entry) => entry.command === 'cat /proc/sys/kernel/random/boot_id')).toBe(false);
+    });
   });
 
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
@@ -733,8 +799,8 @@ describe('getting a machine ready for a job', () => {
     await p.create('bot-1');
     let runs = 0;
     w.setExec(() => (++runs === 1 ? 'ready=0 reason=browser\n' : 'ready=1 restart=0\n'));
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', 'mark']);
   });
 
   it('asks again once after the restart too, when the browser is still starting then', async () => {
@@ -743,8 +809,8 @@ describe('getting a machine ready for a job', () => {
     await p.create('bot-1');
     let runs = 0;
     w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', 'universe-up', 'mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -887,7 +953,7 @@ describe('Agent37 managed spending stays shut (monthly cap AND one-time credit)'
     await p.create('bot-1');
     open(w, 'm1', 5_000_000, 0);
     w.setExec(() => 'ready=1 restart=0\n');
-    await expect(p.ready('m1')).resolves.toBeUndefined();
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
     expect(w.calls).toContain('cap:m1:0');
     expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 0 });
   });
