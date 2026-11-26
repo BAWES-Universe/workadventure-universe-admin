@@ -1135,6 +1135,35 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
     });
 
+    it('an App added straight on the Brick (no App connection) that works is their own copy too: Universe’s is neither offered nor run, nothing is held, until it stops working', async () => {
+      await setLimits();
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      liveTools(p);
+      setAdapterForTests(p.adapter);
+      const all = ['EXA_GET_CONTENTS_ACTION', 'EXA_ANSWER', 'EXA_SEARCH', 'TAVILY_SEARCH'];
+      try {
+        // Brick Tools > Add in the game: their own Exa with their key in the link, on this Brick only
+        const row = await prisma.botMcpServer.create({ data: { botId: brick, name: 'my search', serverUrl: 'https://mcp.exa.ai/mcp?exaApiKey=x', enabled: true } as never });
+        expect(await toolNames()).toEqual(['TAVILY_SEARCH']);
+        const f = fakeFunds(1_000_000);
+        expect(await runInstant(ask({ tool: 'EXA_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
+        expect(f.funds.reserve).not.toHaveBeenCalled();
+        expect(p.instant.run).not.toHaveBeenCalled();
+        // Its key refused: it no longer works, so Universe's Exa is back
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+        expect(await toolNames()).toEqual(all);
+        // One that signs in on the App's site and was never signed in does not count either
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { signInLostAt: null, signInLostStatus: null, authType: 'oauth', authConfig: null } });
+        expect(await toolNames()).toEqual(all);
+        // Switched off for this Brick: not theirs here
+        await prisma.botMcpServer.update({ where: { id: row.id }, data: { authType: 'none', enabled: false } });
+        expect(await toolNames()).toEqual(all);
+      } finally {
+        await prisma.botMcpServer.deleteMany({ where: { botId: brick, connectionId: null } });
+      }
+    });
+
     it('their own App only wins where it can work: switched off for this Brick, only on another Brick, a sign-in not finished or refused all leave the Universe-paid one on', async () => {
       await setLimits();
       setInstantFunds(fakeFunds(1_000_000).funds);

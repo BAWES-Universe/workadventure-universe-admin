@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { isOwnApp, ownCopyWorks, ownGrantsOf, sameApp } from '@/lib/app-same';
+import { brickOwnRowsOf, isOwnApp, ownCopyWorks, ownGrantsOf, sameApp } from '@/lib/app-same';
 import { connectedState } from '@/lib/app-connections';
 import { INSTANT_APPS } from '@/lib/instant/values';
 
@@ -32,14 +32,15 @@ export function researchCoveredBy(own: readonly { name: string; serverUrl: strin
 }
 
 /**
- * The research Apps this Brick's owner has their OWN copy of, switched on for this Brick and working (lib/app-same.ts ownGrantsOf: their link,
- * a listed App or their key; never a ready-made one, which Universe pays for too). Their own copy always wins: the Universe-paid version of that
- * App is then neither offered to this Brick nor run, so the Brick uses the owner's own account, which Universe never meters or limits. One that
- * cannot work right now (not connected, a refused sign-in or key, a server that did not answer) does not count, so the Brick is never left with
- * no way to search.
+ * The research Apps this Brick's owner has their OWN copy of, switched on for this Brick and working, by the one rule of lib/app-same.ts:
+ * ownGrantsOf (their link, a listed App or their key; never a ready-made one, which Universe pays for too) and brickOwnRowsOf (an App added
+ * straight on the Brick). Their own copy always wins: the Universe-paid version of that App is then neither offered to this Brick nor run, so
+ * the Brick uses the owner's own account, which Universe never meters or limits. One that cannot work right now (not connected, a refused
+ * sign-in or key, a server that did not answer) does not count, so the Brick is never left with no way to search.
  */
 export async function brickOwnResearch(botId: string): Promise<Set<string>> {
-  return researchCoveredBy(await ownGrantsOf(botId, (own) => connectedState(own).connected));
+  const [grants, rows] = await Promise.all([ownGrantsOf(botId, (own) => connectedState(own).connected), brickOwnRowsOf(botId)]);
+  return researchCoveredBy([...grants, ...rows]);
 }
 
 /**

@@ -145,6 +145,23 @@ export async function ownGrantsOf(botId: string, connected: (connection: AppConn
   );
 }
 
+/**
+ * The Brick owner's Apps added straight on their Brick (Brick Tools > Add in the game: a row with no App connection, which the bot server
+ * uses like any other), switched on and working by the same rule (ownCopyWorks): no refused sign-in or key and no server that did not answer
+ * seen on it, and a stored sign-in when it signs in on the App's site. They cost Universe nothing, so they are the person's own copy too. None
+ * for a room bot or a deleted Brick.
+ */
+export async function brickOwnRowsOf(botId: string): Promise<OwnGrant[]> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
+  if (!bot?.ownerId || bot.roomId !== null || bot.deletedAt !== null) return [];
+  const rows = await prisma.botMcpServer.findMany({
+    where: { botId, enabled: true, connectionId: null },
+    select: { id: true, name: true, serverUrl: true, authType: true, authConfig: true, signInLostAt: true, noAnswerAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.flatMap((row) => (ownCopyWorks(row.authType !== 'oauth' || !!row.authConfig, row) ? [{ serverId: row.id, name: row.name, serverUrl: row.serverUrl }] : []));
+}
+
 /** The first own grant that is the same App as this one, or null. */
 export function ownCopyOf(own: readonly OwnGrant[], other: OtherAppLike): OwnGrant | null {
   return own.find((grant) => sameApp(grant, other)) ?? null;
