@@ -48,12 +48,12 @@ async function readAndSave(toolkit: string): Promise<boolean> {
   // Two readers making the App's row at the same moment: the one that loses finds it made
   await prisma.appActionCatalog.createMany({ data: [{ toolkit }], skipDuplicates: true });
   const claimed = await prisma.appActionCatalog.updateMany({
-    where: { toolkit, OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }] },
+    where: { toolkit, AND: [{ OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }] }, { OR: [{ retryAfter: null }, { retryAfter: { lt: now } }] }] },
     data: { claimedUntil: new Date(now.getTime() + CLAIM_MS) },
   });
   if (claimed.count !== 1) return false;
   // A failed read keeps the claim a while, so the next polls wait instead of each asking the provider again
-  const backOff = () => prisma.appActionCatalog.updateMany({ where: { toolkit }, data: { claimedUntil: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
+  const backOff = () => prisma.appActionCatalog.updateMany({ where: { toolkit }, data: { claimedUntil: null, retryAfter: new Date(Date.now() + RETRY_AFTER_FAILURE_MS) } }).catch(() => undefined);
   let listed: ProviderAction[];
   try {
     listed = await adapter.actions(toolkit);
@@ -122,7 +122,7 @@ async function save(toolkit: string, listed: readonly ProviderAction[]): Promise
       changed ||= fresh.length > 0 || gone.length > 0;
       await tx.appActionCatalog.update({
         where: { toolkit },
-        data: { refreshedAt: new Date(), claimedUntil: null, shrunkSince: null, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
+        data: { refreshedAt: new Date(), claimedUntil: null, retryAfter: null, shrunkSince: null, actionCount: listed.length, ...(changed ? { version: { increment: 1 } } : {}) },
       });
     },
     { maxWait: 15_000, timeout: 60_000 },
@@ -141,16 +141,16 @@ export interface CatalogState {
  */
 export async function ensureAppActions(toolkit: string, waitMs = 0): Promise<CatalogState | null> {
   const key = toolkit.toLowerCase();
-  const read = () => prisma.appActionCatalog.findUnique({ where: { toolkit: key }, select: { refreshedAt: true, version: true, claimedUntil: true } });
+  const read = () => prisma.appActionCatalog.findUnique({ where: { toolkit: key }, select: { refreshedAt: true, version: true, claimedUntil: true, retryAfter: true } });
   try {
     const catalog = await read();
     if (catalog?.refreshedAt && Date.now() - catalog.refreshedAt.getTime() < CATALOG_MAX_AGE_MS) return catalog;
-    const claimedFor = catalog?.claimedUntil ? catalog.claimedUntil.getTime() - Date.now() : 0;
-    // Another reader holds it (here or in another process), or a failed read is waited out: nothing to start
-    const run = claimedFor > 0 ? (running.get(key) ?? null) : refreshAppActions(key).catch(() => false);
+    // A failed read is waited out: nothing to start, and nothing would come to wait for
+    if (catalog?.retryAfter && catalog.retryAfter.getTime() > Date.now()) return catalog;
+    // Another reader holds it (here or in another process): nothing to start, but its result may be waited for
+    const claimed = !!catalog?.claimedUntil && catalog.claimedUntil.getTime() > Date.now();
+    const run = claimed ? (running.get(key) ?? null) : refreshAppActions(key).catch(() => false);
     if (catalog?.refreshedAt || waitMs <= 0) return catalog;
-    // Never read: a grant's first read waits a little for it, unless a failed read is being waited out (nothing would come)
-    if (!run && claimedFor > CLAIM_MS) return catalog;
     const until = Date.now() + waitMs;
     if (run) {
       let timer: ReturnType<typeof setTimeout> | undefined;

@@ -26,6 +26,7 @@ CREATE TABLE "app_action_catalogs" (
     "toolkit" VARCHAR(60) NOT NULL,
     "refreshed_at" TIMESTAMP(3),
     "claimed_until" TIMESTAMP(3),
+    "retry_after" TIMESTAMP(3),
     "action_count" INTEGER NOT NULL DEFAULT 0,
     "version" INTEGER NOT NULL DEFAULT 0,
     "shrunk_since" TIMESTAMP(3),

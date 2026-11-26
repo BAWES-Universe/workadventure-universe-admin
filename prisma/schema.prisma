@@ -1942,6 +1942,8 @@ model AppActionCatalog {
   refreshedAt  DateTime? @map("refreshed_at")
   // A refresh in progress holds this until it ends or the time passes
   claimedUntil DateTime? @map("claimed_until")
+  // After a read that failed (or a list not believed yet): the provider is not asked again before this
+  retryAfter   DateTime? @map("retry_after")
   actionCount  Int       @default(0) @map("action_count")
   // Goes up whenever an action of the App is added, removed or sorted differently: a grant made from this version needs no new look
   version      Int       @default(0)
