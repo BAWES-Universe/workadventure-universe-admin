@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOwnApp } from '@/lib/app-same';
-import { acceptSorterPick } from '@/lib/app-actions/sort';
+import { acceptSorterPick, nameRule, stricterHeading } from '@/lib/app-actions/sort';
 import { lockGrant } from '@/lib/app-actions/grant';
 import type { Heading } from '@/lib/mcp-tool-policy';
 
@@ -22,15 +22,27 @@ import type { Heading } from '@/lib/mcp-tool-policy';
  * Then the heading's setting decides (Looks things up and Makes new things Right away, Changes things and Deletes or sends out Asks first, unless
  * the person chose otherwise). Confirmed by Universe means no person: `confirmedById` stays empty.
  *
- * What a person decided is never touched: a tool a person confirmed or moved keeps their choice. A tool Universe confirmed is sorted again when
+ * What a person decided is never touched: a tool a person confirmed or moved keeps their choice (a moved tool that changes keeps their heading,
+ * tightened only by what Universe knows of the new version: keepMovedTool). A tool Universe confirmed is sorted again when
  * what it is sorted by changes (a suggestion that came later), and a tool that changed is sorted again like a new one.
  */
 
 /** Where one tool of an own App goes. */
 export function sortOwnTool(name: string, suggested: Heading | null | undefined): Heading {
-  // A tool of a link App may be named in camelCase ("sendMessage"): its words are split before the name is read, so a send is still a send
-  const words = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
-  return suggested ? acceptSorterPick('', words, suggested) : 'deletesOrSends';
+  return suggested ? acceptSorterPick('', wordsOf(name), suggested) : 'deletesOrSends';
+}
+
+// A tool of a link App may be named in camelCase ("sendMessage"): its words are split before the name is read, so a send is still a send
+const wordsOf = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2');
+
+/**
+ * Where a tool a person moved goes once it changed: their heading, never looser than what Universe knows of the new version (its name
+ * always, the server's suggestion once there is one). Without a suggestion yet it is not pushed under Deletes or sends out for good: the
+ * person's heading stays, so the suggestion that comes later can still tighten it (it only ever tightens, it never loosens their choice).
+ */
+export function keepMovedTool(name: string, personHeading: Heading, suggested: Heading | null | undefined): Heading {
+  const known = suggested ? acceptSorterPick('', wordsOf(name), suggested) : nameRule(wordsOf(name));
+  return known ? stricterHeading(personHeading, known) : personHeading;
 }
 
 type Db = Prisma.TransactionClient | typeof prisma;

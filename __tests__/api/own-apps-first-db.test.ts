@@ -126,6 +126,29 @@ run('a person’s own copy of an App comes first, in a real database', () => {
       expect(after.notes).toMatchObject({ heading: 'changesThings', state: 'confirmed', movedBy: { name: 'sara' } });
     });
 
+    it('keeps a moved tool that changed with no suggestion yet under the person’s heading, and tightens it when the suggestion comes', async () => {
+      const serverId = await ownApp();
+      const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f1', 'looksUp'), tool('notes', 'g1', 'looksUp'), tool('sendNote', 'h1', 'looksUp')] });
+      const byName = Object.fromEntries(synced.tools.map((entry) => [entry.name, entry.id]));
+      await moveTool(saraBrick, serverId, byName.query, 'makesNew', sara);
+      await moveTool(saraBrick, serverId, byName.notes, 'makesNew', sara);
+      // Changed, and the bot server has no suggestion for the new version yet: the person's heading stays (a send by its name still tightens)
+      const changed = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2'), tool('notes', 'g2'), tool('sendNote', 'h1', 'looksUp')] });
+      let after = Object.fromEntries(changed.tools.map((entry) => [entry.name, entry]));
+      expect(after.query).toMatchObject({ heading: 'makesNew', state: 'confirmed', movedBy: { name: 'sara' } });
+      expect(after.notes).toMatchObject({ heading: 'makesNew', state: 'confirmed', movedBy: { name: 'sara' } });
+      const revision = (await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } })).policyRevision;
+      // The suggestions come later on the same version: one tightens, one would loosen and doesn't
+      const later = await syncCatalog(saraBrick, serverId, { tools: [tool('query', 'f2', 'deletesOrSends'), tool('notes', 'g2', 'looksUp'), tool('sendNote', 'h1', 'looksUp')] });
+      after = Object.fromEntries(later.tools.map((entry) => [entry.name, entry]));
+      expect(after.query).toMatchObject({ heading: 'deletesOrSends', state: 'confirmed', movedBy: { name: 'sara' } });
+      expect(after.notes).toMatchObject({ heading: 'makesNew', state: 'confirmed', movedBy: { name: 'sara' } });
+      expect((await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } })).policyRevision).toBeGreaterThan(revision);
+      // A person's confirmation stays theirs: confirmedBy is nobody only because Universe kept it for them
+      const rows = await prisma.botMcpTool.findMany({ where: { serverId, name: { in: ['query', 'notes'] } } });
+      expect(rows.every((row) => row.movedById === sara && row.confirmedById === null)).toBe(true);
+    });
+
     it('removes a tool the server dropped from a cut list unless a person decided on it', async () => {
       const serverId = await ownApp();
       const synced = await syncCatalog(saraBrick, serverId, { tools: [tool('a', 'f1', 'looksUp'), tool('b', 'f2', 'looksUp'), tool('c', 'f3', 'looksUp')] });

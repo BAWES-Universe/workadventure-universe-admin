@@ -1,7 +1,6 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { ensureAppActionTools, hasDuplicateActions, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
-import { settleOwnAppTools, sortOwnTool, universeSortsTools } from '@/lib/app-own-tools';
-import { stricterHeading } from '@/lib/app-actions/sort';
+import { keepMovedTool, settleOwnAppTools, universeSortsTools } from '@/lib/app-own-tools';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -349,11 +348,11 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
       } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && before.movedById && before.heading) {
-        // On a person's own App a tool they moved keeps their heading when it changes, never looser than Universe's rule for the new version,
-        // and is confirmed by Universe (lib/app-own-tools.ts): what they decided is never overwritten by a re-sort
+        // On a person's own App a tool they moved keeps their heading when it changes, never looser than what Universe knows of the new
+        // version, and is confirmed by Universe (lib/app-own-tools.ts): what they decided is never overwritten by a re-sort
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: stricterHeading(before.heading as Heading, sortOwnTool(tool.name, suggestion.suggestedHeading as Heading | null)), confirmedById: null, confirmedAt: new Date() },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: keepMovedTool(tool.name, before.heading as Heading, suggestion.suggestedHeading as Heading | null), confirmedById: null, confirmedAt: new Date() },
         });
         reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
@@ -369,6 +368,15 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         // page that showed the old one is out of date
         if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
           reworded = true;
+        }
+        // A tool a person moved that Universe kept for them after it changed (confirmed by nobody): a suggestion that comes later is taken
+        // and can only tighten their heading, never loosen it
+        const keptForPerson = universeSorts && !server.legacyText && !!before.movedById && !before.confirmedById && !!before.confirmedAt && !!before.heading;
+        if (keptForPerson) {
+          const heading = keepMovedTool(tool.name, before.heading as Heading, suggestion.suggestedHeading as Heading | null);
+          if (heading !== before.heading) reworded = true;
+          await tx.botMcpTool.update({ where: { id: before.id }, data: { ...shown, ...suggestion, heading } });
+          continue;
         }
         const follows = !before.confirmedAt || (universeSorts && !before.confirmedById && !before.movedById);
         await tx.botMcpTool.update({ where: { id: before.id }, data: follows ? { ...shown, ...suggestion } : shown });
