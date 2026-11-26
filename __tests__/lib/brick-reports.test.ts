@@ -18,6 +18,25 @@ describe('cleaning a note', () => {
     expect(cleanReportText(raw, TEXT_MAX)).toBe(clean);
   });
 
+  it.each([
+    ['a Kuwait phone number in Arabic digits', 'Call ٩٦٥٥١٢٣٤٥٦٧ now', 'Call now'],
+    ['a phone number in Persian digits', 'Call ۹۶۵۵۱۲۳۴ now', 'Call now'],
+    ['digits with invisible spaces between them', 'Call 9\u200b6\u200b5\u200b5\u200b1\u200b2\u200b3\u200b4 now', 'Call now'],
+    ['an address with any ending', 'Tried booking.travel, acme.it and shop.nl', 'Tried, and'],
+    ['an address written around a filter', 'Opened example[.]com and example (dot) org', 'Opened and'],
+    ['a written-around or other scheme', 'Went to hxxps://evil.example/x and ftp://files.example', 'Went to and'],
+    ['an address with no //', 'Asked mailto:sara and matrix:u/alice', 'Asked and'],
+    ['keys and ids', 'Keys sk-ant-api03-AbCdEf123456789 ghp_aB3dE5gH7jK9mN1pQ3 AKIAIOSFODNN7EXAMPLE and dc5c54f8-7cde-4394-bdb3-164967b18efe', 'Keys and'],
+    ['a full date, which can be a birth date', 'Born 1990-04-12 and 12.04.1990', 'Born and'],
+    ['endings that are web addresses as often as files', 'Ran on shop.example.ai and libfoo.so', 'Ran on and'],
+  ])('takes out %s', (_what, raw, clean) => {
+    expect(cleanReportText(raw, TEXT_MAX)).toBe(clean);
+  });
+
+  it('keeps file names with a common file ending, and short versions', () => {
+    expect(cleanReportText('Opened index.html, run.sh and README.md, e.g. in Node.js 0.5.1', TEXT_MAX)).toBe('Opened index.html, run.sh and README.md, e.g. in Node.js 0.5.1');
+  });
+
   it('keeps ordinary words, short numbers, years and versions', () => {
     expect(cleanReportText('Replies take over 1 minute since 2026, in version 0.5.1 of Node.js', TEXT_MAX)).toBe('Replies take over 1 minute since 2026, in version 0.5.1 of Node.js');
   });
@@ -82,5 +101,19 @@ describe('priority', () => {
     expect(priorityOf({ bricks: 2, people: 0, stoppedWork: false, thisWeek: 0, lastWeek: 0, cameBack: false }).level).toBe('low');
     expect(priorityOf({ bricks: 4, people: 0, stoppedWork: false, thisWeek: 0, lastWeek: 0, cameBack: false }).level).toBe('medium');
     expect(priorityOf({ bricks: 5, people: 5, stoppedWork: false, thisWeek: 0, lastWeek: 0, cameBack: false }).level).toBe('high');
+  });
+
+  it('counts Bricks of one owner once and guests at most 2, so one person never makes a problem High alone', () => {
+    const one = priorityOf({ bricks: 9, owners: 1, people: 9, guests: 9, stoppedWork: true, thisWeek: 9, lastWeek: 0, cameBack: false });
+    expect(one.reasons).toEqual([
+      { label: 'Stopped the work', points: 5 },
+      { label: '9 Bricks', points: 3 },
+      { label: '9 people', points: 2 },
+    ]);
+    expect(one.level).toBe('low');
+    expect(priorityOf({ bricks: 4, owners: 3, people: 4, guests: 1, stoppedWork: false, thisWeek: 0, lastWeek: 0, cameBack: false }).reasons).toEqual([
+      { label: '4 Bricks', points: 9 },
+      { label: '4 people', points: 7 },
+    ]);
   });
 });

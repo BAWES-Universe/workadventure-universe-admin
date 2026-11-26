@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
-import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { takeBackReportNote } from '@/lib/brick-reports';
 
@@ -17,12 +16,10 @@ const bodySchema = z.object({ id: z.string().trim().min(1).max(100), key: z.stri
 /**
  * POST /api/me/brick-reports/take-back { id, key } - takes back a note a Brick sent to the Universe team, within 24 hours. The key is in the
  * chat's own message, so anyone in that chat can, and nobody else. Answers `{ takenBack: true }`, or `{ takenBack: false, reason }`
- * (not_found, too_late). Signed in.
+ * (not_found, too_late). No sign-in: guests' chats send notes too, and the key (24 random bytes, compared in constant time) is the proof.
  */
 export async function POST(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
-  const user = await getSessionUser(request);
-  if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   let raw: unknown;
   try {
     raw = await request.json();

@@ -37,6 +37,11 @@ let saraBrick = '';
 let omarBrick = '';
 const envBefore = process.env.BOT_SERVICE_TOKEN;
 const problems = new Set<string>();
+const bricks = new Set<string>();
+const keep = (problemId: string | null | undefined) => {
+  if (problemId) problems.add(problemId);
+};
+const problemOf = async (id: unknown) => (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: id as string }, select: { problemId: true } })).problemId!;
 
 const note = (botId: string, title: string, over: Record<string, unknown> = {}) => ({
   botId,
@@ -55,7 +60,7 @@ async function send(body: Record<string, unknown>) {
   const json = (await response.json()) as Record<string, unknown>;
   if (json.sent === true) {
     const row = await prisma.brickReportNote.findUnique({ where: { id: json.id as string }, select: { problemId: true } });
-    if (row) problems.add(row.problemId);
+    keep(row?.problemId);
   }
   return { status: response.status, json };
 }
@@ -69,10 +74,12 @@ run('Brick reports', () => {
     boss = (await person('boss', 'boss@example.test')).id;
     saraBrick = (await createBrick({ ownerId: sara, name: 'Stay' })).id;
     omarBrick = (await createBrick({ ownerId: omar, name: 'Chef' })).id;
+    bricks.add(saraBrick).add(omarBrick);
   });
   afterAll(async () => {
     if (envBefore === undefined) delete process.env.BOT_SERVICE_TOKEN;
     else process.env.BOT_SERVICE_TOKEN = envBefore;
+    await prisma.brickReportNote.deleteMany({ where: { OR: [{ problemId: { in: [...problems] } }, { botId: { in: [...bricks] } }] } });
     await prisma.brickReportProblem.deleteMany({ where: { id: { in: [...problems] } } });
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, boss] } } });
     await prisma.$disconnect();
@@ -100,8 +107,8 @@ run('Brick reports', () => {
     expect(kept.idea).toBe('Open links in a new tab');
     const row = await prisma.brickReportNote.findUnique({ where: { id: json.id as string } });
     expect(row?.tried).toBe('Sent and to, call');
-    // The person is only a one-way hash, and the take-back key is never kept as it is
-    expect(row?.personKey).toMatch(/^[0-9a-f]{32}$/);
+    // The person is only a one-way hash (marked only as signed in or guest), and the take-back key is never kept as it is
+    expect(row?.personKey).toMatch(/^p:[0-9a-f]{32}$/);
     expect(row?.personKey).not.toContain(saraBrick);
     expect(row?.takeBackHash).not.toBe(json.takeBackKey);
   });
@@ -111,7 +118,6 @@ run('Brick reports', () => {
     const second = await send(note(omarBrick, `Links inside pages ${tag} do not open`, { personKey: `person:omar-${tag}` }));
     const otherArea = await send(note(omarBrick, `Links inside pages ${tag} don't open`, { area: 'chat' }));
     const otherTitle = await send(note(omarBrick, `Voice ${tag} cuts out after a minute`));
-    const problemOf = async (id: unknown) => (await prisma.brickReportNote.findUnique({ where: { id: id as string }, select: { problemId: true } }))!.problemId;
     expect(await problemOf(second.json.id)).toBe(await problemOf(first.json.id));
     expect(await problemOf(otherArea.json.id)).not.toBe(await problemOf(first.json.id));
     expect(await problemOf(otherTitle.json.id)).not.toBe(await problemOf(first.json.id));
@@ -122,30 +128,43 @@ run('Brick reports', () => {
   it('a Brick sends at most so many notes a day, whatever key it runs on', async () => {
     const day = new Date('2030-01-02T10:00:00Z');
     const brick = (await createBrick({ ownerId: sara, name: 'Busy' })).id;
+    bricks.add(brick);
     for (let i = 0; i < NOTES_PER_BRICK_PER_DAY; i++) {
       const outcome = await recordReportNote({ botId: brick, kind: 'idea', area: 'other', title: `Idea ${tag} number ${i} about weekly email`, effect: 'idea' }, day);
       expect(outcome.sent).toBe(true);
-      if (outcome.sent) problems.add((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: outcome.id } })).problemId);
+      if (outcome.sent) keep(await problemOf(outcome.id));
     }
     expect(await recordReportNote({ botId: brick, kind: 'idea', area: 'other', title: `One ${tag} more`, effect: 'idea' }, day)).toEqual({ sent: false, reason: 'limit' });
     // The next day it can again
     const next = await recordReportNote({ botId: brick, kind: 'idea', area: 'other', title: `Idea ${tag} next day`, effect: 'idea' }, new Date('2030-01-03T10:00:00Z'));
     expect(next.sent).toBe(true);
-    if (next.sent) problems.add((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: next.id } })).problemId);
+    if (next.sent) keep(await problemOf(next.id));
   });
 
-  it('refuses a note with no title left after cleaning, and one from a Brick that is not there', async () => {
+  it('refuses a note with no title left after cleaning, and one from a Brick that is not there, a room bot or a deleted Brick', async () => {
     expect((await send(note(saraBrick, 'https://example.com'))).json).toEqual({ sent: false, reason: 'empty' });
     expect((await send(note(randomUUID(), `Gone ${tag}`))).json).toEqual({ sent: false, reason: 'unknown_brick' });
+    const universe = await prisma.universe.create({ data: { slug: `r-${tag}`, name: 'Report test', ownerId: sara } });
+    try {
+      const world = await prisma.world.create({ data: { universeId: universe.id, slug: 'hq', name: 'HQ' } });
+      const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
+      const roomBot = await prisma.bot.create({ data: { roomId: room.id, name: 'Room bot', createdById: sara, behaviorConfig: {} } });
+      expect((await send(note(roomBot.id, `Room ${tag} bot note`))).json).toEqual({ sent: false, reason: 'unknown_brick' });
+    } finally {
+      await prisma.universe.delete({ where: { id: universe.id } });
+    }
+    const gone = (await createBrick({ ownerId: sara, name: 'Gone' })).id;
+    bricks.add(gone);
+    await prisma.bot.update({ where: { id: gone }, data: { deletedAt: new Date(), goneAt: new Date(Date.now() + 86_400_000), enabledBeforeDelete: true, enabled: false } });
+    expect((await send(note(gone, `Deleted ${tag} Brick note`))).json).toEqual({ sent: false, reason: 'unknown_brick' });
   });
 
   it('the chat takes a note back with its key within 24 hours; a wrong key or too late does nothing', async () => {
     const { json } = await send(note(saraBrick, `Take back ${tag} problem with maps`, { area: 'map' }));
     const id = json.id as string;
     const key = json.takeBackKey as string;
+    // Nobody signed in (a guest's chat): the key is the proof
     mockUser.current = null;
-    expect((await takeBack(request('/api/me/brick-reports/take-back', { method: 'POST', body: { id, key } }))).status).toBe(401);
-    mockUser.current = { id: omar, email: `omar-${tag}@example.test` };
     const wrong = await takeBack(request('/api/me/brick-reports/take-back', { method: 'POST', body: { id, key: `${key.slice(0, -2)}xx` } }));
     expect(await wrong.json()).toEqual({ takenBack: false, reason: 'not_found' });
     const created = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id } })).createdAt;
@@ -153,10 +172,39 @@ run('Brick reports', () => {
     const right = await takeBack(request('/api/me/brick-reports/take-back', { method: 'POST', body: { id, key } }));
     expect(await right.json()).toEqual({ takenBack: true });
     expect(await takeBackReportNote(id, key)).toEqual({ takenBack: true });
-    // A problem whose only note was taken back is not in the inbox
-    const problemId = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id } })).problemId;
-    expect(await reportProblem(problemId)).toBeNull();
-    expect((await reportInbox('new')).problems.some((row) => row.id === problemId)).toBe(false);
+    // Its words, context and person go at once; the row stays, empty, for the day's count. A problem it alone made goes with it
+    const emptied = await prisma.brickReportNote.findUniqueOrThrow({ where: { id } });
+    expect(emptied).toMatchObject({ title: '', tried: '', stopped: '', idea: '', context: null, personKey: null, problemId: null });
+    expect(emptied.takenBackAt).not.toBeNull();
+    expect(await prisma.brickReportProblem.count({ where: { title: { contains: `Take back ${tag}` } } })).toBe(0);
+  });
+
+  it('a problem a taken-back note started reads as the notes left, and never shows its title', async () => {
+    const opener = await send(note(saraBrick, `Pages ${tag} share button private words`, { area: 'pages', kind: 'cant_do' }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const later = await send(note(omarBrick, `Pages ${tag} share button does nothing`, { area: 'pages', kind: 'cant_do', personKey: `person:omar-${tag}` }));
+    const problemId = await problemOf(opener.json.id);
+    expect(await problemOf(later.json.id)).toBe(problemId);
+    expect(await takeBackReportNote(opener.json.id as string, opener.json.takeBackKey as string)).toEqual({ takenBack: true });
+    const left = await prisma.brickReportProblem.findUniqueOrThrow({ where: { id: problemId } });
+    expect(left.title).toBe(`Pages ${tag} share button does nothing`);
+    expect(left.lastSeenAt.getTime()).toBe((await prisma.brickReportNote.findUniqueOrThrow({ where: { id: later.json.id as string } })).createdAt.getTime());
+    expect(await reportProblem(problemId)).toMatchObject({ title: `Pages ${tag} share button does nothing`, times: 1, bricks: 1 });
+  });
+
+  it('one person cannot push a problem to High alone: Bricks of one owner count once, guests count 1 each and 2 at most', async () => {
+    const own: string[] = [];
+    for (const name of ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine']) own.push((await createBrick({ ownerId: sara, name })).id);
+    own.forEach((id) => bricks.add(id));
+    for (const [i, id] of own.entries()) await send(note(id, `Voice ${tag} drops when the call starts`, { area: 'voice', personKey: `guest:g${i}-${tag}` }));
+    const problemId = await problemOf((await prisma.brickReportNote.findFirstOrThrow({ where: { botId: own[0] }, select: { id: true } })).id);
+    const detail = await reportProblem(problemId);
+    expect(detail).toMatchObject({ bricks: 9, people: 9, times: 9, level: 'low' });
+    expect(detail?.reasons).toEqual([
+      { label: 'Stopped the work', points: 5 },
+      { label: '9 Bricks', points: 3 },
+      { label: '9 people', points: 2 },
+    ]);
   });
 
   it('the inbox is for super admins, ranks by priority, and never says who sent a note', async () => {
@@ -171,8 +219,8 @@ run('Brick reports', () => {
     const body = await response.json();
     const text = JSON.stringify(body);
     for (const secret of [saraBrick, omarBrick, sara, omar, 'personKey', 'botId', 'takeBack']) expect(text).not.toContain(secret);
-    const bigProblem = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: big.json.id as string } })).problemId;
-    const smallProblem = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: small.json.id as string } })).problemId;
+    const bigProblem = await problemOf(big.json.id);
+    const smallProblem = await problemOf(small.json.id);
     const order = (body.problems as Array<{ id: string }>).map((row) => row.id);
     expect(order.indexOf(bigProblem)).toBeLessThan(order.indexOf(smallProblem));
 
@@ -190,7 +238,7 @@ run('Brick reports', () => {
 
   it('moves a problem between tabs, and a note on a fixed problem brings it back to New', async () => {
     const first = await send(note(saraBrick, `Memory ${tag} forgets the city`, { area: 'memory' }));
-    const problemId = (await prisma.brickReportNote.findUniqueOrThrow({ where: { id: first.json.id as string } })).problemId;
+    const problemId = await problemOf(first.json.id);
     mockUser.current = { id: sara, email: `sara-${tag}@example.test` };
     expect((await problemPatch(request(`/api/admin/brick-reports/${problemId}`, { method: 'PATCH', body: { state: 'fixed' } }), params({ id: problemId }))).status).toBe(403);
     mockUser.current = { id: boss, email: 'boss@example.test' };
@@ -201,6 +249,27 @@ run('Brick reports', () => {
     const back = await reportProblem(problemId);
     expect(back).toMatchObject({ state: 'new', cameBack: true });
     expect(back?.reasons).toContainEqual({ label: 'Came back after a fix', points: 6 });
+    // Taking back the note that brought it back puts it back to Fixed; with a later note still there, it stays open
+    const fixedAgain = await problemPatch(request(`/api/admin/brick-reports/${problemId}`, { method: 'PATCH', body: { state: 'fixed' } }), params({ id: problemId }));
+    expect(fixedAgain.status).toBe(200);
+    const reopen = await send(note(saraBrick, `Memory ${tag} forgets the city once more`, { area: 'memory' }));
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new', cameBack: true });
+    expect(await takeBackReportNote(reopen.json.id as string, reopen.json.takeBackKey as string)).toEqual({ takenBack: true });
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'fixed', cameBack: false });
+    expect((await reportInbox('new')).problems.some((row) => row.id === problemId)).toBe(false);
+    await problemPatch(request(`/api/admin/brick-reports/${problemId}`, { method: 'PATCH', body: { state: 'fixed' } }), params({ id: problemId }));
+    const opener = await send(note(saraBrick, `Memory ${tag} forgets the city yet again`, { area: 'memory' }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await send(note(omarBrick, `Memory ${tag} forgets the city again today`, { area: 'memory', personKey: `person:omar-${tag}` }));
+    await takeBackReportNote(opener.json.id as string, opener.json.takeBackKey as string);
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new', cameBack: true });
+    // Moved by hand after it came back: taking the note back leaves the person's call as it is
+    await problemPatch(request(`/api/admin/brick-reports/${problemId}`, { method: 'PATCH', body: { state: 'fixed' } }), params({ id: problemId }));
+    const third = await send(note(saraBrick, `Memory ${tag} forgets the city each time`, { area: 'memory' }));
+    await problemPatch(request(`/api/admin/brick-reports/${problemId}`, { method: 'PATCH', body: { state: 'working' } }), params({ id: problemId }));
+    await takeBackReportNote(third.json.id as string, third.json.takeBackKey as string);
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'working' });
+
     const missing = await problemPatch(request(`/api/admin/brick-reports/${randomUUID()}`, { method: 'PATCH', body: { state: 'new' } }), params({ id: randomUUID() }));
     expect(missing.status).toBe(404);
   });
