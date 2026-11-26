@@ -21,7 +21,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
  *
  * Deleting: deleting the chat changes nothing for a note already sent; Take it back (24 hours, anyone in the chat) is the way. Deleting the
  * Brick keeps its notes counted with no link to the Brick (the link is set to null); words a person chose to send stay, since they are the
- * sender's and not the owner's. Deleting a person's account must call forgetReportWordsOf, which empties the words they sent.
+ * sender's and not the owner's. Deleting a person's account must call forgetReportWordsOf with their User.uuid (not User.id), which empties the words they sent.
  *
  * Words people add are untrusted: whatever reads notes later (the weekly sort, lessons that go into every Brick's rules) must treat them
  * as data inside a fenced block, never as instructions; a lesson may come only from a problem with notes from 3 or more different owners,
@@ -444,6 +444,7 @@ export async function withdrawUndelivered(now: Date = new Date()): Promise<numbe
 /**
  * Empties the words a person sent with notes, for when their account is deleted (nothing in Orbit deletes an account today; whatever does
  * must call this, see lib/bot-privacy.ts). Their notes stay counted, product-only; their person hash is one-way, so it is recomputed here.
+ * Takes the account's User.uuid (the game's id the hash was made from, `person:<uuid>`), never User.id: with User.id nothing matches.
  */
 export async function forgetReportWordsOf(userUuid: string): Promise<number> {
   const done = await prisma.brickReportNote.updateMany({ where: { personKey: personHash(`person:${userUuid}`), words: { not: '' } }, data: { words: '', wordsAt: null } });
