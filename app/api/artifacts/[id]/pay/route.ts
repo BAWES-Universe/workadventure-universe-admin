@@ -23,6 +23,8 @@ const schema = z
     check: z.boolean().optional(),
     /** Restore purchase: this buyer's verified paid order for the page's offer. */
     restore: z.boolean().optional(),
+    /** The version the window has open: terms set on a newer one are never charged on it (the owner may have published since it opened). */
+    shownVersion: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -33,6 +35,7 @@ const schema = z
  *  - `start: true` (+ `intentId`): a checkout for the owner's amount (the viewer sends no amount). The same `intentId` from the same buyer
  *    gives the SAME order, never another, even from two windows at once. 200 { orderId, checkoutUrl, amount, currency, app, reused, buyer }.
  *    409 `not_published` when the viewer is shown an older published version than the one the owner set the terms on: nothing was made.
+ *    409 `page_changed` when `shownVersion` (the version the window has open) is older than the one the terms were set on: nothing was made.
  *  - `order`: where an order stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer }; `pollAfterMs` is how long to wait before asking again.
  *  - `check: true` + `intentId`: the same, for the order that wish made (found with the buyer, so no one else's). 404 when there is none.
  *  - `restore: true`: { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer's order for the page's offer.
@@ -75,10 +78,12 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   if (!body.start) return { enabled: await pageTakesPayments(params.id) };
   if (body.intentId && !buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
   const visitor = person.signedIn ? `game:${person.identifier}` : `game-guest:${person.name ?? ''}:${body.viewer.chat?.ref ?? ''}`;
-  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys, seesLatest });
+  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys, seesLatest, shownVersion: body.shownVersion });
   if (outcome.status === 'ok') return { orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer };
   if (outcome.status === 'limit') throw new ArtifactError('limit', 429, 'Too many tries for now.');
   // This viewer is shown an older published version than the one the owner set these terms on: a definite answer, nothing was made
   if (outcome.status === 'not_published') throw new ArtifactError('not_published', 409, 'This page isn’t taking payments right now. Try again later.');
+  // The window has an older version open than the one these terms were set on: nothing was made, and opening it again shows the terms
+  if (outcome.status === 'page_changed') throw new ArtifactError('page_changed', 409, 'This page was updated. Open it again to see the latest version before you pay.');
   throw new ArtifactError('unavailable', 409, 'Payments are unavailable.', outcome.unsure ? { unsure: true } : undefined);
 });

@@ -590,6 +590,69 @@ run('payments for pages, in a real database', () => {
       expect((await start(artifactId, '203.0.113.25')).status).toBe(409);
     });
 
+    const startShown = (artifactId: string, shownVersion: number | undefined, address: string, extra: Record<string, unknown> = {}) =>
+      publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { ...(shownVersion === undefined ? {} : { shownVersion }), ...extra }, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+
+    it('never charges terms set on a newer version than the one the buyer’s open page shows, even once that version is published (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      const sent = gateway();
+      // The buyer opened the page while version 1 was published; the owner then published version 2 with these terms
+      const stale = await startShown(artifactId, 1, '203.0.113.30');
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ error: 'This page was updated. Reload it to see the latest version before you pay', code: 'page_changed' });
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+      // The same through the game's window
+      const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: outsider, start: true, shownVersion: 1 } }), params({ id: artifactId }));
+      expect(game.status).toBe(409);
+      expect(await game.json()).toMatchObject({ error: 'page_changed' });
+      expect(sent).toHaveLength(0);
+      // After a reload the page shows version 2: it checks out. A host that does not say which version it shows is checked as before
+      expect((await startShown(artifactId, 2, '203.0.113.31')).status).toBe(200);
+      expect((await startShown(artifactId, undefined, '203.0.113.32')).status).toBe(200);
+    });
+
+    it('lets a page still open on an older version pay with terms that were set on that version or before it', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      // Version 2 is published after the terms were set on version 1: the terms are the same for both
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await publish(artifactId, 2);
+      gateway();
+      expect((await startShown(artifactId, 1, '203.0.113.33')).status).toBe(200);
+    });
+
+    it('gives a wish the order it already made, not a refusal, when the terms moved to a draft while its first try was on its way (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      gateway();
+      const intentId = wish();
+      const code = word();
+      const first = await startShown(artifactId, 1, '203.0.113.34', { intentId, recoveryCode: code });
+      expect(first.status).toBe(200);
+      const { orderId } = await first.json();
+      // The owner sets terms on a draft version 2; the same wish asks again, and its first look misses the order (as when the first try had not committed yet)
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await job(serverId, artifactId);
+      const look = jest.spyOn(prisma.appPageOrder, 'findFirst').mockResolvedValueOnce(null);
+      try {
+        const again = await startShown(artifactId, 1, '203.0.113.34', { intentId, recoveryCode: code });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ orderId, reused: true });
+      } finally {
+        look.mockRestore();
+      }
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+      // A new wish is refused: nothing new is made on terms the link does not show
+      expect((await startShown(artifactId, 1, '203.0.113.35', { intentId: wish(), recoveryCode: code })).status).toBe(409);
+    });
+
     it('still carries on an order made before the terms moved to a draft, at the order’s own amount', async () => {
       const { serverId } = await connectGateway();
       const artifactId = await pageWith(1, 1);

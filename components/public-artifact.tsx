@@ -97,7 +97,7 @@ export function PublicArtifact({ view, universeUrl, artifactId }: { view: Public
   return (
     <main data-shared-page className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
       <ArtifactFrame view={view} className="block size-full border-0" />
-      {artifactId && view.url !== null ? <PagePaymentsBridge artifactId={artifactId} /> : null}
+      {artifactId && view.url !== null ? <PagePaymentsBridge artifactId={artifactId} version={view.version} /> : null}
       <MadeWithUniverse href={universeUrl} floating />
     </main>
   );

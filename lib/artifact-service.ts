@@ -1471,22 +1471,37 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, botId?: stri
 
 /**
  * One page of a list for someone outside the chat, most recently changed first by what THEY are shown: an artifact shown as published goes
- * by its publish time, and one they see the latest of (their own, or a link never published) by its own change time. The order is worked
- * out on a few columns of every match, then only that page is read whole; the id keeps it fixed between pages, as in `pageOf`.
+ * by its publish time, and one they see the latest of (their own, or a link never published) by its own change time. Each of the two kinds
+ * is ordered and cut by the database on its own column (with the id after it, as in `pageOf`), and only the first `offset + page` keys of
+ * each are read and merged here, so a list never reads every match; then only that page is read whole.
  */
 async function pageOfAsShown<View>(where: Prisma.ArtifactWhereInput, offset: number, who: Asker, view: (artifact: ArtifactRow) => View): Promise<ArtifactPage<View>> {
-  const keys = await prisma.artifact.findMany({
-    where,
-    select: { id: true, ownerId: true, chatRef: true, openScope: true, publishedVersion: true, publishedAt: true, createdAt: true, updatedAt: true },
-  });
-  const at = (key: (typeof keys)[number]) => changedAsShown(key, key.publishedVersion !== null && seesPublishedOnly(key, who)).getTime();
-  keys.sort((a, b) => at(b) - at(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-  const ids = keys.slice(offset, offset + ARTIFACT_PAGE_SIZE).map((key) => key.id);
-  const rows = ids.length ? await prisma.artifact.findMany({ where: { AND: [where, { id: { in: ids } }] }, include: ARTIFACT_INCLUDE }) : [];
+  const take = offset + ARTIFACT_PAGE_SIZE;
+  const key = { id: true, publishedAt: true, createdAt: true, updatedAt: true } as const;
+  // Outside the chat, every artifact that is not theirs is open by its link (see `opens`), so it is shown as published once it was published
+  const notTheirs: Prisma.ArtifactWhereInput = who.userId ? { OR: [{ ownerId: null }, { ownerId: { not: who.userId } }] } : {};
+  const seesLatest: Prisma.ArtifactWhereInput = { OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { publishedVersion: null }] };
+  const [total, pinned, latest] = await Promise.all([
+    prisma.artifact.count({ where }),
+    prisma.artifact.findMany({ where: { AND: [where, notTheirs, { publishedVersion: { not: null } }] }, select: key, orderBy: [{ publishedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }], take }),
+    prisma.artifact.findMany({ where: { AND: [where, seesLatest] }, select: key, orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take }),
+  ]);
+  // The two orders merged: each list keeps the database's own order, and the newer head goes first
+  const ids: string[] = [];
+  let p = 0;
+  let l = 0;
+  while (ids.length < take && (p < pinned.length || l < latest.length)) {
+    const a = pinned[p];
+    const b = latest[l];
+    const pinnedFirst = b === undefined || (a !== undefined && (changedAsShown(a, true).getTime() > changedAsShown(b, false).getTime() || (changedAsShown(a, true).getTime() === changedAsShown(b, false).getTime() && a.id > b.id)));
+    ids.push(pinnedFirst ? pinned[p++].id : latest[l++].id);
+  }
+  const wanted = ids.slice(offset);
+  const rows = wanted.length ? await prisma.artifact.findMany({ where: { AND: [where, { id: { in: wanted } }] }, include: ARTIFACT_INCLUDE }) : [];
   const byId = new Map(rows.map((one) => [one.id, one]));
-  const page = ids.flatMap((id) => (byId.has(id) ? [byId.get(id) as ArtifactRow] : []));
-  const end = offset + ids.length;
-  return { artifacts: page.map(view), total: keys.length, next: end < keys.length && ids.length > 0 ? end : null };
+  const page = wanted.flatMap((id) => (byId.has(id) ? [byId.get(id) as ArtifactRow] : []));
+  const end = offset + wanted.length;
+  return { artifacts: page.map(view), total, next: end < total && wanted.length > 0 ? end : null };
 }
 
 /** Every artifact this account owns, from every chat and bot, copies too, a page at a time (Your artifacts in Orbit). */

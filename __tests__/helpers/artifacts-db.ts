@@ -145,8 +145,24 @@ const client: Row = {
     findMany: async ({ where = {}, include, orderBy, skip, take, select }: Row) => {
       let rows = db.artifacts.filter((a) => matches(a, where));
       const order: Row[] = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
-      if (order.some((one) => one.updatedAt === 'desc')) {
-        rows = [...rows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || (order.some((one) => one.id === 'desc') ? String(b.id).localeCompare(String(a.id)) : 0));
+      // Every key in turn, as the database orders them: a moment by its time, the id as text, and empty values where `nulls` puts them (last by default when descending here)
+      if (order.length) {
+        const valueOf = (value: unknown) => (value instanceof Date ? value.getTime() : value);
+        rows = [...rows].sort((a, b) => {
+          for (const entry of order) {
+            const [column, how] = Object.entries(entry)[0] as [string, string | { sort: string; nulls?: string }];
+            const sort = typeof how === 'string' ? how : how.sort;
+            const nulls = typeof how === 'string' ? 'last' : (how.nulls ?? 'last');
+            const x = valueOf(a[column]);
+            const y = valueOf(b[column]);
+            if (x === y) continue;
+            if (x === null || x === undefined) return nulls === 'last' ? 1 : -1;
+            if (y === null || y === undefined) return nulls === 'last' ? -1 : 1;
+            const cmp = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+            return sort === 'desc' ? -cmp : cmp;
+          }
+          return 0;
+        });
       }
       if (skip) rows = rows.slice(skip);
       if (take) rows = rows.slice(0, take);
