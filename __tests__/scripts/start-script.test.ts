@@ -52,7 +52,7 @@ function standIns(names: string[]): { bin: string; marker: string; ran: (name: s
 }
 
 function run(script: string, args: string[], cwd: string, env: Record<string, string | undefined>) {
-  const clean: Record<string, string> = {};
+  const clean: NodeJS.ProcessEnv = { NODE_ENV: 'test' };
   for (const [key, value] of Object.entries(env)) if (value !== undefined) clean[key] = value;
   const result = spawnSync('sh', [script, ...args], { cwd, env: clean, encoding: 'utf8', timeout: 600_000 });
   return { status: result.status, out: `${result.stdout}\n${result.stderr}`, stderr: result.stderr };
@@ -317,7 +317,7 @@ realDb('scripts/start.sh with the real migration tool and a populated database',
     it('recovery: mark it rolled back, ship the fixed migration, and Orbit starts on the up-to-date database', async () => {
       const resolve = spawnSync('node', ['node_modules/prisma/build/index.js', 'migrate', 'resolve', '--rolled-back', FAILING], {
         cwd: dir,
-        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', DATABASE_URL: db!.url },
+        env: { NODE_ENV: 'test', PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', DATABASE_URL: db!.url },
         encoding: 'utf8',
         timeout: 240_000,
       });
