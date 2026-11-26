@@ -326,6 +326,18 @@ run('the take-over fence’s mark, held by Orbit', () => {
       expect(await fenceMachine(sara.brickId)).toBe('done');
     });
 
+    it('the keep-awake no-op is not due while a fence runs: the fence’s own commands count as activity, so a command of its own started after the mark never overlaps a try (Sentry on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { keptAwakeAt: null } });
+      const started = Date.now();
+      expect(await fenceMachine(sara.brickId)).toBe('done');
+      // The sweep sends the no-op only to a machine whose time kept is five minutes old or null: after a fence it is the fence's own, so the next one is five minutes on
+      const kept = (await computerOf(sara.brickId)).keptAwakeAt;
+      expect(kept).not.toBeNull();
+      expect((kept as Date).getTime()).toBeGreaterThanOrEqual(started - 1000);
+    });
+
     it('a computer with no mark is not proved clear: no fence is sent, the machine is stopped, and the person has no screen until it wakes', async () => {
       const { sara, jobId } = await running();
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { markBootId: null, markTicks: null, markParts: undefined, markRunners: undefined } });

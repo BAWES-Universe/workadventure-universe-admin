@@ -3617,6 +3617,9 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
     for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';
       try {
+        // The fence's own commands are activity on the machine, so the keep-awake no-op is not due for another five minutes: it is a command of its own, started after the mark, and one that overlapped
+        // a try would be stopped or counted as left running. A sweep that read the row before this write fails its claim on the time it saw (Sentry on #1033)
+        await prisma.brickComputer.updateMany({ where: { botId }, data: { keptAwakeAt: new Date() } });
         await provider.exec(ref, fenceCommand(mark), { timeoutMs: 30_000 });
         const check = await provider.exec(ref, fenceCommand(mark, true), { timeoutMs: 30_000 });
         if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
