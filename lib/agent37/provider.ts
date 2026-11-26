@@ -102,6 +102,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   private readonly copies: NonNullable<ProviderOptions['copies']>;
   /** Which machine belongs to which Brick, learned from the metadata we wrote: `save` needs the Brick of a machine. */
   private readonly brickOf = new Map<string, string>();
+  /** Computers (with the image revision) whose skipped update was already told to Sentry. */
+  private readonly skippedUpdate = new Set<string>();
 
   constructor(options: ProviderOptions) {
     this.client = options.client;
@@ -346,7 +348,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
       // moved when it is next made from a copy, which is when its files outside the home folder are put back on a computer of the current image
       if (options.update === 'unless_outside' && !(await this.holdsNothingOutside(ref))) {
         console.error('[Computer] A computer behind the image was not updated: it holds files outside its home folder (or could not say)', { ref, revision: instance.template_revision, image: state.revision });
-        Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
+        // Told to Sentry once for each computer and image revision in this process (every job on the computer asks again, and would say it again)
+        const once = `${ref}:${state.revision}`;
+        if (!this.skippedUpdate.has(once)) {
+          this.skippedUpdate.add(once);
+          Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
+        }
       } else {
         await this.client.updateInstance(ref);
         instance = await this.untilHealthy(ref, instance.url);
@@ -650,6 +657,14 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const text = Buffer.from(UNIVERSE_COLD, 'utf8');
     const sha = createHash('sha256').update(text).digest('hex');
     const dir = COLD_SCRIPT.slice(0, COLD_SCRIPT.lastIndexOf('/'));
+    // Already there, whole: nothing is sent again (a computer that stays behind the image is asked more than once). The file and its folder are root's and closed to the agent, so what is read here is what runs;
+    // a computer that cannot say, or says another sum, is sent the script as before
+    try {
+      const there = await this.client.exec(ref, `sha256sum ${COLD_SCRIPT}`, { user: 'root', timeoutMs: 30_000 });
+      if (there.exitCode === 0 && !there.truncated && /^([0-9a-f]{64})\s/.exec(there.stdout)?.[1] === sha) return;
+    } catch {
+      // asked again below, by sending it
+    }
     let last: unknown = null;
     for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
       if (attempt > 0) await this.pause(1_000);

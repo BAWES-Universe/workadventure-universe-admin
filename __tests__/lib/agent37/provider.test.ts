@@ -37,6 +37,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   let healthy = true;
   let coldSum: string | null = COLD_SHA;
   let coldInstall = true;
+  /** The sum of the script already in place on the computer (null: none there). */
+  let coldInPlace: string | null = null;
   let execOut: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean } = () => 'ok';
   let markOut = `boot=${BOOT}\nticks=1234\npart=77:500:p\nrunner=${'a'.repeat(64)}\nmarked=1\n`;
   const revisionAfterUpdate = 2;
@@ -106,7 +108,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
       // Putting the current script on the machine (before a pack-away) is answered here unless a test says otherwise
-      const answer = isMarkCommand(command) ? markOut : /^sha256sum /.test(command) && coldSum !== null ? { stdout: `${coldSum}  ${COLD_PATH}.new\n` } : /^(umask 077 && |chmod 644 )/.test(command) && coldInstall ? { stdout: '' } : execOut(command);
+      const answer = command === `sha256sum ${COLD_PATH}` ? (coldInPlace === null ? { stdout: '', exitCode: 1 } : { stdout: `${coldInPlace}  ${COLD_PATH}\n` }) : isMarkCommand(command) ? markOut : /^sha256sum /.test(command) && coldSum !== null ? { stdout: `${coldSum}  ${COLD_PATH}.new\n` } : /^(umask 077 && |chmod 644 )/.test(command) && coldInstall ? { stdout: '' } : execOut(command);
       return typeof answer === 'string' ? { exitCode: 0, stdout: answer, stderr: '', truncated: false } : { exitCode: answer.exitCode ?? 0, stdout: answer.stdout, stderr: '', truncated: answer.truncated ?? false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
@@ -163,7 +165,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value), setColdInPlace: (value: string | null) => (coldInPlace = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; sleepLog?: string[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -890,6 +892,44 @@ describe('getting a machine ready for a job', () => {
       expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
     });
 
+    it('sends the script once to a machine that stays behind: a second job finds it in place (its sum is the right one) and sends no piece again, but a wrong or missing one is sent', async () => {
+      const { w, p } = await behind('outside_check=1 any=1\n');
+      const pieces = () => w.execs.filter((entry) => /base64 -d/.test(entry.command)).length;
+      await p.ready('m1');
+      expect(pieces()).toBeGreaterThan(0);
+      // The first job put it there: the computer now says the sum of the current script
+      w.setColdInPlace(COLD_SHA);
+      w.execs.length = 0;
+      await p.ready('m1');
+      expect(pieces()).toBe(0);
+      expect(w.execs.some((entry) => entry.command === CHECK)).toBe(true);
+      // Another script in place (an older one) is sent over
+      w.setColdInPlace('c'.repeat(64));
+      w.execs.length = 0;
+      await p.ready('m1');
+      expect(pieces()).toBeGreaterThan(0);
+    });
+
+    it('tells Sentry once for each computer and image revision, however many jobs it runs; another revision is told again', async () => {
+      const w = world();
+      let revision = 2;
+      const p = provider(w, { image: async () => state({ revision }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec((command) => (command === CHECK ? 'outside_check=1 any=1\n' : 'ready=1 restart=0\n'));
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await p.ready('m1');
+      await p.ready('m1');
+      await p.ready('m1');
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      // The image moved on again: a new fact about the same computer, told again (once)
+      revision = 3;
+      await p.ready('m1');
+      await p.ready('m1');
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+    });
+
     it('asks nothing of a machine already on the current image, and leaves it where it is', async () => {
       const w = world();
       const p = provider(w, { image: async () => state({ revision: 2 }) });
@@ -1344,7 +1384,9 @@ describe('cold storage operations on a computer', () => {
       expect(w.calls.indexOf('cap:m1:0')).toBeLessThan(firstExec);
       expect(w.instances.get('m1')!.network).toBe('allow-all');
       expect(w.budgets.get('m1')!.cap).toBe(0);
-      const commands = w.execs.map((entry) => entry.command);
+      // The first thing asked is whether the current script is already in place (it is not here); the rest is as before
+      expect(w.execs[0].command).toBe(`sha256sum ${COLD_PATH}`);
+      const commands = w.execs.map((entry) => entry.command).filter((command) => command !== `sha256sum ${COLD_PATH}`);
       // First the script goes over (a root-only folder, a file made new), then the machine's own sha256sum, then the move, then prepack from the installed path, then the list
       expect(commands[0]).toMatch(/^umask 077 && mkdir -p \/usr\/local\/share\/universe\/cold-bin && chown root:root \/usr\/local\/share\/universe\/cold-bin && chmod 755 \/usr\/local\/share\/universe\/cold-bin && printf %s '[A-Za-z0-9+/=]+' \| base64 -d > \/usr\/local\/share\/universe\/cold-bin\/universe-cold\.new$/);
       expect(commands.slice(-3)).toEqual([`sha256sum ${COLD_PATH}.new`, COLD_MOVE, COLD_PREPACK]);
@@ -1384,7 +1426,7 @@ describe('cold storage operations on a computer', () => {
       printsList(w);
       w.setColdSum('0'.repeat(64));
       await expect(p.prepack('m1')).rejects.toThrow('did not arrive whole');
-      const commands = w.execs.map((entry) => entry.command);
+      const commands = w.execs.map((entry) => entry.command).filter((command) => command !== `sha256sum ${COLD_PATH}`);
       expect(commands.filter((command) => command.startsWith('sha256sum'))).toHaveLength(3);
       expect(commands.some((command) => command.startsWith('chmod 644'))).toBe(false);
       expect(commands).not.toContain(COLD_PREPACK);
@@ -1419,7 +1461,7 @@ describe('cold storage operations on a computer', () => {
         };
         await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
         expect(failed).toBe(true);
-        const names = w.execs.filter((entry) => !entry.command.startsWith('python3')).map((entry) => (entry.options as { name?: string }).name);
+        const names = w.execs.filter((entry) => !entry.command.startsWith('python3') && entry.command !== `sha256sum ${COLD_PATH}`).map((entry) => (entry.options as { name?: string }).name);
         expect(names.every((name) => typeof name === 'string' && name.startsWith('cold-install:'))).toBe(true);
         expect(new Set(names).size).toBe(names.length);
         // One command for each piece of the script (the script is a few pieces of at most 48 KiB: each its own command, the first makes the file new)
