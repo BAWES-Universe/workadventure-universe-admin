@@ -78,6 +78,8 @@ const TOKEN = /[A-Za-z0-9_\-+/=]{16,}/g;
 /** Seven or more digits with the spaces, dashes, dots and brackets a phone number (or a full date, which can be a birth date) is written with. */
 const PHONE = /\+?\(?\p{Nd}[\p{Nd}\s().-]{5,}\p{Nd}/gu;
 const LONG_NUMBER = /\p{Nd}{5,}/gu;
+/** A date written with slashes (25/12/1990, 1990/12/25, 3/4/90): too few digits for PHONE, and a date can be a birth date. */
+const SLASH_DATE = /(?<!\p{Nd})\p{Nd}{1,4}\s?\/\s?\p{Nd}{1,2}\s?\/\s?\p{Nd}{1,4}(?!\p{Nd})/gu;
 /** Where the digits 0 to 9 start in the scripts people write numbers in most (Arabic, Persian, Devanagari, Bengali, Thai, full width). */
 const DIGIT_ZEROS = [0x660, 0x6f0, 0x966, 0x9e6, 0xe50, 0xff10];
 
@@ -110,6 +112,7 @@ export function cleanReportText(raw: unknown, max: number): string {
     .replace(DOMAIN, (match: string, ending: string) => (FILE_EXT.has(ending.toLowerCase()) && !match.includes('/') ? match : ' '))
     .replace(AT_NAME, '$1 ');
   text = text.replace(TOKEN, (match) => (/[A-Za-z]/.test(match) && /\d/.test(match) ? ' ' : match));
+  text = text.replace(SLASH_DATE, ' ');
   text = text.replace(PHONE, (match) => ((match.match(/\p{Nd}/gu)?.length ?? 0) >= 7 ? ' ' : match)).replace(LONG_NUMBER, ' ');
   text = text.replace(/\s+/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim();
   const chars = Array.from(text);
@@ -356,11 +359,15 @@ async function emptyNote(row: NoteRow, now: Date): Promise<void> {
       await tx.brickReportProblem.deleteMany({ where: { id: row.problemId } });
       return;
     }
-    const problem = await tx.brickReportProblem.findUnique({ where: { id: row.problemId }, select: { state: true, stateAt: true } });
+    const problem = await tx.brickReportProblem.findUnique({ where: { id: row.problemId }, select: { state: true, stateAt: true, cameBack: true } });
     if (!problem) return;
-    // Moved by hand since (Working on, or Fixed again) is a person's call, and it stands; so does a later note holding it open
-    const restore =
-      row.reopened && problem.state === 'new' && problem.stateAt?.getTime() === row.createdAt.getTime() && !live.some((note) => note.createdAt >= row.createdAt);
+    // Back to Fixed once no note from after the fix is left, whichever of them goes last: only while it is New because a note came back
+    // (its state was set by that note, at that note's time). Moved by hand since (Working on, Back to New, Fixed again) is a person's call,
+    // and it stands; so does any note from after the fix still there
+    const cameBackAt = problem.state === 'new' && problem.cameBack ? problem.stateAt : null;
+    const byANote =
+      !!cameBackAt && (await tx.brickReportNote.count({ where: { problemId: row.problemId, reopened: true, createdAt: cameBackAt } })) > 0;
+    const restore = byANote && !live.some((note) => note.createdAt >= cameBackAt!);
     await tx.brickReportProblem.update({
       where: { id: row.problemId },
       data: { lastSeenAt: live[live.length - 1].createdAt, ...(restore ? { state: 'fixed', cameBack: false, stateAt: now } : {}) },
@@ -635,9 +642,15 @@ export async function reportProblem(id: string, now: Date = new Date()): Promise
 
 /** Moves a problem to another tab. Moving it to Fixed clears "came back": a note after that marks it again. */
 export async function setReportState(id: string, state: ReportState, now: Date = new Date()): Promise<boolean> {
-  const moved = await prisma.brickReportProblem.updateMany({
-    where: { id },
-    data: { state, stateAt: now, ...(state === 'fixed' ? { cameBack: false } : {}) },
+  const problem = await prisma.brickReportProblem.findUnique({ where: { id }, select: { kind: true, area: true, operation: true, failure: true } });
+  if (!problem) return false;
+  return prisma.$transaction(async (tx) => {
+    // The same lock as a new note and Take it back of this problem: a move by hand never lands between their read and their write
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`brick-report-problem:${problem.kind}:${problem.area}:${problem.operation}:${problem.failure}`}, 0))`;
+    const moved = await tx.brickReportProblem.updateMany({
+      where: { id },
+      data: { state, stateAt: now, ...(state === 'fixed' ? { cameBack: false } : {}) },
+    });
+    return moved.count > 0;
   });
-  return moved.count > 0;
 }

@@ -13,7 +13,19 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => 
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
-import { NOTES_PER_BRICK_PER_DAY, RECEIPT_WAIT_MS, TAKE_BACK_MS, confirmReportReceipts, forgetReportWordsOf, recordReportNote, reportInbox, reportProblem, takeBackReportNote, withdrawUndelivered } from '@/lib/brick-reports';
+import {
+  NOTES_PER_BRICK_PER_DAY,
+  RECEIPT_WAIT_MS,
+  TAKE_BACK_MS,
+  confirmReportReceipts,
+  forgetReportWordsOf,
+  recordReportNote,
+  reportInbox,
+  reportProblem,
+  setReportState,
+  takeBackReportNote,
+  withdrawUndelivered,
+} from '@/lib/brick-reports';
 import { POST as sendNote } from '@/app/api/bricks/reports/route';
 import { POST as takeBack } from '@/app/api/me/brick-reports/take-back/route';
 import { POST as addWords } from '@/app/api/me/brick-reports/words/route';
@@ -400,6 +412,29 @@ run('Brick reports', () => {
     // Draft words were never sent, so nothing to show
     expect(shown).toMatchObject({ sample: [], withWords: 0 });
     for (const secret of [saraBrick, omarBrick, 'personKey', 'botId']) expect(JSON.stringify(shown)).not.toContain(secret);
+  });
+
+  it('back to Fixed once every note from after the fix is taken back, in either order; a move by hand stands', async () => {
+    const [saraBrick, omarBrick] = await freshPair();
+    const first = await send(note(saraBrick, 'order', { area: 'memory' }));
+    const problemId = await problemOf(first.json.id);
+    for (const takeOpenerFirst of [true, false]) {
+      await setReportState(problemId, 'fixed');
+      const opener = await send(note(saraBrick, 'order', { area: 'memory' }));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const later = await send(note(omarBrick, 'order', { area: 'memory', personKey: `person:omar-${tag}` }));
+      expect(await reportProblem(problemId)).toMatchObject({ state: 'new', cameBack: true });
+      const [one, two] = takeOpenerFirst ? [opener, later] : [later, opener];
+      await takeBackReportNote(one.json.id as string, one.json.takeBackKey as string);
+      expect(await reportProblem(problemId)).toMatchObject({ state: 'new' });
+      await takeBackReportNote(two.json.id as string, two.json.takeBackKey as string);
+      expect(await reportProblem(problemId)).toMatchObject({ state: 'fixed', cameBack: false });
+    }
+    // Back to New by hand: a person's call, and taking notes back leaves it
+    const opener = await send(note(saraBrick, 'order', { area: 'memory' }));
+    await setReportState(problemId, 'new');
+    await takeBackReportNote(opener.json.id as string, opener.json.takeBackKey as string);
+    expect(await reportProblem(problemId)).toMatchObject({ state: 'new' });
   });
 
   it('moves a problem between tabs, and a note on a fixed problem brings it back to New', async () => {
