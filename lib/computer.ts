@@ -433,6 +433,18 @@ export class StopInFlight extends Error {
   }
 }
 
+/**
+ * A start whose ticket is no longer the Brick's, and whose machine the row now calls `stopped` or `stopping` (its wake was given up on and stopped), can still have woken the machine at the provider after that stop was proved (its wake call
+ * landed late, or it only failed to be ready later): a machine awake that nothing counts. It is stopped against the state the row has now, and only then: a replacement that woke it since (the row is `waking` or `working`) owns it, and the claim of
+ * a stop that saw another state writes nothing. True when the ticket was lost to a stop and this stop was sent.
+ */
+async function stopLateWake(botId: string, ref: string, provider: Provider, mine: number): Promise<boolean> {
+  const now = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, wakeEpoch: true, providerRef: true } }).catch(() => null);
+  if (!now || now.wakeEpoch === mine || now.providerRef !== ref || (now.machine !== 'stopped' && now.machine !== 'stopping')) return false;
+  await stopMachine(botId, ref, provider, [now.machine]).catch(() => false);
+  return true;
+}
+
 /** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
 async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', from: string, /** What the start saw when it read the row: its wake epoch (the write lands only while it is still that), and, for a takeover of another start's wake, that no beat has come for `staleMs` (judged by the database's clock IN the write). */ seen?: { epoch: number; staleMs?: number }): Promise<number | null | { open: OpenPowerOp }> {
   // The ticket is taken only from the row this start LOOKED AT (CodeRabbit on #1025, O42): two starts that read the same stale `waking` row both match its state, but only the first still matches its epoch once it has taken the ticket, so the
@@ -2214,13 +2226,16 @@ async function bringUpMachine(botId: string, provider: Provider, now: Date, kept
       const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
       const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
       await provider.wake(ref);
+      // A wake that was given up on (its beat missed, so its stop was claimed under the next epoch) can still reach the provider AFTER the stop was proved: the machine the row calls stopped is awake again. It is stopped against the
+      // state the row has now, and this start looks again from the top (it wakes the machine under a ticket of its own when it still needs it) instead of waiting for readiness on a machine it no longer owns (CodeRabbit on #1040)
+      if (await stopLateWake(botId, ref, provider, mine)) continue;
       try {
         // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
         mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
-        await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine);
+        if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine))) await stopLateWake(botId, ref, provider, mine);
         throw error;
       }
     } finally {
@@ -4266,13 +4281,25 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
 export async function wakeIfStopped(botId: string, /** How long to wait for a stop of ours that can still land. The hand back waits out a dead sender's whole life; a request that can be asked again (a runner's turn) waits only for a live one, as a start does. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true }, /** Whose the jobs were while the machine was stopped: `brick` (a machine that went down under them) or `person` (a return from a take-over: the person held the machine the fence stopped). Decides how far their stretch is banked (see `bankStretches`). */ held: 'brick' | 'person' = 'brick'): Promise<'up' | 'pending'> {
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  let row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider) return 'up';
   // A machine that is working answers for the jobs banked while it was stopped (another path woke it since a return or a turn went pending): their stretch starts again here, as a wake of our own would (Sentry on #1040)
   if (row.machine === 'working') {
-    await restartBankedStretches(botId, new Date());
-    return 'up';
+    if (await hasBankedJobs(botId)) {
+      // ...but not while a stop or sleep of ours may still land on it (Sentry on #1040): the stop is recorded before the row says so, and a stretch started now would run on a machine about to sleep. It is waited for as a start waits (a live one always, a dead
+      // sender's only when the caller asks); one that outlasts the wait keeps the jobs banked and the return pending, and once nothing can land the machine is looked at again (a stop that landed leaves it stopped, and it is woken below)
+      if ((await waitForPowerOps(row.providerRef, Date.now() + stopWait.ms, stopWait.dead)) === 'open') {
+        console.error('[Computer] Banked jobs were not restarted, because a stop of ours may still land on their machine; they stay banked');
+        return 'pending';
+      }
+      row = await prisma.brickComputer.findUnique({ where: { botId } });
+      if (!row?.providerRef) return 'up';
+    }
+    if (row.machine === 'working') {
+      await restartBankedStretches(botId, new Date());
+      return 'up';
+    }
   }
   const stopped = row.machine === 'stopped' || row.machine === 'stopping';
   // Any other state (a wake that is still going, a machine at rest or broken) is left to its own owner, unless jobs are waiting banked for it: their stretch is not started on a machine that is not up (Opus on #1040, N5), so it is brought up
