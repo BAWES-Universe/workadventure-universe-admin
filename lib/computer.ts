@@ -2089,6 +2089,13 @@ async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string):
  * claimed in one write before the provider is called, so two jobs starting at the same moment make ONE computer, never two.
  */
 async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, /** How long to wait for a stop of ours on this machine before giving up with StopInFlight, and whether a dead sender's is waited out too (post-0.5.0 B). A start waits only for a live one: it can go back in line. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
+  await bringUpMachine(botId, provider, now, kept, stopWait);
+  // The machine answered, by whichever start, hand back or turn woke it: the stretches a return banked while it was stopped start again here (Sentry on #1040: a return left pending whose machine another path woke would leave its jobs
+  // without a stretch for good). Only banked jobs are started (see `restartBankedStretches`), so the job whose own start is in this very call is never touched
+  await restartBankedStretches(botId, new Date()).catch((error) => console.error('[Computer] Could not start the stretches banked while a machine was stopped:', error instanceof Error ? error.message : 'unknown'));
+}
+
+async function bringUpMachine(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
   let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   if (row.machine === 'working') {
     // A guard (post-0.5.0 B): a `working` row with a rest or stop of ours that can still land (live, or a dead sender's inside its life) cannot be trusted, and nothing is started on it: the job goes back in line with nothing held. The rest that
@@ -4256,20 +4263,28 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-export async function wakeIfStopped(botId: string, /** How long to wait for a stop of ours that can still land. The hand back waits out a dead sender's whole life; a request that can be asked again (a runner's turn) waits only for a live one, as a start does. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true }): Promise<'up' | 'pending'> {
+export async function wakeIfStopped(botId: string, /** How long to wait for a stop of ours that can still land. The hand back waits out a dead sender's whole life; a request that can be asked again (a runner's turn) waits only for a live one, as a start does. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true }, /** Whose the jobs were while the machine was stopped: `brick` (a machine that went down under them) or `person` (a return from a take-over: the person held the machine the fence stopped). Decides how far their stretch is banked (see `bankStretches`). */ held: 'brick' | 'person' = 'brick'): Promise<'up' | 'pending'> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
-  if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return 'up';
-  // The jobs of this Brick that are running are not billed for the time the machine sits stopped and is woken (Opus on #1040, F1): their stretch so far is banked, and starts again at readiness
-  await bankStretches(botId, new Date());
-  try {
-    // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included
-    await bringUp(botId, provider, new Date(), undefined, stopWait);
+  if (!row?.providerRef || !provider) return 'up';
+  // A machine that is working answers for the jobs banked while it was stopped (another path woke it since a return or a turn went pending): their stretch starts again here, as a wake of our own would (Sentry on #1040)
+  if (row.machine === 'working') {
     await restartBankedStretches(botId, new Date());
+    return 'up';
+  }
+  const stopped = row.machine === 'stopped' || row.machine === 'stopping';
+  // Any other state (a wake that is still going, a machine at rest or broken) is left to its own owner, unless jobs are waiting banked for it: their stretch is not started on a machine that is not up (Opus on #1040, N5), so it is brought up
+  // (a wake in flight is waited for, a stale one taken over) and the stretches start once it works
+  if (!stopped && !(await hasBankedJobs(botId))) return 'up';
+  // The jobs of this Brick that are running are not billed for the time the machine sits stopped and is woken (Opus on #1040, F1): their stretch so far is banked, and starts again at readiness
+  if (stopped) await bankStretches(botId, new Date(), held, row.providerRef);
+  try {
+    // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included. `bringUp` starts the banked stretches again once the machine works
+    await bringUp(botId, provider, new Date(), undefined, stopWait);
     return 'up';
   } catch (error) {
     // A stop of ours that outlasted even the extended wait is not a machine that will not come back (CodeRabbit on #1040): no wake was tried, so no job ends and nothing is marked broken. The caller keeps the return pending
-    // (the transition's lease is let go, so the sweep and the next request ask again) and the jobs stay as they are
+    // (the transition's lease is let go, so the sweep and the next request ask again) and the jobs stay as they are, banked
     if (error instanceof StopInFlight) {
       console.error('[Computer] A machine was not woken after a hand back, because a stop of ours may still land; the return stays pending');
       return 'pending';
@@ -4282,31 +4297,34 @@ export async function wakeIfStopped(botId: string, /** How long to wait for a st
   }
 }
 
-/**
- * The wake of a hand back (and of a Restart first): `wakeIfStopped` banks the running jobs' stretch while the stopped machine is woken (see there), and a return that finds the machine already awake (another request woke it after a pending return) starts the
- * stretches that were banked again here. A job running with its stretch paused is one a return banked; a running job with a stretch is left as it is.
- */
-async function wakeForReturn(botId: string): Promise<'up' | 'pending'> {
-  const woke = await wakeIfStopped(botId);
-  if (woke === 'up') await restartBankedStretches(botId, new Date());
-  return woke;
+/** Whether a running job of this Brick waits banked (no stretch, its awake proof kept, nothing to restore) for its machine to be up again. */
+async function hasBankedJobs(botId: string): Promise<boolean> {
+  return (await prisma.computerJob.count({ where: { botId, status: 'running', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } } })) > 0;
 }
 
 /**
- * The running jobs' stretch so far goes into `secondsRun` and the stretch pauses, up to the last moment the machine is known to have been awake and no further (Opus on #1040, N2 and N3): the later of the job's last awake proof
- * (`provedAtOf`) and the moment a stop or sleep of ours was sent to this machine after the stretch began (`computer_power_ops`: the machine was awake until we sent it), and never later than `now`. So the time a stopped machine sat
- * asleep (the person holding it, a Restart first's own stop, a late stop found by another job's turn) is never banked, however long after the stop this runs. A banked job carries its cap in `awakeProvedAt` (a job with no stretch and
- * no mark has not started yet: see `restartBankedStretches`). Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease version moves, as every change of a job's billed basis does.
+ * The wake of a hand back (and of a Restart first): `wakeIfStopped` banks the running jobs' stretch while the stopped machine is woken (see there), and starts it again once the machine works, whoever woke it. The jobs were the person's.
  */
-async function bankStretches(botId: string, now: Date): Promise<void> {
+async function wakeForReturn(botId: string): Promise<'up' | 'pending'> {
+  return wakeIfStopped(botId, undefined, 'person');
+}
+
+/**
+ * The running jobs' stretch so far goes into `secondsRun` and the stretch pauses, up to the last moment the machine is known to have been awake and no further (Opus on #1040, N2, N3 and N4). Which moment depends on whose the jobs were:
+ *  - `brick`: a machine that went down under jobs Brick was working. The last awake proof (`provedAtOf`) only: the sweep stops a `stopping` machine again on every pass and records an operation each time, so no stop of ours says when it went down. Renewals prove
+ *    the machine every few minutes, so the most this gives away is one renewal gap, in the customer's favour.
+ *  - `person`: jobs coming back from a take-over, on a machine the fence (or a Restart first) stopped while the person held it. The EARLIEST stop or sleep of ours on this machine sent after the stretch began (`computer_power_ops`): the machine was awake until we
+ *    sent that one, and the sweep's retries after it say nothing. Never earlier than the proof.
+ * Never later than `now`. A banked job carries its cap in `awakeProvedAt` (a job with no stretch and no mark has not started yet: see `restartBankedStretches`). Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease
+ * version moves, as every change of a job's billed basis does.
+ */
+async function bankStretches(botId: string, now: Date, held: 'brick' | 'person', ref: string): Promise<void> {
   const running = await prisma.computerJob.findMany({ where: { botId, status: 'running', NOT: { stretchStarted: null } }, select: { id: true, secondsRun: true, stretchStarted: true, awakeProvedAt: true } });
-  if (running.length === 0) return;
-  const stop = await prisma.computerPowerOp.findFirst({ where: { botId }, orderBy: { sentAt: 'desc' }, select: { sentAt: true } });
   for (const job of running) {
     if (!job.stretchStarted) continue;
     const proof = provedAtOf(job, now)?.getTime() ?? job.stretchStarted.getTime();
-    const stopped = stop && stop.sentAt.getTime() > job.stretchStarted.getTime() ? stop.sentAt.getTime() : 0;
-    const cap = Math.min(now.getTime(), Math.max(proof, stopped));
+    const stop = held === 'person' ? await prisma.computerPowerOp.findFirst({ where: { botId, providerRef: ref, sentAt: { gt: job.stretchStarted } }, orderBy: { sentAt: 'asc' }, select: { sentAt: true } }) : null;
+    const cap = Math.min(now.getTime(), Math.max(proof, stop?.sentAt.getTime() ?? 0));
     const stretch = Math.max(0, Math.round((cap - job.stretchStarted.getTime()) / SECOND));
     await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', stretchStarted: job.stretchStarted }, data: { secondsRun: job.secondsRun + stretch, stretchStarted: null, awakeProvedAt: new Date(cap), leaseVersion: { increment: 1 } } });
   }
@@ -4314,8 +4332,8 @@ async function bankStretches(botId: string, now: Date): Promise<void> {
 
 /**
  * The stretches `bankStretches` banked start again at readiness, and only those: a job that is banked has no stretch and carries its last awake proof, whereas a fresh job whose own start has not marked it ready, and a job whose
- * browser is still being brought back (`prepState`), have no stretch and no proof and are never started here, since their time is booked by their own ready write (Opus and Sentry on #1040, N1). The machine answered at `now`, which is
- * also the proof the stretch carries from here.
+ * browser is still being brought back (`prepState`), have no stretch and no proof and are never started here, since their time is booked by their own ready write (Opus and Sentry on #1040, N1). Only ever called for a machine that works (the
+ * machine answered at `now`, which is also the proof the stretch carries from here).
  */
 async function restartBankedStretches(botId: string, now: Date): Promise<void> {
   await prisma.computerJob.updateMany({ where: { botId, status: 'running', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } }, data: { stretchStarted: now, awakeProvedAt: now, leaseVersion: { increment: 1 } } });

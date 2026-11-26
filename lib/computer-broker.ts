@@ -331,8 +331,11 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   let live = await liveJob(jobId, owner);
   // A job that is Brick's and running on a machine that is stopped: a hand back that could not wake it yet (a stop of ours was still in flight) left it so, and nothing else will wake it before the next renewal finds it asleep. It is woken
   // here, waiting only for a live stop as a start does, and looked at again; a stop that still can land answers "starting", so the caller asks again (Opus on #1040)
-  if (!live.ok && live.reason === 'no_machine') {
-    const row = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } });
+  // The same for a job banked while its machine was stopped (no stretch, its awake proof kept) whose machine another path has woken since: nothing else starts its stretch again, and a job with no stretch is never admitted (below), so it would
+  // answer "starting" for good. Woken or found working here, its stretch starts again at once (Opus and Sentry on #1040)
+  const banked = live.ok || live.reason === 'no_machine' ? await prisma.computerJob.findFirst({ where: { id: jobId, status: 'running', control: 'brick', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } }, select: { botId: true } }) : null;
+  if ((!live.ok && live.reason === 'no_machine') || banked) {
+    const row = banked ?? (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } }));
     if (row && (await wakeIfStopped(row.botId, { ms: powerTiming().waitMs, dead: false })) === 'pending') return { ok: false, reason: 'starting' };
     live = await liveJob(jobId, owner);
   }
