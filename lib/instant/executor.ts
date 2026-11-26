@@ -13,6 +13,7 @@ import {
   admitInstantTool,
   argsFingerprint,
   customerChargeFor,
+  owedForCharge,
   holdFor,
   missingInstantLimits,
   providerUserIdFor,
@@ -408,7 +409,8 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
         const reason = reasonOfRejection(call.code, call.status);
         // The run says it failed first: the event is written from the run as it now stands
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
-        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
+        // Nothing ran, so there is no call fee either: it is settled at nothing owed
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now, { nothingRan: true });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
         return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
@@ -536,10 +538,12 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'> & { now?: D
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
-async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
+async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date, opts: { nothingRan?: boolean } = {}): Promise<void> {
   if (run.providerState === 'settled') return;
   const finishedAt = run.finishedAt ?? now;
-  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
+  // What is owed to Composio, the same thing on both ways: a measured charge (the tool's own) with its call fee, or the top price (which holds the fee)
+  const owed = opts.nothingRan ? micros : owedOf(micros, basis);
+  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(owed), providerBasis: basis, finishedAt } });
   // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
   // `repairInstantReporting`). It is written by the same writer as every later correction (`reportInstantRunIn`: one place decides what the event says, from the run
   // as it now stands in this transaction, never from a copy made here), inside a savepoint, because a failed statement otherwise leaves the whole transaction
@@ -553,15 +557,18 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
     console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown');
   }
-  if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
+  if (owed > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
+
+/** A measured `micros` is Composio's charge for the tool (`instant_charge`), billed apart from the call fee; an estimate is the top price, fee included. */
+const owedOf = (micros: number, basis: 'measured' | 'estimated'): number => (basis === 'measured' ? owedForCharge(micros) : micros);
 
 /**
  * A run that worked and whose charge is known: the provider side is settled (inside the caller's transaction). What the person is
  * charged is said to the credit books afterwards, outside it (`finishCustomer`); the amount returned is what that will ask for.
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
-  const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
+  const charged = customerChargeFor(owedOf(providerMicros, basis), asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
   await settleProvider(run, tx, providerMicros, basis, ctx.now);
   return charged;
 }
@@ -738,15 +745,17 @@ export async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.T
     await tx.instantRun.update({ where: { id: run.id }, data: { detail: { ...detail, lateEvidence: { status: line.status, chargeMicros: null, at: now.toISOString() } } as Prisma.InputJsonValue } });
     return;
   }
-  const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
+  // What is owed for it, as on time: the charge on the line with its call fee (the estimate it replaces was the top price, which holds the fee)
+  const owed = verified !== null ? owedForCharge(verified) : null;
+  const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(owed !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: owed } } : {}) };
   await tx.instantRun.update({
     where: { id: run.id },
-    data: { detail: next as Prisma.InputJsonValue, ...(verified !== null ? { providerMicros: BigInt(verified), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
+    data: { detail: next as Prisma.InputJsonValue, ...(owed !== null ? { providerMicros: BigInt(owed), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
   });
   // The event says the figure that was found: the one writer of the event corrects it (once; a second look finds nothing to change), and keeps what it said before
   if (verified !== null) await reportInstantRunIn(tx, run.id, now, { insertIsBestEffort: true });
   // A figure found late that is above the top price means the table is too low, as for one found on time: Instant stops (the person's side is not touched)
-  if (verified !== null && verified > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
+  if (owed !== null && owed > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 
 /**

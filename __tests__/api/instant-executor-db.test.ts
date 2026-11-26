@@ -288,7 +288,8 @@ run('the bounded Instant executor, in a real database', () => {
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       expect(row).toMatchObject({ state: 'succeeded', customerState: 'charged', providerState: 'settled', providerBasis: 'measured' });
       expect(Number(row.customerMicros)).toBe(7_000 + FEE);
-      expect(Number(row.providerMicros)).toBe(7_000);
+      // What we owe Composio is its charge for the tool plus its call fee (billed apart from the charge): the same figure an estimate from the top price is
+      expect(Number(row.providerMicros)).toBe(7_000 + FEE);
       expect(Number(row.topMicros)).toBe(TOP);
       // Sent through the Instant path under an opaque id, never a person's id
       expect(p.sent[0].runUserId).toBe(`universe-instant-${row.id}`);
@@ -298,7 +299,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ kind: 'app_use', route: 'instant', pool: 'chat', payerKind: 'universe', eventId: `instant:${row.id}` });
       expect(events[0].detail).toMatchObject({ instant: true, provider: 'composio', tool: 'EXA_SEARCH' });
-      expect(Number(events[0].costMicros)).toBe(7_000);
+      expect(Number(events[0].costMicros)).toBe(7_000 + FEE);
     });
 
     it('a meter event the database refuses does not undo the settlement: the run is still settled and charged', async () => {
@@ -315,7 +316,7 @@ run('the bounded Instant executor, in a real database', () => {
         expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000 + FEE });
         const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
         expect(row).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'charged' });
-        expect(Number(row.providerMicros)).toBe(7_000);
+        expect(Number(row.providerMicros)).toBe(7_000 + FEE);
         expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(0);
         expect(quiet).toHaveBeenCalledWith('[Instant] Could not write the meter event:', expect.any(String));
       } finally {
@@ -326,7 +327,7 @@ run('the bounded Instant executor, in a real database', () => {
       await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
       const events = await prisma.meterEvent.findMany({ where: { personId: sara } });
       expect(events).toHaveLength(1);
-      expect(Number(events[0].costMicros)).toBe(7_000);
+      expect(Number(events[0].costMicros)).toBe(7_000 + FEE);
       expect(events[0].detail).toMatchObject({ customerMicros: 7_000 + FEE, runId: (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id });
       // And a sweep after that writes nothing more
       await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
@@ -365,7 +366,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(swept.reporting).toMatchObject({ written: 1, failed: 0, remaining: { missing: 0, wrong: 0, oldestAt: null } });
       const event = await eventOf(rowId);
       expect(event).toMatchObject({ kind: 'app_use', route: 'instant', pool: 'chat', payerKind: 'universe', personId: sara, botId: brick, basis: 'measured', quantity: BigInt(1) });
-      expect(Number(event?.costMicros)).toBe(7_000);
+      expect(Number(event?.costMicros)).toBe(7_000 + FEE);
       expect(customerOf(event)).toBe(7_000 + FEE);
       // The day the run was settled, never the day it was mended
       expect(event?.occurredAt.getTime()).toBe(row.finishedAt?.getTime());
@@ -399,7 +400,7 @@ run('the bounded Instant executor, in a real database', () => {
       // Written when the provider settled, before the books had said: pending, not a charge nobody confirmed
       expect(seenWhileSettling).toBeNull();
       expect(customerOf(await eventOf(row.id))).toBe(6_000);
-      expect(Number((await eventOf(row.id))?.costMicros)).toBe(7_000);
+      expect(Number((await eventOf(row.id))?.costMicros)).toBe(7_000 + FEE);
       expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
       // An event written the old way (the worked-out amount) is found and corrected, and keeps what it said
       await prisma.meterEvent.update({ where: { eventId: `instant:${row.id}` }, data: { detail: { ...((await eventOf(row.id))?.detail as object), customerMicros: 7_700 } } });
@@ -431,7 +432,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await instantReportingGaps()).toMatchObject({ wrong: 1 });
       await repairInstantReporting();
       const fixed = await eventOf(row.id);
-      expect(Number(fixed?.costMicros)).toBe(7_000);
+      expect(Number(fixed?.costMicros)).toBe(7_000 + FEE);
       expect(fixed?.basis).toBe('measured');
     });
 
@@ -565,7 +566,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(outcome).toMatchObject({ status: 'done', chargedMicros: MARKED });
       expect(f.funds.reserve.mock.calls[0][0].amountMicros).toBe(Math.ceil(TOP * 1.1));
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
-      expect(Number(row.providerMicros)).toBe(7_000);
+      expect(Number(row.providerMicros)).toBe(7_000 + FEE);
       expect(Number(row.customerMicros)).toBe(MARKED);
     });
 
@@ -622,8 +623,28 @@ run('the bounded Instant executor, in a real database', () => {
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
       expect(outcome).toMatchObject({ status: 'done', chargedMicros: TOP });
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
-      expect(Number(row.providerMicros)).toBe(TOP * 5);
+      expect(Number(row.providerMicros)).toBe(TOP * 5 + FEE);
       expect(Number(row.customerMicros)).toBe(TOP);
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
+    });
+
+    it('our provider cost counts the call fee the same way measured or estimated: the table price settles at the top price, one micro more stops Instant', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const atTable = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: {}, error: null, logId: 'l1', chargeMicros: TOP - FEE });
+      expect(await runInstant(ask({ callId: atTable }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done', chargedMicros: TOP });
+      const measured = await runOf(await runIdOf(atTable));
+      expect(measured).toMatchObject({ providerBasis: 'measured', providerState: 'settled' });
+      // The same figure an estimate at the top price would book
+      expect(Number(measured.providerMicros)).toBe(TOP);
+      expect(Number(measured.customerMicros)).toBe(TOP);
+      expect(await getInstantPause()).toMatchObject({ paused: false });
+      const over = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: {}, error: null, logId: 'l2', chargeMicros: TOP - FEE + 1 });
+      expect(await runInstant(ask({ callId: over }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done', chargedMicros: TOP });
+      expect(Number((await runOf(await runIdOf(over))).providerMicros)).toBe(TOP + 1);
       expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
     });
   });
@@ -645,7 +666,7 @@ run('the bounded Instant executor, in a real database', () => {
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date() });
       const row = await runOf(rowId);
       expect(row).toMatchObject({ providerState: 'settled', providerBasis: 'measured', customerState: 'released' });
-      expect(Number(row.providerMicros)).toBe(3_000);
+      expect(Number(row.providerMicros)).toBe(3_000 + FEE);
       expect(Number(row.customerMicros)).toBe(0);
       expect(f.funds.settle).not.toHaveBeenCalled();
     });
@@ -1553,6 +1574,12 @@ run('the bounded Instant executor, in a real database', () => {
           expect(await leftOut(first)).toBe(0);
           expect(await leftOut(second)).toBe(0);
           expect(await leftOut(stranger)).toBe(1);
+          // A "left out" row that turns up after the pool is there (written by a look that lost the race): the person's next look finds the pool already there and clears it
+          await prisma.creditIssueSkip.create({ data: { personId: first, programId: gift.programId, monthKey: monthKeyOf(new Date()), reason: 'over_budget' } });
+          expect(await leftOut(first)).toBe(1);
+          expect((await ensureIssued(first)).issued.map((lot) => lot.programId)).not.toContain(gift.programId);
+          expect(await leftOut(first)).toBe(0);
+          expect(await leftOut(stranger)).toBe(1);
         } finally {
           await setBudget(1_000_000_000_000);
           await endProgram(gift.programId, { userId: sara, superAdmin: true });
@@ -2332,7 +2359,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await runOf(id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
       const event = await eventOf(id);
       // Right at once (no repair ran): the cost of the run, and the person's side pending
-      expect(Number(event.costMicros)).toBe(7_000);
+      expect(Number(event.costMicros)).toBe(7_000 + FEE);
       expect(event.detail).toMatchObject({ customerMicros: null, customerState: 'held', runId: id });
       expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
     });
@@ -3461,7 +3488,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed', reason: 'provider_failed' });
       const row = await runOf(await runIdOf(id));
       expect(row).toMatchObject({ state: 'failed', customerState: 'released', providerState: 'settled', providerBasis: 'measured' });
-      expect(Number(row.providerMicros)).toBe(38_000);
+      expect(Number(row.providerMicros)).toBe(38_000 + FEE);
       expect(f.funds.settle).not.toHaveBeenCalled();
       expect(f.left()).toBe(1_000_000);
       // Above the top price: the table is too low, so Instant stops
@@ -3478,7 +3505,7 @@ run('the bounded Instant executor, in a real database', () => {
       await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
       const row = await runOf(await runIdOf(id));
       expect(row).toMatchObject({ state: 'failed', providerState: 'settled', providerBasis: 'measured' });
-      expect(Number(row.providerMicros)).toBe(3_000);
+      expect(Number(row.providerMicros)).toBe(3_000 + FEE);
     });
 
     it('a settlement said again after the markup changed asks the books for the same amount as the first time', async () => {
@@ -3659,7 +3686,7 @@ run('the bounded Instant executor, in a real database', () => {
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       const event = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `instant:${row.id}` } });
       expect(event.detail).toMatchObject({ instant: true, taskKey: 'task-f', customerMicros: 0 });
-      expect(Number(event.costMicros)).toBe(4_000);
+      expect(Number(event.costMicros)).toBe(4_000 + FEE);
     });
 
     it('a run Composio refused before anything ran also records a zero charge on its meter event', async () => {
@@ -4031,9 +4058,9 @@ run('the bounded Instant executor, in a real database', () => {
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
       const after = await runOf(rowId);
       expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'measured' });
-      expect(Number(after.providerMicros)).toBe(TOP - 1_000);
-      expect(after.detail).toMatchObject({ releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
-      expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000) });
+      expect(Number(after.providerMicros)).toBe(TOP - 1_000 + FEE);
+      expect(after.detail).toMatchObject({ releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 + FEE } });
+      expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000 + FEE) });
       expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
       // The late cost reaches the event through the one writer, once: what the event said before is kept as one correction, and a second look adds none
       const trail = ((await eventOf(rowId))?.detail as { corrections?: Array<{ was: { costMicros: number; basis: string } }> }).corrections ?? [];
@@ -4058,7 +4085,7 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set(jsonb_set("detail", '{lateBatch}', '1'::jsonb), '{lateToldAt}', to_jsonb(${new Date().toISOString()}::text)) WHERE "id" = ${rowId}`;
       await prisma.$transaction((tx) => applyLateEvidence(stale, p.line(row.providerUserId, 'success', TOP - 1_000), tx, new Date(at.getTime() + 120 * MIN)));
       const after = await runOf(rowId);
-      expect(after.detail).toMatchObject({ lateBatch: 1, lateToldAt: expect.any(String), lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+      expect(after.detail).toMatchObject({ lateBatch: 1, lateToldAt: expect.any(String), lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 + FEE } });
       expect(after.providerBasis).toBe('measured');
     });
 
@@ -4070,9 +4097,9 @@ run('the bounded Instant executor, in a real database', () => {
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP + 2_000)]);
       await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
       const after = await runOf(rowId);
-      expect(Number(after.providerMicros)).toBe(TOP + 2_000);
-      expect(after.detail).toMatchObject({ adjustment: { estimatedMicros: TOP, verifiedMicros: TOP + 2_000 } });
-      expect(await eventOf(rowId)).toMatchObject({ costMicros: BigInt(TOP + 2_000), basis: 'measured' });
+      expect(Number(after.providerMicros)).toBe(TOP + 2_000 + FEE);
+      expect(after.detail).toMatchObject({ adjustment: { estimatedMicros: TOP, verifiedMicros: TOP + 2_000 + FEE } });
+      expect(await eventOf(rowId)).toMatchObject({ costMicros: BigInt(TOP + 2_000 + FEE), basis: 'measured' });
       expect(after.customerState).toBe('released');
       expect(f.left()).toBe(1_000_000);
       // A late figure above the top price says the table is too low, as one found on time does: Instant stops
@@ -4099,9 +4126,9 @@ run('the bounded Instant executor, in a real database', () => {
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000)]);
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
       const after = await runOf(rowId);
-      expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+      expect(Number(after.providerMicros)).toBe(TOP - 1_000 + FEE);
       expect(after.providerBasis).toBe('measured');
-      expect(after.detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+      expect(after.detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 + FEE } });
       expect(f.left()).toBe(1_000_000);
     });
 
@@ -4167,10 +4194,10 @@ run('the bounded Instant executor, in a real database', () => {
         await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
         const after = await runOf(rowId);
         expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'measured' });
-        expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+        expect(Number(after.providerMicros)).toBe(TOP - 1_000 + FEE);
         expect(Number(after.customerMicros ?? 0)).toBe(0);
-        expect(after.detail).toMatchObject({ [route]: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
-        expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000) });
+        expect(after.detail).toMatchObject({ [route]: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 + FEE } });
+        expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000 + FEE) });
         expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
         // Nothing was charged and nothing was run again
         expect(f.left()).toBe(1_000_000);

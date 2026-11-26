@@ -296,14 +296,22 @@ export function holdFor(topMicros: number, markupBps: number | null): number {
 }
 
 /**
- * What the person is charged for a run that worked: Composio's charge for the tool plus its call fee (`instantCallFeeMicros`), with the markup a
- * super admin set, never more than what was held. The part past the hold is ours. A run that did not work is never charged at all (its hold
- * goes back), so the fee is only ever taken for a run that answered.
+ * What Universe owes Composio for one run whose charge Composio reported (`instant_charge`, the tool's own charge): that charge plus its call fee
+ * (`instantCallFeeMicros`), which Composio bills apart from it. A run's top price already holds the fee, so an estimate made from the top price is
+ * this figure already, and a run's provider cost (`provider_micros`) is the same thing whether it was measured or estimated.
+ */
+export function owedForCharge(chargeMicros: number): number {
+  return chargeMicros + feeMicros();
+}
+
+/**
+ * What the person is charged for a run that worked: what Universe owes Composio for it (`providerMicros`: its charge and its call fee, see
+ * `owedForCharge`), with the markup a super admin set, never more than what was held. The part past the hold is ours. A run that did not work
+ * is never charged at all (its hold goes back), so the fee is only ever taken for a run that answered.
  */
 export function customerChargeFor(providerMicros: number, holdMicros: number, markupBps: number | null): number {
   const bps = markupBps ?? 0;
-  const cost = BigInt(providerMicros) + BigInt(feeMicros());
-  const price = Number((cost * BigInt(10_000 + bps) + BigInt(9_999)) / BigInt(10_000));
+  const price = Number((BigInt(providerMicros) * BigInt(10_000 + bps) + BigInt(9_999)) / BigInt(10_000));
   return Math.min(price, holdMicros);
 }
 

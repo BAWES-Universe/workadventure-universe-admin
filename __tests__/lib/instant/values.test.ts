@@ -6,6 +6,7 @@ import {
   argsFingerprint,
   checkInstantLimits,
   customerChargeFor,
+  owedForCharge,
   instantAppOf,
   instantCallFeeMicros,
   INSTANT_APPS,
@@ -131,17 +132,23 @@ describe('money is exact', () => {
     expect(holdFor(7_600, 0)).toBe(7_600);
     expect(holdFor(7_600, 1_000)).toBe(8_360);
     expect(holdFor(7_601, 1_000)).toBe(8_362);
-    // The person pays Composio's charge plus its call fee ($0.0006): the fee is counted against their own credit (money call of 26 Nov 2026)
+    // The person pays Composio's charge plus its call fee ($0.0006): the fee is counted against their own credit (money call of 26 Nov 2026).
+    // What is owed for a measured run is its charge plus the fee, the same figure a top-price estimate already is
     expect(instantCallFeeMicros()).toBe(RATE_MICROS.managed_other + DIRECT_EXECUTION_MICROS);
     expect(instantCallFeeMicros()).toBe(600);
-    expect(customerChargeFor(7_000, 7_600, null)).toBe(7_600);
-    expect(customerChargeFor(6_500, 7_600, null)).toBe(7_100);
-    expect(customerChargeFor(7_000, 8_360, 1_000)).toBe(8_360);
+    expect(owedForCharge(7_000)).toBe(7_600);
+    expect(owedForCharge(0)).toBe(600);
+    expect(customerChargeFor(owedForCharge(7_000), 7_600, null)).toBe(7_600);
+    expect(customerChargeFor(owedForCharge(6_500), 7_600, null)).toBe(7_100);
+    expect(customerChargeFor(owedForCharge(7_000), 8_360, 1_000)).toBe(8_360);
+    // An estimate is the top price (fee included): charged once, never the fee twice
+    expect(customerChargeFor(7_600, 7_600, null)).toBe(7_600);
+    expect(customerChargeFor(7_600, 10_000, null)).toBe(7_600);
     // A charge above the top price: the person pays the hold at most, the rest is ours
-    expect(customerChargeFor(50_000, 7_600, null)).toBe(7_600);
+    expect(customerChargeFor(owedForCharge(50_000), 7_600, null)).toBe(7_600);
     // A free run (the App charged nothing) still takes the fee from the person's credit, never more than the hold
-    expect(customerChargeFor(0, 7_600, null)).toBe(600);
-    expect(customerChargeFor(0, 300, null)).toBe(300);
+    expect(customerChargeFor(owedForCharge(0), 7_600, null)).toBe(600);
+    expect(customerChargeFor(owedForCharge(0), 300, null)).toBe(300);
   });
 
   it('every tool of the table belongs to a research App with a name and one line, and the name never says who runs it', () => {
