@@ -62,6 +62,12 @@ async function running(name = 'sara') {
   return { sara, jobId: started.job.id };
 }
 
+/**
+ * A fence that cannot be proved: the computer has no note to fence by (`unmarked=1`, exit 3), so nothing can be said about what runs on it. The machine is stopped (a still running program, `remaining=N`, is a different
+ * answer: see "the honest check before take over" below).
+ */
+const UNPROVABLE = { stdout: 'unmarked=1\n', exitCode: 3 };
+
 /** A fence that stays pending until the test lets it go (the machine is slow to stop what the agent started). */
 function slowFence() {
   let release: () => void = () => undefined;
@@ -183,7 +189,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
 
     it('a fence that cannot be proved leaves no input: the machine is stopped, and a stop that is not proved keeps control closed until it is', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? UNPROVABLE : {});
       const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
       // The stop does not take: the machine stays awake
       fake.stuckAwake.add(row.providerRef as string);
@@ -200,7 +206,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
 
     it('a fence that is not proved but whose machine IS proved stopped is closed: no screen, and the agent is not admitted', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? UNPROVABLE : {});
       expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
       expect(await screenTicket(sara.brickId, sara.id, 'input', NOW)).toEqual({ ok: false, reason: 'resting' });
       expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
@@ -355,7 +361,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
           if (++calls === 1) await gate;
           return {};
         }
-        return isFenceCheckCommand(command) ? { stdout: failChecks ? 'remaining=2\n' : 'remaining=0\n' } : {};
+        return isFenceCheckCommand(command) ? (failChecks ? UNPROVABLE : { stdout: 'remaining=0\n' }) : {};
       };
       const stalled = takeOver(sara.brickId, sara.id, NOW);
       await until(() => calls === 1);
@@ -378,7 +384,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
     it('a leader that passed its check and then stalls inside the stop cannot have the person given the screen while the stop may still take effect', async () => {
       const { sara } = await running();
       // The fence never proves, so the leader goes on to stop the machine; the stop is slow
-      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? UNPROVABLE : {});
       let reached!: () => void;
       const inStop = new Promise<void>((resolve) => (reached = resolve));
       let release!: () => void;
@@ -407,7 +413,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
 
     it('the record of a stop is written while the computer\'s row is still held: a state a replacement transition writes afterwards is never overwritten by it', async () => {
       const { sara } = await running();
-      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = async (command) => (isFenceCheckCommand(command) ? UNPROVABLE : {});
       let reached!: () => void;
       const inStop = new Promise<void>((resolve) => (reached = resolve));
       let release!: () => void;
