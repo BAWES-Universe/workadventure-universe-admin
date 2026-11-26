@@ -58,6 +58,43 @@ export function setRowLockWaitForTests(holdMs: number | null): void {
   rowLockWaitMs = holdMs === null ? 150_000 : holdMs + 30_000;
 }
 
+/**
+ * Waits, holding nothing else, until the Brick computer's row is free: a transaction that only locks the row and lets it go at once. A pause writes that row (the park mark, the turn hold) inside a 15 s transaction that already holds the
+ * job's locks (and, for "do this first", the Brick's line), and a take-over leader's stop holds the row for up to 120 s: waited for INSIDE that transaction the pause would time out (P2028) and not happen. Waiting here instead takes no other
+ * lock, so it can join no wait cycle, whatever order the pause then takes its locks in.
+ */
+export async function untilRowFree(botId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+  }, rowLockWait());
+}
+
+/** A transaction that gave up waiting (Prisma's P2028: it never began in time, or ran out of time while a lock held it up). It wrote nothing: the database rolled it back. */
+export function isTransactionTimeout(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028';
+}
+
+/** How many times a pause is tried when the row is taken again between the wait and its transaction (a second leader's stop right behind the first). */
+const ROW_TRIES = 3;
+
+/**
+ * Runs the transaction of a pause (`run`: one `prisma.$transaction`, nothing after it, nothing sent to a provider) so that a take-over leader's stop on the Brick computer's row never makes the pause fail with a timeout
+ * (post-0.5.0: pause during take-over). `waitFirst`: the caller knows the transaction will write the row (an explicit pause), so the row is waited for before it opens; otherwise (a renewal, which writes the row only if the room is
+ * refused) the first try goes straight in and the wait comes only after it timed out. A try that timed out wrote nothing, so trying again is the same pause. Any other error is the caller's, and a third timeout is too.
+ */
+export async function pauseWhenRowFree<T>(botId: string, run: () => Promise<T>, waitFirst = true): Promise<T> {
+  let wait = waitFirst;
+  for (let attempt = 1; ; attempt++) {
+    if (wait) await untilRowFree(botId);
+    try {
+      return await run();
+    } catch (error) {
+      if (!isTransactionTimeout(error) || attempt >= ROW_TRIES) throw error;
+      wait = true;
+    }
+  }
+}
+
 type Db = Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>;
 
 /** Writes the operation inside the caller's transaction, which already holds the Brick computer's row (its claim wrote it, or it locked it). */

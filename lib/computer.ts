@@ -83,7 +83,7 @@ import {
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
-import { endPowerOp, openPowerOpOf, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
+import { endPowerOp, openPowerOpOf, pauseWhenRowFree, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -2295,7 +2295,8 @@ export async function renewJob(
     if (lost !== 'taken_over') return lost;
     look = 'unknown';
   }
-  const decided = await prisma.$transaction(
+  // The renewal writes the computer's row only when the room is refused and the job pauses; a take-over leader's stop may hold it then. The first try goes straight in; one that timed out waits for the row outside the transaction and tries again
+  const decide = () => prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
       if (!job || isOver(job.status)) return { kind: 'over' as const };
@@ -2327,6 +2328,7 @@ export async function renewJob(
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+  const decided = await pauseWhenRowFree(first.botId, decide, false);
   if (decided.kind === 'over') {
     const again = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
     return again && isOver(again.status) && again.endedBy === 'unanswered' ? { ok: false, reason: 'unanswered' } : { ok: false, reason: 'over' };
@@ -2409,7 +2411,8 @@ async function awakeLookFor(job: { status: string; stretchStarted: Date | null; 
  */
 async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
   const controls = await import('@/lib/computer-job-controls');
-  const decided = await prisma.$transaction(
+  // A take-over leader's stop may hold the computer's row, which this pause writes: it is waited for before the transaction opens (post-0.5.0: pause during take-over)
+  const decide = () => prisma.$transaction(
     async (tx) => {
       const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
       // Never `heldScreen`: a machine pause never takes the screen back from a person who took it (their take-over answers `taken_over` and stands)
@@ -2419,6 +2422,7 @@ async function machineLostUnder(jobId: string, botId: string, ref: string, owner
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+  const decided = await pauseWhenRowFree(botId, decide);
   if (decided.kind === 'taken_over') return 'taken_over';
   console.error('[Computer] A machine was found asleep under a billed job: the job goes back in line, billed only to the last proof of awake');
   Sentry.captureMessage('Computer machine found asleep under a billed job', { level: 'warning', tags: { area: 'computer', step: 'machine-lost' } });
