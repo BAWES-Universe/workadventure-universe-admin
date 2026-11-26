@@ -158,6 +158,11 @@ function tasteLinesOf(value: string): { person: RegExp; bot: RegExp; word: RegEx
   return { person: new RegExp(person, 'u'), bot: new RegExp(bot, 'u'), word: wordsIn(value) };
 }
 
+/** How a person gives their name ("my name is ali", "call me ali", "I'm ali"); the text and the name are lower case here. */
+function nameGivenAs(lowerName: string): RegExp {
+  return new RegExp(`(?:my name(?:['’]s| is)|call me|(?<![\\p{L}\\p{N}])i(?:['’]m| am)(?: called| named)?)\\s+${wordsIn(lowerName).source}`, 'u');
+}
+
 function copy<T>(value: T): T {
   return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
 }
@@ -178,14 +183,17 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   const info = data.personalInfo as Json;
   const history = Array.isArray(data.conversationHistory) ? (data.conversationHistory as unknown[]) : null;
   const events = isObject(data.relationship) && Array.isArray(data.relationship.importantEvents) ? (data.relationship.importantEvents as unknown[]) : null;
-  const doomedLines = new Set<unknown>();
-  const phrases: { text: RegExp; exact: boolean; forgotAt: number | null }[] = [];
+  // Each thing being forgotten is an owner: a line it took remembers which thing took it, so the bot's reply after it is only
+  // looked at for the words of that same thing
+  let owner = 0;
+  const doomedLines = new Map<unknown, Set<number>>();
+  const phrases: { text: RegExp; exact: boolean; forgotAt: number | null; owner: number; person?: boolean }[] = [];
   // Short likes and dislikes ("tea"): found by what is said about them, not by the bare letters
-  const shortTastes: { person: RegExp; bot: RegExp; word: RegExp; forgotAt: number | null }[] = [];
+  const shortTastes: { person: RegExp; bot: RegExp; word: RegExp; forgotAt: number | null; owner: number }[] = [];
   // Short names ("Ali"): the person's lines that give it ("my name is Ali"), and the bot's lines that say it as written
-  const shortNames: { person: RegExp; bot: RegExp; exact: boolean; forgotAt: number | null }[] = [];
+  const shortNames: { person: RegExp; bot: RegExp; exact: boolean; forgotAt: number | null; owner: number }[] = [];
   // Any other short value ("ill", "30"): only the bot's reply right after the line it came from, when it says the value back
-  const shortOthers: { word: RegExp; forgotAt: number | null }[] = [];
+  const shortOthers: { word: RegExp; forgotAt: number | null; owner: number }[] = [];
   let removed = 0;
 
   const goes = (id: string, drawn: number | null) => {
@@ -195,8 +203,12 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   };
   const takeLines = (drawn: number | null, phrase: string, id: string, kind: 'name' | 'taste' | 'other' = 'other') => {
     if (!history) return;
+    owner++;
+    const mine = owner;
     if (drawn !== null) {
-      for (const line of history) if (isObject(line) && line.timestamp === drawn && line.sender === 'person') doomedLines.add(line);
+      for (const line of history) {
+        if (isObject(line) && line.timestamp === drawn && line.sender === 'person') doomedLines.set(line, (doomedLines.get(line) ?? new Set<number>()).add(mine));
+      }
     }
     // The lines that say it back go too, the bot's and the person's: only the last line it was said in is noted, and a thing
     // said twice would otherwise leave the first. A line said after the Forget is the person's again, so only lines from before it go.
@@ -204,14 +216,17 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
     const forgotAt = onlyOlderThan?.get(id)?.getTime() ?? null;
     // A name written with a capital ("Will") is found only as written, so the word it is also ("I will") stays
     const exact = kind === 'name' && trimmed !== trimmed.toLowerCase();
-    if (trimmed.length >= MIN_PHRASE) phrases.push({ text: wordsIn(exact ? trimmed : trimmed.toLowerCase()), exact, forgotAt });
+    if (trimmed.length >= MIN_PHRASE) {
+      phrases.push({ text: wordsIn(exact ? trimmed : trimmed.toLowerCase()), exact, forgotAt, owner: mine });
+      // A name is also found where it is given, in any capitals ("my name is sara" for "Sara"); the bare word stays as written
+      if (kind === 'name') phrases.push({ text: nameGivenAs(trimmed.toLowerCase()), exact: false, forgotAt, owner: mine, person: true });
+    }
     else if (trimmed.length > 0) {
       const lower = trimmed.toLowerCase();
       if (kind === 'name') {
-        const intro = `(?:my name(?:['’]s| is)|call me|(?<![\\p{L}\\p{N}])i(?:['’]m| am)(?: called| named)?)\\s+${wordsIn(lower).source}`;
-        shortNames.push({ person: new RegExp(intro, 'u'), bot: wordsIn(exact ? trimmed : lower), exact, forgotAt });
-      } else if (kind === 'taste') shortTastes.push({ ...tasteLinesOf(lower), forgotAt });
-      else shortOthers.push({ word: wordsIn(lower), forgotAt });
+        shortNames.push({ person: nameGivenAs(lower), bot: wordsIn(exact ? trimmed : lower), exact, forgotAt, owner: mine });
+      } else if (kind === 'taste') shortTastes.push({ ...tasteLinesOf(lower), forgotAt, owner: mine });
+      else shortOthers.push({ word: wordsIn(lower), forgotAt, owner: mine });
     }
   };
   const dropEventsOf = (prefix: string) => {
@@ -284,33 +299,41 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       const said = saidAt(line);
       return forgotAt !== null && said !== null && said > forgotAt;
     };
-    // The person's lines this takes: the one it came from, the ones that hold its words, and the ones that say it as a name or a taste
-    const takesPersonLine = (line: unknown): boolean => {
-      if (!isObject(line) || line.sender !== 'person') return false;
-      if (doomedLines.has(line)) return true;
+    // The things that take a person's line: the one it came from, the ones whose words it holds, and the ones it says as a name or a taste.
+    // A line said after the Forget is the person's again, so it is only taken when it was said before.
+    // `again` finds the lines that say it but were said after the Forget, which are the person's own again
+    const takenBy = (line: unknown, again = false): Set<number> => {
+      const owners = new Set<number>();
+      if (!isObject(line) || line.sender !== 'person') return owners;
+      if (!again) for (const one of doomedLines.get(line) ?? []) owners.add(one);
       const text = textOf(line);
       const lower = text.toLowerCase();
-      return (
-        phrases.some((phrase) => phrase.text.test(phrase.exact ? text : lower) && !stillTheirs(line, phrase.forgotAt)) ||
-        shortNames.some((name) => name.person.test(lower) && !stillTheirs(line, name.forgotAt)) ||
-        shortTastes.some((taste) => taste.person.test(lower) && !stillTheirs(line, taste.forgotAt))
-      );
+      for (const phrase of phrases) if (phrase.text.test(phrase.exact ? text : lower) && stillTheirs(line, phrase.forgotAt) === again) owners.add(phrase.owner);
+      for (const name of shortNames) if (name.person.test(lower) && stillTheirs(line, name.forgotAt) === again) owners.add(name.owner);
+      for (const taste of shortTastes) if (taste.person.test(lower) && stillTheirs(line, taste.forgotAt) === again) owners.add(taste.owner);
+      return owners;
     };
     data.conversationHistory = history.filter((line, index) => {
-      if (takesPersonLine(line)) return false;
+      if (takenBy(line).size > 0) return false;
       if (!isObject(line) || line.sender !== 'bot') return true;
       const text = textOf(line);
       const lower = text.toLowerCase();
-      if (phrases.some((phrase) => phrase.text.test(phrase.exact ? text : lower) && !stillTheirs(line, phrase.forgotAt))) return false;
-      if (shortNames.some((name) => name.bot.test(name.exact ? text : lower) && !stillTheirs(line, name.forgotAt))) return false;
-      if (shortTastes.some((taste) => taste.bot.test(lower) && !stillTheirs(line, taste.forgotAt))) return false;
-      // The bot's reply right after a line this took, when it says a short value back ("I like tea" / "Tea it is!", "I'm ill" / "Sorry you are ill")
+      // The bot's own lines that say it go whenever they were said: when the thing goes, it was never the person's again, so the bot
+      // can only have said it after the Forget while it still held it by mistake
+      // (a reply right after the person said it again after the Forget is answering them, and stays with their line)
+      const earlierLine = index > 0 ? history[index - 1] : null;
+      const answersSaidAgain = earlierLine !== null && takenBy(earlierLine, true).size > 0;
+      if (!answersSaidAgain) {
+        if (phrases.some((phrase) => !phrase.person && phrase.text.test(phrase.exact ? text : lower))) return false;
+        if (shortNames.some((name) => name.bot.test(name.exact ? text : lower))) return false;
+        if (shortTastes.some((taste) => taste.bot.test(lower))) return false;
+      }
+      // The bot's reply right after a line a thing took, when it says that same thing's short value back ("I like tea" / "Tea it is!", "I'm ill" / "Sorry you are ill")
       const earlier = index > 0 ? history[index - 1] : null;
-      if (earlier === null || !takesPersonLine(earlier)) return true;
-      return !(
-        shortTastes.some((taste) => taste.word.test(lower) && !stillTheirs(line, taste.forgotAt)) ||
-        shortOthers.some((other) => other.word.test(lower) && !stillTheirs(line, other.forgotAt))
-      );
+      if (earlier === null) return true;
+      const owners = takenBy(earlier);
+      if (owners.size === 0) return true;
+      return !(shortTastes.some((taste) => owners.has(taste.owner) && taste.word.test(lower)) || shortOthers.some((other) => owners.has(other.owner) && other.word.test(lower)));
     });
   }
   return { data, removed };

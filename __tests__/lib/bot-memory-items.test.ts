@@ -365,3 +365,46 @@ describe('taking out every line that says a thing, said once or twice', () => {
     expect(after(dislike, memoryItemKey('fact', 'dislike_tea_x', 'tea'))).toEqual([]);
   });
 });
+
+describe('names in other capitals, and a stale copy, and several things forgotten at once', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it('takes the lines that give a name in other capitals, long or short, and keeps "I will travel" when "Will" is forgotten', () => {
+    const sara = {
+      personalInfo: { name: 'Sara', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is sara', 1000], ['person', 'I walk a lot', 2000], ['person', 'My name is Sara', 3000]]),
+    };
+    const afterSara = withoutItems(sara, new Set([memoryItemKey('name', null, 'Sara')])).data as typeof sara;
+    expect(afterSara.conversationHistory.map((line) => line.message)).toEqual(['I walk a lot']);
+    const will = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'call me will', 1000], ['person', 'I will travel soon', 2000], ['person', 'My name is Will', 3000]]),
+    };
+    const afterWill = withoutItems(will, new Set([memoryItemKey('name', null, 'Will')])).data as typeof will;
+    expect(afterWill.conversationHistory.map((line) => line.message)).toEqual(['I will travel soon']);
+  });
+
+  it('takes a bot line that says a forgotten name whenever it was said, and keeps the person saying it again after the Forget', () => {
+    const copy = (drawnAt: number, lines: Array<[string, string, number]>) => ({
+      personalInfo: { name: 'Ali', facts: [], heard: {}, drawnFrom: { name: drawnAt } },
+      conversationHistory: chat(lines),
+    });
+    const key = memoryItemKey('name', null, 'Ali');
+    const forgot = new Map([[key, new Date(3000)]]);
+    const stale = withoutForgotten([copy(1000, [['person', 'my name is Ali', 1000], ['bot', 'Hi Ali', 3500]])][0], [{ itemKey: key, createdAt: new Date(3000) }]) as ReturnType<typeof copy>;
+    expect(stale.personalInfo.name).toBeUndefined();
+    expect(stale.conversationHistory).toEqual([]);
+    const again = withoutItems(copy(5000, [['person', 'my name is Ali', 1000], ['bot', 'Hi Ali', 3500], ['person', 'my name is Ali', 5000]]), new Set([key]), forgot).data as ReturnType<typeof copy>;
+    expect(again.personalInfo.name).toBe('Ali');
+    expect(again.conversationHistory).toHaveLength(3);
+  });
+
+  it("takes the bot's reply after a taken line only for the words of the thing that took it, when several are forgotten at once", () => {
+    const data = {
+      personalInfo: { preferences: ['tea', 'jam'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:jam': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Jam is nice too', 1500], ['person', 'I like jam', 3000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('pref', null, 'jam')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
+  });
+});
