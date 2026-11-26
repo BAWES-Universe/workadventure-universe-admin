@@ -1255,9 +1255,16 @@ export function instantLimits(views: InstantLimitViews): Limit[] {
       options: [],
       note: unset ? (view.required ? 'Not set yet. Instant Apps do not run until you set it.' : 'Not set yet.') : undefined,
       range: { min: view.range.min / scale, max: view.range.max / scale },
+      // One that may be empty on purpose can be emptied again from here
+      ...(INSTANT_EMPTYABLE[key] ? { clearable: INSTANT_EMPTYABLE[key] } : {}),
     };
   });
 }
+
+/** The Instant limits that may be left empty on purpose, and what empty means for each. */
+const INSTANT_EMPTYABLE: Record<string, { label: string; meaning: string } | undefined> = {
+  maxRunsPerQuestion: { label: 'No bound', meaning: 'A question may have as many research runs as it needs.' },
+};
 
 
 /**
@@ -1769,7 +1776,8 @@ export function UniverseAiLimits() {
   async function saveInstant(id: string, value: number): Promise<boolean> {
     const view = instant?.[id];
     if (!view) return false;
-    const result = await sendLimits('/api/admin/instant', { [id]: Math.round(value * instantScale(view.unit)) });
+    // A negative value is the "No bound" card: empty is saved as null
+    const result = await sendLimits('/api/admin/instant', { [id]: value < 0 ? null : Math.round(value * instantScale(view.unit)) });
     if (!result.ok) {
       addToast({ description: result.error, variant: 'error' });
       return false;
