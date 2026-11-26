@@ -81,13 +81,17 @@ const ROW_TRIES = 3;
  * Runs the transaction of a pause (`run`: one `prisma.$transaction`, nothing after it, nothing sent to a provider) so that a take-over leader's stop on the Brick computer's row never makes the pause fail with a timeout
  * (post-0.5.0: pause during take-over). `waitFirst`: the caller knows the transaction will write the row (an explicit pause), so the row is waited for before it opens; otherwise (a renewal, which writes the row only if the room is
  * refused) the first try goes straight in and the wait comes only after it timed out. A try that timed out wrote nothing, so trying again is the same pause. Any other error is the caller's, and a third timeout is too.
+ *
+ * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives `at`, the caller's `now` moved on by the real time spent here (Sentry on #1040: a stretch ended at
+ * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
  */
-export async function pauseWhenRowFree<T>(botId: string, run: () => Promise<T>, waitFirst = true): Promise<T> {
+export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (at: Date) => Promise<T>, waitFirst = true): Promise<T> {
+  const began = Date.now();
   let wait = waitFirst;
   for (let attempt = 1; ; attempt++) {
     if (wait) await untilRowFree(botId);
     try {
-      return await run();
+      return await run(new Date(now.getTime() + (Date.now() - began)));
     } catch (error) {
       if (!isTransactionTimeout(error) || attempt >= ROW_TRIES) throw error;
       wait = true;

@@ -43,7 +43,7 @@ export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', no
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
     // The computer's row is waited for before the transaction opens (a take-over leader's stop may hold it): see `pauseWhenRowFree`
-    const decided = await pauseWhenRowFree(first.botId, () => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 }));
+    const decided = await pauseWhenRowFree(first.botId, now, (at) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, at, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 }));
     if (decided.kind !== 'held') return 'not';
     await afterPause(jobId, decided, now);
     return 'paused';

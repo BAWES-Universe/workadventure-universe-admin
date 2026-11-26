@@ -129,7 +129,10 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     } finally {
       await leader.release();
     }
-    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person', pauses: 1, secondsBilled: 60, reservationKey: null });
+    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person', pauses: 1, reservationKey: null });
+    // The job kept running while the pause waited: the 17 s are priced too (asked 60 s into the stretch, written about 77 s in), never the 60 s of the ask
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(76);
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeLessThanOrEqual(82);
   }, 60_000);
 
   it('a pause of the job\'s own kind (pauseJobAs) waits and then pauses', async () => {
@@ -143,7 +146,9 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     } finally {
       await leader.release();
     }
-    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 1, secondsBilled: 30 });
+    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 1 });
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(46);
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeLessThanOrEqual(52);
   }, 60_000);
 
   it('a pause for the month or a limit (a refused model call) waits and then pauses', async () => {
@@ -157,7 +162,9 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     } finally {
       await leader.release();
     }
-    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1, secondsBilled: 45 });
+    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1 });
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(61);
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeLessThanOrEqual(67);
   }, 60_000);
 
   it('a renewal the month refuses waits for the leader\'s stop and then pauses the job in the same renewal (it no longer fails with a timeout)', async () => {
@@ -173,7 +180,10 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     } finally {
       await leader.release();
     }
-    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1, secondsBilled: 300 });
+    expect(await jobOf(job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', pauses: 1 });
+    // The first try waited 15 s inside its transaction and timed out, the second waited for the row: both waits are priced (300 s asked, written about 317 s in)
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeGreaterThanOrEqual(316);
+    expect(Number((await jobOf(job.id)).secondsBilled)).toBeLessThanOrEqual(322);
     expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /P2028|expired transaction/i.test(line))).toEqual([]);
   }, 80_000);
 
@@ -226,6 +236,8 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       await leader.release();
     }
     expect(await jobOf(a.id)).toMatchObject({ status: 'queued', queuedFor: 'turn', pausedWhy: null, pauses: 1 });
+    expect(Number((await jobOf(a.id)).secondsBilled)).toBeGreaterThanOrEqual(76);
+    expect(Number((await jobOf(a.id)).secondsBilled)).toBeLessThanOrEqual(82);
   }, 80_000);
 
   it('no deadlock: a pause and a start blocked on the row at once both settle, and no deadlock or expired transaction is logged (run 3 times)', async () => {
@@ -265,17 +277,17 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
     it('a try that timed out (the row was taken again between the wait and the transaction) is tried again after another wait, and a try that did not time out is never repeated', async () => {
       const sara = await owner('retry');
       const tries = jest.fn().mockRejectedValueOnce(timeout()).mockResolvedValueOnce('paused');
-      expect(await pauseWhenRowFree(sara.brickId, tries)).toBe('paused');
+      expect(await pauseWhenRowFree(sara.brickId, NOW, tries)).toBe('paused');
       expect(tries).toHaveBeenCalledTimes(2);
       const other = jest.fn().mockRejectedValue(new Error('something else'));
-      await expect(pauseWhenRowFree(sara.brickId, other)).rejects.toThrow('something else');
+      await expect(pauseWhenRowFree(sara.brickId, NOW, other)).rejects.toThrow('something else');
       expect(other).toHaveBeenCalledTimes(1);
     });
 
     it('a third timeout is the caller\'s: three tries at most', async () => {
       const sara = await owner('three');
       const tries = jest.fn().mockRejectedValue(timeout());
-      const failed = await pauseWhenRowFree(sara.brickId, tries).catch((error: unknown) => error);
+      const failed = await pauseWhenRowFree(sara.brickId, NOW, tries).catch((error: unknown) => error);
       expect(isTransactionTimeout(failed)).toBe(true);
       expect(tries).toHaveBeenCalledTimes(3);
     });
@@ -285,7 +297,7 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       const leader = await leaderHolds(sara.brickId, 3_000);
       try {
         const began = Date.now();
-        expect(await pauseWhenRowFree(sara.brickId, async () => 'done', false)).toBe('done');
+        expect(await pauseWhenRowFree(sara.brickId, NOW, async () => 'done', false)).toBe('done');
         expect(Date.now() - began).toBeLessThan(1_000);
       } finally {
         await leader.release();

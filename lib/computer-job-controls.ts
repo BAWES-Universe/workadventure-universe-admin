@@ -381,7 +381,7 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
   // A take-over leader's stop may hold the computer's row, which this pause writes: it is waited for before the transaction opens, never inside it (post-0.5.0: pause during take-over)
-  const decided = await pauseWhenRowFree(first.botId, () => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, options), TX));
+  const decided = await pauseWhenRowFree(first.botId, now, (at) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, at, provider, options), TX));
   return afterPause(jobId, decided, now, options);
 }
 
@@ -444,12 +444,12 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
     // The computer's row is waited for before the transaction opens (a take-over leader's stop may hold it): see `pauseWhenRowFree`
-    const done = await pauseWhenRowFree(botId, () => prisma.$transaction(async (tx) => {
+    const done = await pauseWhenRowFree(botId, now, (at) => prisma.$transaction(async (tx) => {
       // The job's locks first (the order used everywhere), then the command's row: a copy of this tap waits here for the first, then finds its row
       if (!(await lockJob(tx, jobId))) return { decided: { kind: 'not_found' } as PauseDecision };
       const claimed = await claimCommandIn(tx, under.command, under.row);
       if (!('fresh' in claimed)) return { seen: claimed };
-      const decided = await decidePauseIn(tx, jobId, 'person', now, provider);
+      const decided = await decidePauseIn(tx, jobId, 'person', at, provider);
       // A pause of a job that held the machine is kept PENDING until its sign-ins are put away (after this commit): a copy never reads a success that does not yet say whether they were kept (CodeRabbit on #1025, 51). A pause that
       // only moved a job out of the line, or was refused, has nothing more to do: its answer is final here
       await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId], held: [{ jobId, n: decided.n }] } : decisionOutcome(decided));
@@ -559,7 +559,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = options.pauseRunning ? providerFor(await prisma.brickComputer.findUnique({ where: { botId } })) : null;
   type FirstDecided = { seen: Exclude<Claimed, { fresh: true }> } | { refused: ControlRefusal } | { paused: Array<{ id: string; decided: PauseDecision }> };
-  const decide = () => prisma.$transaction(async (tx): Promise<FirstDecided> => {
+  const decide = (at: Date) => prisma.$transaction(async (tx): Promise<FirstDecided> => {
     await lockLine(tx, botId);
     const holding = options.pauseRunning ? (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } })).map((held) => held.id) : [];
     const rows = new Map<string, Awaited<ReturnType<typeof lockJob>>>();
@@ -572,7 +572,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     // Everything after this point is undone by a refusal (finding 11), and the refusal itself is kept as the command's outcome
     await tx.$executeRaw`SAVEPOINT "do_this_first"`;
     try {
-      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now);
+      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, at);
       // What was paused has its sign-ins put away only after this commit: the answer stays pending until then (CodeRabbit on #1025, 51)
       if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id), held: paused.flatMap((one) => (one.decided.kind === 'held' ? [{ jobId: one.id, n: one.decided.n }] : [])) } : { ok: true });
       return { paused };
@@ -584,7 +584,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     }
   }, TX);
   // Pausing what holds the computer writes the computer's row, which a take-over leader's stop may hold: it is waited for before the line is taken, never while holding it (post-0.5.0: pause during take-over). Without a pause the row is not written
-  const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, decide) : decide());
+  const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, now, decide) : decide(now));
   if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pendingOutcomeOf(under!.command, jobId), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };
   const paused = decided.paused;
