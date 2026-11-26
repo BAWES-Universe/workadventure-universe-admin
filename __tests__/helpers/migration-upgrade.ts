@@ -81,6 +81,14 @@ export function deploy(db: Throwaway, config?: string): { status: number | null;
   return { status: result.status, out: `${result.stdout}\n${result.stderr}` };
 }
 
+/**
+ * A deploy worked when the CLI exited 0. The migration history and the drift check (asserted by the callers) prove what was applied; the output text is NOT
+ * judged, because a harmless npm warning can push Prisma's last line out of any fixed tail. The tail is shown only when the exit status is not 0.
+ */
+export function expectDeployed(result: { status: number | null; out: string }): void {
+  expect({ status: result.status, tail: result.status === 0 ? '' : result.out.slice(-1500) }).toEqual({ status: 0, tail: '' });
+}
+
 /** What `prisma migrate diff` says the database lacks or has beyond schema.prisma, as the SQL that would fix it ('' when none). */
 export function drift(db: Throwaway): string {
   const result = spawnSync('npx', ['prisma', 'migrate', 'diff', '--from-config-datasource', '--to-schema', 'prisma/schema.prisma', '--script'], {

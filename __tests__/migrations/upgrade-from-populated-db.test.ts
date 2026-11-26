@@ -14,7 +14,7 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/migrations/upgrade-from-populated-db.test.ts
  */
 import path from 'node:path';
-import { counts, createThrowaway, deploy, drift, dropThrowaway, history, manifest, stage, withApplication, type Throwaway } from '../helpers/migration-upgrade';
+import { counts, createThrowaway, deploy, drift, dropThrowaway, expectDeployed, history, manifest, stage, withApplication, type Throwaway } from '../helpers/migration-upgrade';
 
 const run = process.env.ROLES_DB_TEST === 'yes' && process.env.DATABASE_URL ? describe : describe.skip;
 
@@ -58,7 +58,7 @@ describe('the real upgrade', () => {
       `);
       before = await counts(a.client, ['app_settings']);
       const second = deploy(a);
-      expect({ status: second.status, tail: second.out.slice(-200) }).toEqual({ status: 0, tail: expect.stringContaining('All migrations have been successfully applied') });
+      expectDeployed(second);
     });
 
     it('applies every migration of the manifest once, none failed, and the history is the baseline plus the new ones', async () => {
@@ -165,7 +165,7 @@ describe('the real upgrade', () => {
     const upgrade = async (db: Throwaway) => {
       before = await counts(db.client, ['app_settings']);
       const result = deploy(db);
-      expect({ status: result.status, tail: result.out.slice(-300) }).toEqual({ status: 0, tail: expect.stringContaining('All migrations have been successfully applied') });
+      expectDeployed(result);
     };
 
     beforeAll(async () => {
@@ -296,7 +296,7 @@ describe('the real upgrade', () => {
 
     it('deploys the shipping directory over it without error: the standalone migration stays recorded as applied, every shipped migration runs', async () => {
       const result = deploy(c as Throwaway);
-      expect({ status: result.status, tail: result.out.slice(-300) }).toEqual({ status: 0, tail: expect.stringContaining('All migrations have been successfully applied') });
+      expectDeployed(result);
       const state = await history((c as Throwaway).client);
       expect(state).toMatchObject({ unfinished: 0, rolledBack: 0 });
       expect(state.applied).toEqual([...manifest.shipping.migrations, STANDALONE].sort());
