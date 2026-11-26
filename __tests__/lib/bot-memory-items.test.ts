@@ -239,3 +239,69 @@ describe('what was forgotten stays gone', () => {
     expect(withoutForgotten(memory, [])).toBe(memory);
   });
 });
+
+describe('taking out what was said plainly (favorites and short words)', () => {
+  const memoryWith = (preference: string, lines: Array<[string, string, number]>) => ({
+    personalInfo: { preferences: [preference], facts: [], heard: {}, drawnFrom: { [`pref:${preference}`]: lines.at(-1)![2] } },
+    conversationHistory: lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp })),
+  });
+  const forget = (data: ReturnType<typeof memoryWith>, preference: string) => {
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, preference)])).data as ReturnType<typeof memoryWith>;
+    return after.conversationHistory.map((line) => line.message);
+  };
+
+  it('forgetting a favorite looks for it as it is said ("pizza"), long or short', () => {
+    expect(
+      forget(
+        memoryWith('pizza (favorite food)', [
+          ['person', 'my favorite food is pizza', 1000],
+          ['bot', 'Pizza is your favorite food, got it!', 1500],
+          ['person', 'I walk a lot', 2000],
+          ['person', 'again, my favorite food is pizza', 3000],
+        ]),
+        'pizza (favorite food)',
+      ),
+      // As for any long value here, the person's earlier lines stay when the line it came from was noted (the game drops them again on load)
+    ).toEqual(['my favorite food is pizza', 'I walk a lot']);
+    expect(
+      forget(
+        memoryWith('tea (favorite drink)', [
+          ['person', 'my favorite drink is tea', 1000],
+          ['bot', 'Tea is your favorite drink!', 1500],
+          ['person', 'I walk a lot', 2000],
+          ['person', 'again, my favorite drink is tea', 3000],
+        ]),
+        'tea (favorite drink)',
+      ),
+    ).toEqual(['I walk a lot']);
+  });
+
+  it('forgetting a short like said twice takes the first line and what the bot says back, and keeps what only has the letters', () => {
+    expect(
+      forget(
+        memoryWith('tea', [
+          ['person', 'I like tea', 1000],
+          ['bot', 'Tea, you like it!', 1500],
+          ['person', 'I like steam rooms', 2000],
+          ['bot', 'Steam rooms are great', 2500],
+          ['person', 'I like tea a lot', 3000],
+        ]),
+        'tea',
+      ),
+    ).toEqual(['I like steam rooms', 'Steam rooms are great']);
+  });
+
+  it('forgetting a short dislike takes the lines that say it, as a like does', () => {
+    const data = {
+      personalInfo: { preferences: [], facts: [['dislike_tea_x', 'tea']], heard: {}, drawnFrom: { 'fact:dislike_tea_x': 3000 } },
+      conversationHistory: [
+        { sender: 'person', message: 'I hate tea', timestamp: 1000 },
+        { sender: 'bot', message: 'You hate tea, noted.', timestamp: 1500 },
+        { sender: 'person', message: 'I like steam rooms', timestamp: 2000 },
+        { sender: 'person', message: 'honestly I hate tea', timestamp: 3000 },
+      ],
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('fact', 'dislike_tea_x', 'tea')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I like steam rooms']);
+  });
+});
