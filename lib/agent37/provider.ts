@@ -337,7 +337,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
    * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
    */
-  private async settle(ref: string, options: { update?: boolean | 'unless_outside' } = {}): Promise<Instance> {
+  private async settle(ref: string, options: { update?: boolean | 'unless_outside'; /** Asked right before the image update (it restarts the machine, and can come after minutes of waiting): a start that lost its wake sends nothing (Opus on #1040) */ beforeUpdate?: () => Promise<void> } = {}): Promise<Instance> {
     // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
     const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
@@ -363,6 +363,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
           Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
         }
       } else {
+        await options.beforeUpdate?.();
         await this.client.updateInstance(ref);
         instance = await this.untilHealthy(ref, instance.url);
       }
@@ -396,7 +397,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const owned = async () => {
       if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     };
-    let instance = await this.settle(ref, { update: 'unless_outside' });
+    let instance = await this.settle(ref, { update: 'unless_outside', beforeUpdate: owned });
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
     // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave

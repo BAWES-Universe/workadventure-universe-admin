@@ -1002,6 +1002,28 @@ describe('getting a machine ready for a job', () => {
       return { w, p };
     }
 
+    it('a start that lost its wake sends no image update (Opus on #1040: stillMine is asked right before it, after the check that can take minutes), and ready throws WakeReplaced', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      await expect(p.ready('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('update:m1');
+      expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+      // Still its own: the update is sent once, after the check
+      await expect(p.ready('m1', { stillMine: async () => true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+    });
+
+    it('a machine that is not behind the image is not asked about for an update (nothing is sent)', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      let asks = 0;
+      await p.ready('m1', { stillMine: async () => (asks++, true) });
+      expect(asks).toBe(0);
+    });
+
     it('moves it to the current image only after the computer says it holds nothing outside its home folder, and before it is brought up', async () => {
       const { w, p } = await behind('outside_check=1 any=0\n');
       (Sentry.captureMessage as jest.Mock).mockClear();
