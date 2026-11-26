@@ -31,7 +31,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
 import { controlInternals, wakeTimingForTests } from '@/lib/computer';
-import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped, setLateStartListMsForTests } from '@/lib/computer';
+import { finishJob, giveComputer, handBack, recoverControl, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeOver, setWakeTimingForTests, takeWakeTicketForTests, wakeIfStopped, setLateStartListMsForTests, setLateStartPageRowsForTests } from '@/lib/computer';
 import { beginTransition, readControl } from '@/lib/computer-control';
 import { startTurn } from '@/lib/computer-broker';
 import { endPowerOp, openPowerOpOf, powerTiming, underPowerOp, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
@@ -1833,9 +1833,11 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
     beforeEach(() => {
       (Sentry.captureMessage as jest.Mock).mockClear();
       setLateStartListMsForTests(null);
+      setLateStartPageRowsForTests(null);
     });
     afterEach(() => {
       setLateStartListMsForTests(null);
+      setLateStartPageRowsForTests(null);
       fake.listHookForTests = null;
       fake.listFailsForTests = null;
       fake.listNotKnownForTests.clear();
@@ -2093,16 +2095,47 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working', turnUnprovenSince: null } });
       // The job's end put the machine to sleep; it is awake again for this look (a person's use of it, say)
       await fake.wake(sara.ref);
+      // Another Brick has a stopped row with its machine asleep: the list is really taken (with no stopped row the step returns before it asks, and nothing below would be checked)
+      const tom = await behindStoppedRow('t9-stopped');
+      await fake.stop(tom.ref);
+      const listsBefore = fake.listsAsked;
+      let hookRan = 0;
       fake.listHookForTests = async () => {
+        hookRan++;
         // The list was taken with the machine awake; now the normal turn-off lands and is proved
         await fake.rest(sara.ref);
         await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
       };
       const stopsBefore = stopsOf(sara.ref);
       await sweepComputers(NOW);
+      expect(fake.listsAsked).toBe(listsBefore + 1);
+      expect(hookRan).toBe(1);
       expect(stopsOf(sara.ref)).toBe(stopsBefore);
       expect((await stopOps(sara.ref)).filter((op) => op.doneAt === null)).toEqual([]);
       expect(warned()).toBe(0);
+    }, 30_000);
+
+    it('Opus on ac362cee: Sentry hears of EVERY stop this step sends, also one the provider did not prove (the row stays `stopping`, the sweep sends it again): one warning for the one leak', async () => {
+      const sara = await behindStoppedRow('sentry-unproved');
+      fake.failNext.stop = true;
+      await sweepComputers(NOW);
+      expect(await fake.awake(sara.ref)).toBe(true);
+      expect((await machineOf(sara)).machine).toBe('stopping');
+      expect(warned()).toBe(1);
+    }, 30_000);
+
+    it('Opus on ac362cee: every stopped row is read, however many (pages of one row here), and still ONE list is asked for the pass', async () => {
+      setLateStartPageRowsForTests(1);
+      const owners = [];
+      for (const name of ['page-a', 'page-b', 'page-c']) owners.push(await behindStoppedRow(name));
+      const listsBefore = fake.listsAsked;
+      await sweepComputers(NOW);
+      expect(fake.listsAsked).toBe(listsBefore + 1);
+      for (const sara of owners) {
+        expect(await fake.awake(sara.ref)).toBe(false);
+        expect((await machineOf(sara)).machine).toBe('stopped');
+      }
+      expect(warned()).toBe(3);
     }, 30_000);
   });
 });

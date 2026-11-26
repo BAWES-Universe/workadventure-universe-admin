@@ -396,12 +396,14 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
  * `stopping`: nothing uses it, it still counts as awake for the wind-down, and every sweep tries again. `only` limits which stored states this
  * may rewrite (the caller knows what it saw). Returns whether the machine is proved asleep.
  */
-async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }): Promise<boolean> {
+async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }, onSent?: () => void): Promise<boolean> {
   // A stop the caller decided from a state it saw (`only`, and for a start that failed, its wake ticket) is CLAIMED first, in a committed conditional write, and the provider is called only when that write changed the row: a
   // replacement that woke the machine since (it sets another state and takes the next ticket) makes the claim write nothing, and nothing is stopped under it (GPT's seventh note, B)
   if (only || ticket !== undefined) {
     const op = await claimStop(botId, ref, only, ticket, abandoned);
     if (!op) return false;
+    // The caller hears that its claim was taken and the stop is on its way, proved or not (a stop that is not proved stays `stopping` and is sent again by the sweep)
+    onSent?.();
     const proven = await stopAtProvider(botId, ref, provider, op);
     await noteStopped(botId, ref, proven, ['stopping']);
     return proven;
@@ -2353,18 +2355,33 @@ let lateStartListMs = 5_000;
 export function setLateStartListMsForTests(ms: number | null): void {
   lateStartListMs = ms ?? 5_000;
 }
-/** How many `stopped` rows one pass reads. */
-const LATE_START_ROWS = 5000;
+/** How many `stopped` rows are read at a time (a page of the cursor on botId). A test makes it small. */
+let lateStartPageRows = 1000;
+export function setLateStartPageRowsForTests(rows: number | null): void {
+  lateStartPageRows = rows ?? 1000;
+}
 
 /**
  * A start of ours can reach the provider long after its row was stopped (its sender froze, or died right after sending it), and nothing fences a call already sent: the machine then runs behind a row that says `stopped`. Looked for here, once
- * for the whole account (CodeRabbit on #1040, Opus): the `stopped` rows of this database are read FIRST, then ONE list of the account is asked (one try, a short timeout, never asked again), so a machine the list calls awake was awake after
+ * for the whole account (CodeRabbit on #1040, Opus): EVERY `stopped` row of this database with a machine is read FIRST (in pages, so no row is left out by a count), then ONE list of the account is asked (one try, a short timeout, never asked again), so a machine the list calls awake was awake after
  * its row was stopped, never before it (the other order would stop a machine a normal turn-off had just stopped). Only for machines this database knows (dev and prod may share an account): the list is never walked for its own sake.
  * A machine the list calls awake behind a row that is still `stopped` at the epoch that was read is stopped with the state AND the epoch in the claim's own write: a replacement that took the next ticket, or woke the machine and stopped it again
- * (the epoch moved), makes the claim write nothing. Nothing is started or billed here. A list that gets no clean answer (an error, a rate limit, a part of the account, no answer in time) skips the pass.
+ * (the epoch moved), makes the claim write nothing. Nothing is started or billed here. A list that gets no clean answer (an error, a rate limit, a part of the account, no answer in time) skips the pass. Sentry hears of every stop this step sends, proved or not.
  */
 async function stopLateStarts(): Promise<void> {
-  const rows = await prisma.brickComputer.findMany({ where: { machine: 'stopped', NOT: { providerRef: null } }, select: { botId: true, providerRef: true, provider: true, wakeEpoch: true }, orderBy: { updatedAt: 'desc' }, take: LATE_START_ROWS });
+  const rows: Array<{ botId: string; providerRef: string | null; provider: string; wakeEpoch: number }> = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await prisma.brickComputer.findMany({
+      where: { machine: 'stopped', NOT: { providerRef: null } },
+      select: { botId: true, providerRef: true, provider: true, wakeEpoch: true },
+      orderBy: { botId: 'asc' },
+      take: lateStartPageRows,
+      ...(cursor ? { cursor: { botId: cursor }, skip: 1 } : {}),
+    });
+    rows.push(...page);
+    if (page.length < lateStartPageRows) break;
+    cursor = page[page.length - 1].botId;
+  }
   if (rows.length === 0) return;
   const byProvider = new Map<Provider, typeof rows>();
   for (const row of rows) {
@@ -2384,8 +2401,9 @@ async function stopLateStarts(): Promise<void> {
     if (!said) continue;
     for (const row of mine) {
       if (!row.providerRef || said.get(row.providerRef) !== true) continue;
-      const proven = await stopMachine(row.botId, row.providerRef, provider, ['stopped'], row.wakeEpoch).catch(() => false);
-      if (proven) Sentry.captureMessage('A computer was found running behind a row that says it is stopped, and was stopped', { level: 'warning', tags: { area: 'computer', step: 'late-start-found' }, extra: { botId: row.botId } });
+      await stopMachine(row.botId, row.providerRef, provider, ['stopped'], row.wakeEpoch, undefined, () =>
+        Sentry.captureMessage('A computer was found running behind a row that says it is stopped, and its stop was sent', { level: 'warning', tags: { area: 'computer', step: 'late-start-found' }, extra: { botId: row.botId } }),
+      ).catch(() => false);
     }
   }
 }
