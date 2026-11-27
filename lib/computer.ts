@@ -4198,7 +4198,7 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     // The database's clock before anything is decided (moved on by the skew a server's clock may have): a hold lifts only on proof that is NEWER than the hold (a stop claimed after this moment and proved asleep, with the hold itself dated no later than this moment), so the hold
     // that the stop of an abandoned wake pushes out (see `claimStop`) outlasts the wake call that may still land (Opus on #1040)
     const [{ now: t0 }] = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT ((NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${TURN_HOLD_CLOCK_SKEW_MS / 1000})) AS now`;
-    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true } });
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true, packStage: true } });
     if (!row?.turnUnprovenSince) return true;
     const seen = row.turnUnprovenSince;
     // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays; and one dated after the moment this looked (the watch of an abandoned wake) stays
@@ -4213,7 +4213,8 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (holders > 0) return false;
     const provider = providerFor(row);
     if (!provider || !row.providerRef) return false;
-    const abandoned = (row.machine === 'waking' || row.machine === 'restoring') && Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs;
+    // A cold-storage return (`restoring` with its stage `returning`) does not beat this row (it beats its own claim) and is never taken for an abandoned wake: it is left to its own claim, as in the sweep's `stopAbandonedWakes` (Sentry on #1040)
+    const abandoned = (row.machine === 'waking' || row.machine === 'restoring') && row.packStage !== 'returning' && Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
     // (A wake that is abandoned is not copied: the copy would write the row, and with it the beat that proves the wake dead, and it has run nothing since the last copy)
     if (!abandoned && (await provider.awake(row.providerRef).catch(() => false))) await saveCopy(botId, row.providerRef, provider);

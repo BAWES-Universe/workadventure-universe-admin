@@ -608,6 +608,21 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).machine).toBe('waking');
     });
 
+    it('Sentry on #1040: a turn hold on a cold-storage return (`restoring`, stage `returning`) with a stale row beat is not taken for an abandoned wake: nothing is stopped, the hold stays, the return is untouched (it beats its own claim, not the row)', async () => {
+      const sara = await owner('hold-returning');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', packStage: 'returning', turnUnprovenSince: NOW } });
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      const epoch = (await machineOf(sara)).wakeEpoch;
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+      expect(await machineOf(sara)).toMatchObject({ machine: 'restoring', packStage: 'returning', wakeEpoch: epoch });
+      expect((await machineOf(sara)).turnUnprovenSince).not.toBeNull();
+    });
+
     it.each(['waking', 'restoring'] as const)('CodeRabbit on #1040: a turn hold on a machine whose `%s` wake was abandoned (no beat for the whole stale time, no job) is stopped and lifted, never left to hold every start in line for ever', async (state) => {
       const sara = await owner(`abandoned-${state}`);
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
