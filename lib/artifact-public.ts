@@ -1,13 +1,49 @@
-import { marked } from 'marked';
+import { Marked } from 'marked';
 
 /**
- * The one script a document carries: it tells the page how tall the document is, so printing the page prints all of it (a
- * frame cannot size itself). It carries nothing else and reads nothing. The document's own policy allows this script by its
+ * The one script a document carries: it tells the page how tall the document is on screen and how tall it is on paper at a
+ * few page widths, so printing the page prints all of it (a frame cannot size itself, and paper wraps text the screen does
+ * not). It answers whenever the page asks, so a report sent before the page was listening is never lost. It carries nothing else and reads nothing. The document's own policy allows this script by its
  * hash and no other, so no script a document writes in its text ever runs.
  */
-export const HEIGHT_SCRIPT = "(function(){function t(){parent.postMessage({artifactHeight:document.documentElement.scrollHeight},'*')}addEventListener('load',t);addEventListener('resize',t);if(window.ResizeObserver)new ResizeObserver(t).observe(document.body)})()";
+export const HEIGHT_SCRIPT = "(function(){var W=[360,480,600,720,840];function t(){var p=document.getElementById('paper'),r=[];if(p){var o=p.style.width;W.forEach(function(w){p.style.width=w+'px';r.push([w,p.scrollHeight])});p.style.width=o}parent.postMessage({artifactHeight:document.documentElement.scrollHeight,artifactPrintHeights:r},'*')}addEventListener('load',t);addEventListener('resize',t);addEventListener('message',function(e){if(e.source===parent)t()});addEventListener('DOMContentLoaded',function(){if(window.ResizeObserver)new ResizeObserver(t).observe(document.body);t()})})()";
 /** Its sha256, as the policy names it (a test checks it still matches the script). It is a constant because this file also runs in the browser. */
-export const HEIGHT_SCRIPT_HASH = '/QxzRHGhEbVovuN6prREuWyD5P9DPc2sOhEP2J+zejY=';
+export const HEIGHT_SCRIPT_HASH = 'xQS9iP0KuKrAfzWvkW/kuY5AjPVUABxCy8DKcnBncEY=';
+
+/** Text that is safe between tags and inside a quoted value. */
+const escapeText = (text: string): string =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/**
+ * A document's own HTML is never drawn as HTML, in a block or inside a line: it shows as the text it is. A tag written in a
+ * document (a meta refresh that sends the frame to another address, a form, a script, a frame) therefore never reaches the
+ * page as a tag at all, whatever the document's policy says.
+ */
+const documents = new Marked({
+  renderer: {
+    html: (html: string) => escapeText(html),
+  },
+});
+
+/**
+ * How a document looks on paper: white, the table fitted to the page, cells that wrap. The same rules are used twice: for
+ * real, in the print styles, and under `.paper`, a hidden copy of the document laid out at the width of a page, which the
+ * script measures so the page knows the printed height before anything is printed. Both can never drift apart.
+ */
+function printRules(scope: string): string {
+  const on = (selectors: string[], rules: string) => `  ${selectors.map((selector) => `${scope} ${selector}`.trim()).join(', ')} { ${rules} }`;
+  return [
+    on(['a'], 'color: #1d4ed8;'),
+    on(['code', 'pre'], 'background: #f3f4f6; color: #111; border-color: #d1d5db;'),
+    on(['blockquote'], 'color: #444;'),
+    on(['table'], 'display: table; width: 100%; overflow: visible; font-size: 10pt;'),
+    on(['th', 'td'], 'white-space: normal; overflow-wrap: anywhere; border-color: #9ca3af;'),
+    on(['th'], 'background: #e5e7eb;'),
+    on(['thead'], 'display: table-header-group;'),
+    on(['tr', 'img', 'pre'], 'break-inside: avoid;'),
+    on(['h1', 'h2', 'h3', 'h4'], 'break-after: avoid;'),
+  ].join('\n');
+}
 
 /**
  * A document for the public link page: the Markdown drawn as HTML, in a page of its own that the page shows in an iframe
@@ -15,7 +51,7 @@ export const HEIGHT_SCRIPT_HASH = '/QxzRHGhEbVovuN6prREuWyD5P9DPc2sOhEP2J+zejY='
  * (by its hash), so nothing a document says can run or reach anything of the viewer.
  */
 export function markdownDocument(markdown: string): string {
-  const html = marked.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
+  const html = documents.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; script-src 'sha256-${HEIGHT_SCRIPT_HASH}'">
 <base target="_blank">
@@ -34,10 +70,12 @@ th, td { border: 1px solid #2a2638; padding: 6px 10px; text-align: left; vertica
 img { max-width: 100%; height: auto; } hr { border: 0; border-top: 1px solid #2a2638; }
 @media print {
   body { background: #fff; color: #111; padding: 0; font-size: 12pt; }
-  a { color: #1d4ed8; } code, pre { background: #f3f4f6; color: #111; border-color: #d1d5db; } blockquote { color: #444; }
-  table { display: table; width: 100%; overflow: visible; font-size: 10pt; }
-  th, td { white-space: normal; overflow-wrap: break-word; border-color: #9ca3af; } th { background: #e5e7eb; }
-  thead { display: table-header-group; } tr, img, pre { break-inside: avoid; } h1, h2, h3, h4 { break-after: avoid; }
+${printRules('')}
+  .paper { display: none; }
 }
-</style><script>${HEIGHT_SCRIPT}</script></head><body>${html}</body></html>`;
+/* A copy of the document laid out as paper (never shown), laid out at a few page widths only to measure its printed height. */
+.paper { position: fixed; top: 0; left: -10000px; width: 720px; visibility: hidden; pointer-events: none; font-size: 12pt; }
+.paper > :first-child { margin-top: 0; }
+${printRules('.paper')}
+</style><script>${HEIGHT_SCRIPT}</script></head><body>${html}<div id="paper" class="paper" aria-hidden="true">${html}</div></body></html>`;
 }

@@ -61,7 +61,31 @@ describe('the public artifact page', () => {
     expect(doc.indexOf(HEIGHT_SCRIPT)).toBeLessThan(doc.indexOf('alert(1)'));
     // The script says nothing but a height
     expect(HEIGHT_SCRIPT).toContain('artifactHeight');
+    expect(HEIGHT_SCRIPT).toContain('artifactPrintHeights');
     expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
+  });
+
+  it('shows a tag written in a document as text, so a document can never send its frame to another address', () => {
+    const doc = markdownDocument(
+      [
+        '<meta http-equiv="refresh" content="0;url=https://evil.example/">',
+        '',
+        'A line with <meta http-equiv="refresh" content="0;url=https://evil.example/"> inside it, and <b onclick="x()">bold</b>.',
+        '',
+        '<iframe src="https://evil.example/"></iframe>',
+        '<form action="https://evil.example/"><input name="a"></form>',
+        '<script>parent.location = "https://evil.example/"</script>',
+      ].join('\n')
+    );
+    // The only tags in the document are the page's own: one policy, one base, one height script
+    const body = doc.slice(doc.indexOf('<body>'));
+    expect(body).not.toMatch(/<(meta|iframe|form|input|script|b )/i);
+    expect(doc.match(/<meta http-equiv=/g)).toHaveLength(1);
+    expect(doc.match(/<script>/g)).toHaveLength(1);
+    // What the writer wrote is still there to read
+    expect(body).toContain('&lt;meta http-equiv=&quot;refresh&quot;');
+    expect(body).toContain('&lt;iframe src=&quot;https://evil.example/&quot;&gt;');
+    expect(body).toContain('&lt;script&gt;parent.location');
   });
 
   it('prints the whole document: the table fits the paper and the pills stay off it', () => {
@@ -88,6 +112,30 @@ describe('the public artifact page', () => {
     expect(plain).not.toContain('aria-haspopup');
     const withTable = doc('| a | b |\n|---|---|\n| 1 | 2 |');
     expect(withTable).toContain('aria-haspopup="menu"');
+  });
+
+  it('measures the document as paper, with the print rules it really prints with, and never prints the measuring copy', () => {
+    const doc = markdownDocument('# Notes\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+    // One hidden copy laid out at the width of a page; the same rules are written for it and for the print styles
+    expect(doc.match(/id="paper"/g)).toHaveLength(1);
+    expect(doc).toMatch(/\.paper \{[^}]*position: fixed[^}]*visibility: hidden/);
+    expect(doc).toMatch(/\.paper table \{[^}]*display: table[^}]*width: 100%/);
+    expect(doc).toMatch(/\.paper th, \.paper td \{[^}]*white-space: normal/);
+    const print = doc.slice(doc.indexOf('@media print'), doc.indexOf('</style>'));
+    expect(print).toMatch(/\.paper \{ display: none; \}/);
+    expect(print).toMatch(/ th, td \{[^}]*white-space: normal/);
+    // The copy is for measuring only: hidden from readers of the page
+    expect(doc).toContain('id="paper" class="paper" aria-hidden="true"');
+    // A long word in a cell may break anywhere on paper, so a table never grows wider than the page
+    expect(print).toMatch(/ th, td \{[^}]*overflow-wrap: anywhere/);
+  });
+
+  it('starts watching the document only once it has a body, answers whenever the page asks, and reports several page widths', () => {
+    // The script sits in the head: the body (and the measuring copy) can only be watched after the document is read
+    expect(HEIGHT_SCRIPT).toMatch(/addEventListener\('DOMContentLoaded',function\(\)\{[^}]*ResizeObserver/);
+    expect(HEIGHT_SCRIPT).toContain("addEventListener('message'");
+    expect(HEIGHT_SCRIPT).toContain('e.source===parent');
+    expect(HEIGHT_SCRIPT).toContain('[360,480,600,720,840]');
   });
 
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {
