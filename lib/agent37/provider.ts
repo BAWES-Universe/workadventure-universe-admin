@@ -380,7 +380,9 @@ export class Agent37ComputerProvider implements ComputerProvider {
           // The update was sent and the wake that sent it is gone: a replacement may own the machine, which the update just restarted, and the files it holds outside its home folder may have been replaced. Nothing can recall a request that
           // is sent, and Agent37's update has no condition to make it atomic with the check, so this is told to Sentry (once for each such update) for us to learn whether it ever happens (Opus on #1040)
           if (error instanceof WakeReplaced) {
-            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision, updateFailed: updateThrew } });
+            // Also when the update itself threw: the replaced path is the only one the caller treats as "look again" (a replaced start never fails its job), so WakeReplaced is what is thrown, and the update's own error is kept in the warning (Opus on #1040)
+            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision, updateFailed: updateThrew, ...(updateThrew ? { updateError: updateError instanceof Error ? updateError.message : String(updateError) } : {}) } });
+            throw error;
           }
           throw updateThrew ? updateError : error;
         }

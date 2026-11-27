@@ -1101,16 +1101,16 @@ describe('getting a machine ready for a job', () => {
       expect(warnings[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2 } });
     });
 
-    it('an image update that throws while the wake is replaced is told too (it may have been applied), and the ORIGINAL error stops the start; one that throws while the wake is still its own warns nothing (CodeRabbit on #1040)', async () => {
+    it('an image update that throws while the wake is replaced is told too (it may have been applied), and WakeReplaced stops the start (the original error is in the warning); one that throws while the wake is still its own warns nothing and throws the original error (CodeRabbit on #1040)', async () => {
       const failure = new Agent37Unreached('update answer lost');
       const warnings = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
       const lost = await behind('outside_check=1 any=0\n');
       lost.w.client.updateInstance = (async (id: string) => (lost.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
       (Sentry.captureMessage as jest.Mock).mockClear();
       let asks = 0;
-      await expect(lost.p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBe(failure);
+      await expect(lost.p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
       expect(warnings()).toHaveLength(1);
-      expect(warnings()[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2, updateFailed: true } });
+      expect(warnings()[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2, updateFailed: true, updateError: 'update answer lost' } });
       const own = await behind('outside_check=1 any=0\n');
       own.w.client.updateInstance = (async (id: string) => (own.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
       (Sentry.captureMessage as jest.Mock).mockClear();
