@@ -12,7 +12,7 @@ import { describeLine, PAY_WORDS, type PayAction } from '@/components/page-payme
  * A guest's receipt link is this page's own address with `#receipt=<code>`: the code is adopted from the address when the page opens and then
  * taken out of it, so it is never in the history or sent to a server.
  */
-export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
+export function PagePaymentsBridge({ artifactId, version }: { artifactId: string; version?: number }) {
   const [line, setLine] = useState<PayLine>(NO_PAY_LINE);
   // The receipt link that was copied (or that could not be), never a bare yes: another page's receipt, or an earlier copy that finishes late, is never "copied"
   const [copied, setCopied] = useState<string | null>(null);
@@ -36,6 +36,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     }
     const made = createPagePaymentsHost({
       artifactId,
+      // The version on screen: a start is never charged with terms set on a newer one
+      version,
       frame: () => frame()?.contentWindow,
       openWindow: () => window.open('about:blank', '_blank'),
       storage,
@@ -63,7 +65,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       host.current = null;
       setLine(NO_PAY_LINE);
     };
-  }, [artifactId]);
+  }, [artifactId, version]);
 
   const view = describeLine(line, { copied: !!line.receipt && copied === line.receipt });
   // Only a line that offers the copy (a purchase made in this browser) can show the link a failed copy leaves to select: a purchase found through

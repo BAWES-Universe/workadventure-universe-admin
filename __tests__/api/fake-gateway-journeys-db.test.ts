@@ -161,7 +161,7 @@ async function ask(artifactId: string, body: Record<string, unknown>, who: strin
 async function checkout(artifactId: string, who: string | null = omar, same?: { intentId: string; recoveryCode?: string }): Promise<{ orderId: string; checkoutUrl: string; intentId: string; recoveryCode?: string }> {
   const intentId = same?.intentId ?? wishId();
   const recoveryCode = same ? same.recoveryCode : who ? undefined : guestCode();
-  const response = await ask(artifactId, { intentId, ...(recoveryCode ? { recoveryCode } : {}) }, who);
+  const response = await ask(artifactId, { intentId, shownVersion: 1, ...(recoveryCode ? { recoveryCode } : {}) }, who);
   expect(response.status).toBe(200);
   return { ...(await response.json()), intentId, recoveryCode };
 }
@@ -367,12 +367,12 @@ run('page payments against the fake payment service', () => {
     const { artifactId } = await page(sara, TEST_KEY);
     control('POST', '/control/create-fault', { mode: 'timeout', times: 1, made: true });
     const intentId = wishId();
-    const first = await ask(artifactId, { intentId }, omar);
+    const first = await ask(artifactId, { intentId, shownVersion: 1 }, omar);
     // The buyer is told it is unsure, with no link: a payment Orbit does not know is never given out
     expect(first.status).toBe(409);
     expect(await first.json()).toMatchObject({ unsure: true });
     expect((control('GET', '/control/payments').body as { payments: unknown[] }).payments).toHaveLength(1);
-    const again = await ask(artifactId, { intentId }, omar);
+    const again = await ask(artifactId, { intentId, shownVersion: 1 }, omar);
     expect(again.status).toBe(200);
     const started = await again.json();
     expect(started.checkoutUrl.startsWith(`${FAKE}/pay/chg_`)).toBe(true);
