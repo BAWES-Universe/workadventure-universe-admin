@@ -61,6 +61,7 @@ describe('the public artifact page', () => {
     expect(doc.indexOf(HEIGHT_SCRIPT)).toBeLessThan(doc.indexOf('alert(1)'));
     // The script says nothing but a height
     expect(HEIGHT_SCRIPT).toContain('artifactHeight');
+    expect(HEIGHT_SCRIPT).toContain('artifactPrintHeight');
     expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
   });
 
@@ -99,7 +100,21 @@ describe('the public artifact page', () => {
     const hidden = html.indexOf('print:hidden');
     expect(hidden).toBeGreaterThan(-1);
     expect(html.indexOf('data-testid="madeWithUniverse"')).toBeGreaterThan(hidden);
-    expect(html).toContain('print:h-[var(--document-height,100dvh)]');
+    expect(html).toContain('print:h-[var(--document-print-height,var(--document-height,100dvh))]');
+  });
+
+  it('measures the document as paper, with the print rules it really prints with, and never prints the measuring copy', () => {
+    const doc = markdownDocument('# Notes\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+    // One hidden copy laid out at the width of a page; the same rules are written for it and for the print styles
+    expect(doc.match(/id="paper"/g)).toHaveLength(1);
+    expect(doc).toMatch(/\.paper \{[^}]*position: fixed[^}]*visibility: hidden/);
+    expect(doc).toMatch(/\.paper table \{[^}]*display: table[^}]*width: 100%/);
+    expect(doc).toMatch(/\.paper th, \.paper td \{[^}]*white-space: normal/);
+    const print = doc.slice(doc.indexOf('@media print'), doc.indexOf('</style>'));
+    expect(print).toMatch(/\.paper \{ display: none; \}/);
+    expect(print).toMatch(/ th, td \{[^}]*white-space: normal/);
+    // The copy is for measuring only: hidden from readers of the page
+    expect(doc).toContain('id="paper" class="paper" aria-hidden="true"');
   });
 
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {

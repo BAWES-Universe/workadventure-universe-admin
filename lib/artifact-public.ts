@@ -1,13 +1,13 @@
 import { Marked } from 'marked';
 
 /**
- * The one script a document carries: it tells the page how tall the document is, so printing the page prints all of it (a
- * frame cannot size itself). It carries nothing else and reads nothing. The document's own policy allows this script by its
+ * The one script a document carries: it tells the page how tall the document is on screen and how tall it is on paper, so
+ * printing the page prints all of it (a frame cannot size itself, and paper wraps text the screen does not). It carries nothing else and reads nothing. The document's own policy allows this script by its
  * hash and no other, so no script a document writes in its text ever runs.
  */
-export const HEIGHT_SCRIPT = "(function(){function t(){parent.postMessage({artifactHeight:document.documentElement.scrollHeight},'*')}addEventListener('load',t);addEventListener('resize',t);if(window.ResizeObserver)new ResizeObserver(t).observe(document.body)})()";
+export const HEIGHT_SCRIPT = "(function(){function t(){var p=document.getElementById('paper');parent.postMessage({artifactHeight:document.documentElement.scrollHeight,artifactPrintHeight:p?p.scrollHeight:0},'*')}addEventListener('load',t);addEventListener('resize',t);if(window.ResizeObserver){var o=new ResizeObserver(t);o.observe(document.body);var q=document.getElementById('paper');if(q)o.observe(q)}})()";
 /** Its sha256, as the policy names it (a test checks it still matches the script). It is a constant because this file also runs in the browser. */
-export const HEIGHT_SCRIPT_HASH = '/QxzRHGhEbVovuN6prREuWyD5P9DPc2sOhEP2J+zejY=';
+export const HEIGHT_SCRIPT_HASH = 'ArxBp97GE4jhLvQvGIa+UXBHce8Y7gAZcyOGCS5ENyI=';
 
 /** Text that is safe between tags and inside a quoted value. */
 const escapeText = (text: string): string =>
@@ -23,6 +23,26 @@ const documents = new Marked({
     html: (html: string) => escapeText(html),
   },
 });
+
+/**
+ * How a document looks on paper: white, the table fitted to the page, cells that wrap. The same rules are used twice: for
+ * real, in the print styles, and under `.paper`, a hidden copy of the document laid out at the width of a page, which the
+ * script measures so the page knows the printed height before anything is printed. Both can never drift apart.
+ */
+function printRules(scope: string): string {
+  const on = (selectors: string[], rules: string) => `  ${selectors.map((selector) => `${scope} ${selector}`.trim()).join(', ')} { ${rules} }`;
+  return [
+    on(['a'], 'color: #1d4ed8;'),
+    on(['code', 'pre'], 'background: #f3f4f6; color: #111; border-color: #d1d5db;'),
+    on(['blockquote'], 'color: #444;'),
+    on(['table'], 'display: table; width: 100%; overflow: visible; font-size: 10pt;'),
+    on(['th', 'td'], 'white-space: normal; overflow-wrap: break-word; border-color: #9ca3af;'),
+    on(['th'], 'background: #e5e7eb;'),
+    on(['thead'], 'display: table-header-group;'),
+    on(['tr', 'img', 'pre'], 'break-inside: avoid;'),
+    on(['h1', 'h2', 'h3', 'h4'], 'break-after: avoid;'),
+  ].join('\n');
+}
 
 /**
  * A document for the public link page: the Markdown drawn as HTML, in a page of its own that the page shows in an iframe
@@ -49,10 +69,12 @@ th, td { border: 1px solid #2a2638; padding: 6px 10px; text-align: left; vertica
 img { max-width: 100%; height: auto; } hr { border: 0; border-top: 1px solid #2a2638; }
 @media print {
   body { background: #fff; color: #111; padding: 0; font-size: 12pt; }
-  a { color: #1d4ed8; } code, pre { background: #f3f4f6; color: #111; border-color: #d1d5db; } blockquote { color: #444; }
-  table { display: table; width: 100%; overflow: visible; font-size: 10pt; }
-  th, td { white-space: normal; overflow-wrap: break-word; border-color: #9ca3af; } th { background: #e5e7eb; }
-  thead { display: table-header-group; } tr, img, pre { break-inside: avoid; } h1, h2, h3, h4 { break-after: avoid; }
+${printRules('')}
+  .paper { display: none; }
 }
-</style><script>${HEIGHT_SCRIPT}</script></head><body>${html}</body></html>`;
+/* A copy of the document laid out as paper (about the width of a page, never shown), only to measure its printed height. */
+.paper { position: fixed; top: 0; left: -10000px; width: 680px; visibility: hidden; pointer-events: none; font-size: 12pt; }
+.paper > :first-child { margin-top: 0; }
+${printRules('.paper')}
+</style><script>${HEIGHT_SCRIPT}</script></head><body>${html}<div id="paper" class="paper" aria-hidden="true">${html}</div></body></html>`;
 }
