@@ -435,6 +435,42 @@ run('Post-0.5.0: a pause during a take-over leader\'s stop waits for the compute
       expect(tries).toHaveBeenCalledTimes(3);
     });
 
+    it('Sentry on #1040: a caller that does not retry timeouts (a renewal) gets a timed-out try at once, after ONE try; a busy row is still retried, and so is a wait that timed out (it IS the row being held)', async () => {
+      const sara = await owner('notimeoutretry');
+      const busy = () => new Error('could not obtain lock on row in relation "brick_computers"');
+      const timedOut = jest.fn().mockRejectedValue(timeout());
+      expect(isTransactionTimeout(await pauseWhenRowFree(sara.brickId, NOW, timedOut, { retryTimeouts: false }).catch((error: unknown) => error))).toBe(true);
+      expect(timedOut).toHaveBeenCalledTimes(1);
+      const rowBusy = jest.fn().mockRejectedValueOnce(busy()).mockResolvedValueOnce('paused');
+      expect(await pauseWhenRowFree(sara.brickId, NOW, rowBusy, { retryTimeouts: false })).toBe('paused');
+      expect(rowBusy).toHaveBeenCalledTimes(2);
+      // The wait that follows a busy row times out once: it is one more try used, and the pause goes on
+      let waits = 0;
+      const realTransaction = prisma.$transaction.bind(prisma);
+      jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => (++waits === 1 ? Promise.reject(timeout()) : (realTransaction as (...a: unknown[]) => unknown)(...args))) as never);
+      try {
+        const afterWait = jest.fn().mockRejectedValueOnce(busy()).mockResolvedValueOnce('paused');
+        expect(await pauseWhenRowFree(sara.brickId, NOW, afterWait, { retryTimeouts: false })).toBe('paused');
+        expect(afterWait).toHaveBeenCalledTimes(2);
+      } finally {
+        jest.restoreAllMocks();
+      }
+    });
+
+    it('Sentry on #1040: a renewal whose transaction times out (the job\'s lock or the shared meter lock was slow, not the computer\'s row) fails after ONE try, as before the retry existed; it never loops', async () => {
+      const { job } = await running('renewtimeout');
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation((() => Promise.reject(timeout())) as never);
+      let failed: unknown;
+      try {
+        failed = await renewJob(job.id, new Date(job.stretchStarted!.getTime() + 60_000)).catch((error: unknown) => error);
+      } finally {
+        const asked = spy.mock.calls.length;
+        jest.restoreAllMocks();
+        expect(asked).toBe(1);
+      }
+      expect(isTransactionTimeout(failed)).toBe(true);
+    });
+
     it('Sentry on #1040: waits that keep timing out are bounded by the same count: the last error is thrown, never an endless loop', async () => {
       const sara = await owner('waitforever');
       jest.spyOn(prisma, '$transaction').mockImplementation((() => Promise.reject(timeout())) as never);

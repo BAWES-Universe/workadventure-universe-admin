@@ -2516,7 +2516,8 @@ export async function renewJob(
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
-  const decided = await pauseWhenRowFree(first.botId, now, decide);
+  // A renewal retries only a busy computer row, never a timeout: its timeouts are the job's lock or the shared meter lock, and the runner gives up at 8 s and asks again (Sentry on #1040; the pauses keep retrying both)
+  const decided = await pauseWhenRowFree(first.botId, now, decide, { retryTimeouts: false });
   if (decided.kind === 'over') {
     const again = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
     return again && isOver(again.status) && again.endedBy === 'unanswered' ? { ok: false, reason: 'unanswered' } : { ok: false, reason: 'over' };
@@ -4213,6 +4214,8 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (holders > 0) return false;
     const provider = providerFor(row);
     if (!provider || !row.providerRef) return false;
+    // A cold-storage return is left to its own claim whole: no copy (it would save the half-restored home folder as the newest copy, and `dropColdCopiesIfNewer` could then delete the cold copy being restored), no stop, the hold stays (Opus on #1040; the same rule as `stopComputerWork`)
+    if (row.packStage === 'returning') return false;
     // A cold-storage return (`restoring` with its stage `returning`) does not beat this row (it beats its own claim) and is never taken for an abandoned wake: it is left to its own claim, as in the sweep's `stopAbandonedWakes` (Sentry on #1040)
     const abandoned = (row.machine === 'waking' || row.machine === 'restoring') && row.packStage !== 'returning' && Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)

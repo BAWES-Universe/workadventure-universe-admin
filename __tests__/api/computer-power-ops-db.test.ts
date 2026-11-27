@@ -608,16 +608,23 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).machine).toBe('waking');
     });
 
-    it('Sentry on #1040: a turn hold on a cold-storage return (`restoring`, stage `returning`) with a stale row beat is not taken for an abandoned wake: nothing is stopped, the hold stays, the return is untouched (it beats its own claim, not the row)', async () => {
+    it('Sentry on #1040: a turn hold on a cold-storage return (`restoring`, stage `returning`) with a stale row beat is not taken for an abandoned wake, and is not copied either: nothing is stopped or saved, the hold stays, the return is untouched (it beats its own claim, not the row)', async () => {
       const sara = await owner('hold-returning');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
       await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', packStage: 'returning', turnUnprovenSince: NOW } });
       await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ((NOW() AT TIME ZONE 'UTC') - interval '10 minutes') WHERE "bot_id" = ${sara.brickId}`;
+      // The machine is awake and an older copy is on record: a return is not copied (the half-restored home folder would become the newest copy) and the copy's date does not move
+      const savedAt = new Date('2026-01-01T00:00:00.000Z');
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesSavedAt: savedAt } });
+      expect(await fake.awake(sara.ref)).toBe(true);
       const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      const savesBefore = fake.calls.filter((call) => call.name === 'saveFiles').length;
       const epoch = (await machineOf(sara)).wakeEpoch;
       expect(await settleTurnHold(sara.brickId)).toBe(false);
       expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(fake.calls.filter((call) => call.name === 'saveFiles').length).toBe(savesBefore);
+      expect((await machineOf(sara)).filesSavedAt?.getTime()).toBe(savedAt.getTime());
       expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
       expect(await machineOf(sara)).toMatchObject({ machine: 'restoring', packStage: 'returning', wakeEpoch: epoch });
       expect((await machineOf(sara)).turnUnprovenSince).not.toBeNull();

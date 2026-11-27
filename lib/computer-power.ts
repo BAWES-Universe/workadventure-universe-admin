@@ -110,13 +110,16 @@ export function setRowRetryBudgetForTests(ms: number | null): void {
  * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives a `clock`: the caller's `now` moved on by the real time spent since the ask, for the pause to read once it holds its locks (Sentry and CodeRabbit on #1040: a stretch ended at
  * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
  */
-export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock: () => Date) => Promise<T>): Promise<T> {
+export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock: () => Date) => Promise<T>, options: { retryTimeouts?: boolean } = {}): Promise<T> {
+  // A try that timed out (P2028) is retried unless the caller says otherwise: a renewal's timeout is the job's lock or the shared meter lock being slow, not the computer's row (that is taken without waiting and yields as `isRowBusy`), and
+  // its runner has long given up and asks again, so retrying it would pile retriers onto the shared lock (Sentry on #1040). The waits for the row below are always retried: a wait that timed out IS the row being held
+  const retryTimeouts = options.retryTimeouts !== false;
   const began = Date.now();
   // Read by the pause once it holds every lock it needs (`decidePauseIn`), so a wait for the job's lock counts too, not only the wait for the row
   // Moved on in whole seconds only (the books count whole seconds, and the few milliseconds of an ordinary pause that waited for nothing are not a wait: a pause that did not wait keeps the caller's time exactly)
   const clock = () => new Date(now.getTime() + Math.floor((Date.now() - began) / 1000) * 1000);
   // An error that is not a busy row or a timeout is the caller's at once; so is the last one of a pause that used its time or its count up
-  const giveUp = (error: unknown, attempt: number) => !(isTransactionTimeout(error) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs;
+  const giveUp = (error: unknown, attempt: number, waiting = false) => !(((retryTimeouts || waiting) && isTransactionTimeout(error)) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs;
   for (let attempt = 1; ; attempt++) {
     try {
       return await run(clock);
@@ -127,7 +130,7 @@ export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock:
       await untilRowFree(botId);
     } catch (error) {
       // The wait itself can time out (a second leader's hold right behind the first, past the wait): it wrote nothing, so it is one more try used, and the pause goes on within the same time and count (Sentry on #1040)
-      if (giveUp(error, attempt)) throw error;
+      if (giveUp(error, attempt, true)) throw error;
     }
   }
 }
