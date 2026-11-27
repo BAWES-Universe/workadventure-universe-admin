@@ -51,15 +51,18 @@ import {
   detailsKey,
   dismissComputerNotice,
   finishJob,
+  finishJobUnder,
   giveComputer,
   handBack,
   isWindingDown,
   liftWindDown,
   planEffect,
+  recordFinishIntent,
   renewJob,
   getJob,
   reportProgress,
   requestHandover,
+  requestHandoverAs,
   settleEffect,
   startJob,
   startedJobFor,
@@ -1007,17 +1010,22 @@ run('a Brick’s computer, in a real database', () => {
       expect((await currentEnvelope(minutes(2))).reservedMicros).toBe(0);
     });
 
-    it('taking over steps in on every job working on the machine (readers run side by side): none is left running under Brick', async () => {
+    it('taking over while two readers work side by side is refused as shared (the keyboard rule, GPT audit finding 5): nothing moves, control stays Brick’s, both keep running', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W', writes: false }, NOW);
-      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'R', writes: false }, NOW);
-      if (!writer.ok || !reader.ok) throw new Error('no');
-      expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W', writes: false }, NOW);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'R', writes: false }, NOW);
+      if (!first.ok || !second.ok) throw new Error('no');
+      const before = await prisma.computerJob.findMany({ where: { botId: sara.brickId }, orderBy: { createdAt: 'asc' } });
+      expect(await takeOver(sara.brickId, sara.id, minutes(1))).toEqual({ ok: false, reason: 'shared' });
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId }, orderBy: { createdAt: 'asc' } });
-      expect(jobs.map((job) => [job.status, job.control])).toEqual([['waiting', 'person'], ['waiting', 'person']]);
-      await handBack(sara.brickId, sara.id);
-      expect((await prisma.computerJob.findMany({ where: { botId: sara.brickId } })).map((job) => job.status)).toEqual(['running', 'running']);
+      expect(jobs.map((job) => [job.status, job.control, job.writes])).toEqual([['running', 'brick', false], ['running', 'brick', false]]);
+      // Not fenced either: no key ended, no control number moved, the machine was not touched
+      expect(jobs.map((job) => [job.controlGeneration, job.leaseVersion])).toEqual(before.map((job) => [job.controlGeneration, job.leaseVersion]));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).controlState).toBe('agent');
+      // Once one job is left, the person can take over that one
+      await finishJob(second.job.id, 'done', minutes(2));
+      expect((await takeOver(sara.brickId, sara.id, minutes(3))).ok).toBe(true);
     });
 
     it('the sweep rests a machine that works while nobody holds it, and writes a job’s computer time the books missed', async () => {
@@ -1377,23 +1385,29 @@ run('a Brick’s computer, in a real database', () => {
       return { sara, jobId: job.job.id };
     }
 
-    it('nothing starts under Brick’s hands while the person has the machine: a job asked for then waits until they hand back', async () => {
+    it('nothing starts under Brick’s hands while the person has the machine, and a job the person had stays alone on it until it ends (GPT audit finding 5)', async () => {
       const { sara, jobId } = await waitingJob(false);
       await takeOver(sara.brickId, sara.id);
+      // The one job on the computer became a writer when the person took it: whatever they typed stays in a browser no other job works in
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'waiting', control: 'person', writes: true });
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(1));
       expect(reader.ok && reader.job.status).toBe('queued');
       await sweepComputers(minutes(2));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'queued' });
       await handBack(sara.brickId, sara.id);
       await sweepComputers(minutes(3));
+      // Handed back, the job runs as a writer: the reader still waits its turn
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', control: 'brick', writes: true });
+      // It ends, its browser is cleared, and the reader goes on
+      await finishJob(jobId, 'done', minutes(4));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'running' });
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', control: 'brick' });
     });
 
-    it('a take over that found nothing running, with a job starting before it moves the waiting one, still leaves nothing under Brick’s hands', async () => {
-      // The waiting job only reads: a read-only job may start beside it (a waiting WRITER would keep the injected reader out of admission, and the race would never happen)
+    it('a take over that found nothing running, with a job starting before it moves the waiting one, still leaves nothing under Brick’s hands, and the job that was starting waits in line', async () => {
+      // The waiting job only reads and waits for an answer in words (a wait that needs the computer to itself would make it a writer, keep the injected reader out of admission, and the race would never happen)
       const { sara, jobId } = await waitingJob(false);
-      await requestHandover(jobId, 'details', minutes(1));
+      await requestHandover(jobId, 'answer', minutes(1));
       // The reader's start is admitted (the machine is Brick's) and stands at its claim of the machine, where it waits for the Brick's line lock that a fixture transaction holds: the take over then runs from start to end, looks for
       // running jobs and finds none, and only then does the claim go on and the reader run
       let locked: () => void = () => undefined;
@@ -1447,14 +1461,15 @@ run('a Brick’s computer, in a real database', () => {
         release();
         await Promise.allSettled([holder, reading]);
       }
-      // The reader's claim now goes through (it was started: not refused, not left in line), and it joins the person instead of running under Brick's hands
+      // The reader's claim now goes on, finds the computer is the person's and the job they have is a writer (the keyboard rule made it one), and waits in line: it never joins them (GPT audit finding 5)
       const read = await reading;
       if (!read.ok) throw new Error('the injected reader was refused');
-      expect(read.job.status).toBe('waiting');
+      expect(read.job.status).toBe('queued');
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
       expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
-      expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', control: 'person' });
-      expect(jobs.find((job) => job.id === read.job.id)).toMatchObject({ status: 'waiting', control: 'person' });
+      expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', control: 'person', writes: true });
+      expect(jobs.find((job) => job.id === read.job.id)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+      expect(jobs.filter((job) => job.control === 'person')).toHaveLength(1);
     });
 
     it('a take over and a job starting at the same moment never leave a job running under Brick’s hands while the person has the machine', async () => {
@@ -1521,16 +1536,24 @@ run('a Brick’s computer, in a real database', () => {
       expect(detailsKey('A', 'B')).toEqual(detailsKey('A', 'B'));
     });
 
-    it('with two jobs in the person’s hands after a take over, the tap goes to the one that named something, even when an older one named nothing (readers run side by side)', async () => {
+    /**
+     * Two jobs in the person's hands can no longer be made (the keyboard rule, GPT audit finding 5), but a computer taken over before it may still have them: such a state is seeded directly, so the tap keeps its
+     * rule for it (the one that named what the screen showed, never the first from the database).
+     */
+    async function secondInTheirHands(sara: { id: string; brickId: string }, readyWhat: string | null = null, readyWhere: string | null = null, createdAt = new Date(NOW.getTime() - 60_000)) {
+      return prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Read', writes: false, status: 'waiting', control: 'person', startedAt: NOW, readyWhat, readyWhere, createdAt } });
+    }
+
+    it('with two jobs in the person’s hands after a take over, the tap goes to the one that named something, even when an older one named nothing (a state from before the keyboard rule)', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
       const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write', writes: false }, NOW);
-      if (!reader.ok || !writer.ok) throw new Error('no');
+      if (!writer.ok) throw new Error('no');
       const ready = { what: 'Your name', where: 'visa-portal.example' };
       await requestHandover(writer.job.id, 'details', minutes(1), ready);
-      await takeOver(sara.brickId, sara.id, minutes(2));
-      // The read-only job was only working: it is theirs now too, and named nothing
+      expect((await takeOver(sara.brickId, sara.id, minutes(2))).ok).toBe(true);
+      // An older read-only job in their hands too, that named nothing
+      const reader = { job: await secondInTheirHands(sara) };
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).toMatchObject({ status: 'waiting', control: 'person', readyWhat: null });
       const asked = await fillInDetails(sara.brickId, sara.id, ready);
       expect(asked.ok).toBe(true);
@@ -1538,64 +1561,51 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerEffect.count({ where: { jobId: reader.job.id } })).toBe(0);
     });
 
-    it('with two jobs that both named something, the tap goes to the one the screen showed', async () => {
+    it('with two jobs that both named something, the tap goes to the one the screen showed (a state from before the keyboard rule)', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
       const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write', writes: false }, NOW);
-      if (!reader.ok || !writer.ok) throw new Error('no');
+      if (!writer.ok) throw new Error('no');
       const first = { what: 'Your name', where: 'visa-portal.example' };
       const second = { what: 'Your passport number', where: 'other-portal.example' };
       await requestHandover(writer.job.id, 'details', minutes(1), first);
-      await requestHandover(reader.job.id, 'details', minutes(1), second);
-      await takeOver(sara.brickId, sara.id, minutes(2));
+      expect((await takeOver(sara.brickId, sara.id, minutes(2))).ok).toBe(true);
+      const reader = { job: await secondInTheirHands(sara, second.what, second.where) };
       expect((await fillInDetails(sara.brickId, sara.id, second)).ok).toBe(true);
       expect(await prisma.computerEffect.count({ where: { jobId: reader.job.id, state: 'approved' } })).toBe(1);
       expect(await prisma.computerEffect.count({ where: { jobId: writer.job.id } })).toBe(0);
     });
 
-    it('a job that joins the person while they hand back is not left in their hands with nobody to hand it back', async () => {
+    it('a job that took its place on the machine just before a take over makes the take over refuse as shared: nobody’s work is in the person’s hands, and both jobs work under Brick (GPT audit finding 5)', async () => {
+      // Before the keyboard rule this job joined the person and was handed back with the other one. Now the take over counts two jobs on the computer and moves nothing
       const { sara, jobId } = await waitingJob(false);
-      await requestHandover(jobId, 'details', minutes(1));
-      const originalCount = prisma.computerJob.count.bind(prisma.computerJob);
+      await requestHandover(jobId, 'answer', minutes(1));
       const originalTransaction = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
-      // Only the job starting is looked at: the take over and the hand back the test makes in between look at the same rows themselves
       let acting = false;
-      let tookOver = false;
+      let tookOver: Awaited<ReturnType<typeof takeOver>> | null = null;
       // The job has just taken its place on the machine (its claim committed, one job claimed): the person takes over now, so the job's own check for them came too early
       const update = jest.spyOn(prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
         const out = (await originalTransaction(...args)) as { ok?: boolean; count?: number } | null;
         if (!acting && !tookOver && out && out.ok === true && out.count === 1) {
-          tookOver = true;
           acting = true;
-          await takeOver(sara.brickId, sara.id, minutes(2));
+          tookOver = await takeOver(sara.brickId, sara.id, minutes(2));
           acting = false;
         }
         return out;
       }) as unknown as typeof prisma.$transaction);
-      let handedBack = false;
-      const count = jest.spyOn(prisma.computerJob, 'count').mockImplementation(((...args: Parameters<typeof originalCount>) => {
-        const where = (args[0]?.where ?? {}) as { status?: string; control?: string };
-        const result = originalCount(...args);
-        if (acting || !tookOver || handedBack || where.status !== 'waiting' || where.control !== 'person') return result;
-        handedBack = true;
-        // It claimed its place and saw the person had the machine: the person hands back now
-        return result.then(async (found) => {
-          acting = true;
-          await handBack(sara.brickId, sara.id);
-          acting = false;
-          count.mockRestore();
-          return found;
-        });
-      }) as typeof prisma.computerJob.count);
-      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
-      update.mockRestore();
-      count.mockRestore();
+      let reader: Awaited<ReturnType<typeof startJob>>;
+      try {
+        reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
+      } finally {
+        update.mockRestore();
+      }
       expect(reader.ok).toBe(true);
-      expect(handedBack).toBe(true);
+      expect(tookOver).toEqual({ ok: false, reason: 'shared' });
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
-      expect(jobs.filter((job) => job.status === 'waiting' && job.control === 'person')).toEqual([]);
-      expect(jobs.filter((job) => job.status === 'running').length).toBe(2);
+      expect(jobs.filter((job) => job.control === 'person')).toEqual([]);
+      expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', waitingFor: 'answer', control: 'brick', writes: false });
+      expect(jobs.find((job) => reader.ok && job.id === reader.job.id)).toMatchObject({ status: 'running', control: 'brick' });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).controlState).toBe('agent');
     });
 
     it('a tap from a page that showed nothing approves nothing', async () => {
@@ -1756,6 +1766,443 @@ run('a Brick’s computer, in a real database', () => {
       const { jobId } = await waitingJob();
       await finishJob(jobId, 'done', minutes(1));
       expect(await planEffect(jobId, { key: 'k', kind: 'send' })).toEqual({ ok: false, reason: 'job_over' });
+    });
+  });
+
+  describe('the computer to itself while the person signs in (GPT audit finding 5)', () => {
+    /** Two jobs that only read, working side by side on one computer. */
+    async function twoReaders() {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      // The job beside it has a title and a person of its own that must never reach the asking job's runner
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Tom’s bank statements', writes: false }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no');
+      expect([a.job.status, b.job.status]).toEqual(['running', 'running']);
+      return { sara, a: a.job.id, b: b.job.id };
+    }
+    async function oneReader() {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      if (!a.ok) throw new Error('no');
+      return { sara, a: a.job.id };
+    }
+    const row = (id: string) => prisma.computerJob.findUniqueOrThrow({ where: { id } });
+    /** What a refused hand-over must leave as it was. */
+    const kept = (job: Awaited<ReturnType<typeof row>>) => ({
+      status: job.status,
+      waitingFor: job.waitingFor,
+      control: job.control,
+      writes: job.writes,
+      handoverSeq: job.handoverSeq,
+      leaseVersion: job.leaseVersion,
+      handoverUntold: job.handoverUntold,
+      secondsRun: job.secondsRun,
+      stretchStarted: job.stretchStarted,
+      readyWhat: job.readyWhat,
+    });
+
+    it('a reader alone that asks for a sign-in becomes a writer in the write that lands the wait, and a job asked for after it waits its turn', async () => {
+      const { sara, a } = await oneReader();
+      const before = await row(a);
+      expect((await requestHandoverAs(a, 'signin', minutes(1))).refused).toBeNull();
+      expect(await row(a)).toMatchObject({ status: 'waiting', waitingFor: 'signin', control: 'brick', writes: true, handoverSeq: before.handoverSeq + 1, handoverUntold: true });
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(2));
+      expect(b.ok && b.job.status).toBe('queued');
+      expect(await row(b.ok ? b.job.id : '')).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+      await sweepComputers(minutes(3));
+      expect(await row(b.ok ? b.job.id : '')).toMatchObject({ status: 'queued' });
+    });
+
+    it('a reader that asks for a sign-in while another job works beside it is refused as browser_shared: nothing about it changes, and nothing about the other job is said', async () => {
+      const { a, b } = await twoReaders();
+      const before = kept(await row(a));
+      const done = await requestHandoverAs(a, 'signin', minutes(1), null, { epoch: 0, generation: 0 });
+      expect(done.refused).toBe('browser_shared');
+      expect(kept(await row(a))).toEqual(before);
+      expect(await row(b)).toMatchObject({ status: 'running', writes: false });
+      // The answer is the asking job's own view: no other job's title, person or count
+      expect(done.job?.id).toBe(a);
+      expect(JSON.stringify(done.job)).not.toContain('Tom’s bank statements');
+      expect(JSON.stringify(done.job)).not.toContain(b);
+    });
+
+    it('details, an upload, paying and submitting need the computer to itself just as a sign-in does; an answer in words does not', async () => {
+      for (const kind of ['details', 'upload', 'pay', 'submit'] as const) {
+        const alone = await oneReader();
+        expect((await requestHandoverAs(alone.a, kind, minutes(1))).refused).toBeNull();
+        expect(await row(alone.a)).toMatchObject({ status: 'waiting', waitingFor: kind, writes: true });
+        const shared = await twoReaders();
+        const before = kept(await row(shared.a));
+        expect((await requestHandoverAs(shared.a, kind, minutes(1))).refused).toBe('browser_shared');
+        expect(kept(await row(shared.a))).toEqual(before);
+      }
+      // A question in words lands beside a reader as before, and the job stays a reader
+      const { a, b } = await twoReaders();
+      expect((await requestHandoverAs(a, 'answer', minutes(1))).refused).toBeNull();
+      expect(await row(a)).toMatchObject({ status: 'waiting', waitingFor: 'answer', writes: false });
+      expect(await row(b)).toMatchObject({ status: 'running' });
+    });
+
+    it('a job already waiting for an answer that then asks for a sign-in becomes a writer when it is alone, and is refused (still waiting for its answer) when it is not', async () => {
+      const alone = await oneReader();
+      await requestHandoverAs(alone.a, 'answer', minutes(1));
+      expect(await row(alone.a)).toMatchObject({ status: 'waiting', waitingFor: 'answer', writes: false });
+      expect((await requestHandoverAs(alone.a, 'signin', minutes(2))).refused).toBeNull();
+      expect(await row(alone.a)).toMatchObject({ status: 'waiting', waitingFor: 'signin', writes: true });
+
+      const shared = await twoReaders();
+      await requestHandoverAs(shared.a, 'answer', minutes(1));
+      const before = kept(await row(shared.a));
+      expect((await requestHandoverAs(shared.a, 'signin', minutes(2))).refused).toBe('browser_shared');
+      expect(kept(await row(shared.a))).toEqual(before);
+      expect(before).toMatchObject({ waitingFor: 'answer', writes: false });
+    });
+
+    it('a worker that no longer owns the job is told so, not browser_shared (it must stop, not ask again later)', async () => {
+      const { a } = await twoReaders();
+      expect((await requestHandoverAs(a, 'signin', minutes(1), null, { epoch: 7 })).refused).toBe('superseded');
+    });
+
+    it('a job that already writes asks as before', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const w = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W' }, NOW);
+      if (!w.ok) throw new Error('no');
+      expect((await requestHandoverAs(w.job.id, 'signin', minutes(1))).refused).toBeNull();
+      expect(await row(w.job.id)).toMatchObject({ status: 'waiting', waitingFor: 'signin', writes: true });
+      expect((await requestHandoverAs(w.job.id, 'answer', minutes(2))).refused).toBeNull();
+      expect(await row(w.job.id)).toMatchObject({ status: 'waiting', waitingFor: 'answer', writes: true });
+    });
+
+    it('a hand-over waits for a claim that holds the computer’s row, then sees the job it put on the machine and is refused: never a sign-in beside a running job', async () => {
+      const { sara, a } = await oneReader();
+      // A claim in the middle of its transaction: it holds the computer's row (FOR UPDATE) and is about to put a job on the machine
+      let locked: () => void = () => undefined;
+      const gotLock = new Promise<void>((resolve) => (locked = resolve));
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      let claimedId = '';
+      const claim = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await hold;
+          claimedId = (await tx.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'B', writes: false, status: 'running', startedAt: NOW } })).id;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      await gotLock;
+      let answered = false;
+      const asking = requestHandoverAs(a, 'signin', minutes(1)).then((done) => {
+        answered = true;
+        return done;
+      });
+      // The hand-over does not decide while the claim holds the row
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(answered).toBe(false);
+      release();
+      await claim;
+      expect((await asking).refused).toBe('browser_shared');
+      expect(await row(a)).toMatchObject({ status: 'running', writes: false });
+      expect(await row(claimedId)).toMatchObject({ status: 'running' });
+    });
+
+    it('a hand-over and a reader’s start at the same moment never leave a job waiting for a sign-in with another job running beside it', async () => {
+      for (let round = 0; round < 6; round++) {
+        const { sara, a } = await oneReader();
+        const [asked, b] = await Promise.all([requestHandoverAs(a, 'signin', minutes(1)), startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1))]);
+        if (!b.ok) throw new Error('the reader was refused');
+        const [jobA, jobB] = [await row(a), await row(b.job.id)];
+        // Either the sign-in landed first and the reader waits its turn, or the reader came first and the sign-in is refused
+        if (asked.refused === null) {
+          expect(jobA).toMatchObject({ status: 'waiting', waitingFor: 'signin', writes: true });
+          expect(jobB).toMatchObject({ status: 'queued' });
+        } else {
+          expect(asked.refused).toBe('browser_shared');
+          expect(jobA).toMatchObject({ status: 'running', writes: false });
+          expect(jobB).toMatchObject({ status: 'running' });
+        }
+      }
+    });
+
+    it('a reader held at its claim when the sign-in lands waits its turn once it goes on', async () => {
+      const { sara, a } = await oneReader();
+      let locked: () => void = () => undefined;
+      const gotLock = new Promise<void>((resolve) => (locked = resolve));
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${sara.brickId}`}, 0))`;
+          locked();
+          await hold;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      let reading: ReturnType<typeof startJob> = Promise.resolve({ ok: false, reason: 'off' });
+      try {
+        await gotLock;
+        const met = new Promise<void>((resolve) => {
+          controlInternals.onLineBusy = (botId) => {
+            if (botId === sara.brickId) resolve();
+          };
+        });
+        reading = startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
+        await Promise.race([met, reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
+        expect((await requestHandoverAs(a, 'signin', minutes(1))).refused).toBeNull();
+      } finally {
+        controlInternals.onLineBusy = () => undefined;
+        release();
+        await Promise.allSettled([holder, reading]);
+      }
+      const b = await reading;
+      if (!b.ok) throw new Error('the reader was refused');
+      expect(b.job.status).toBe('queued');
+      expect(await row(a)).toMatchObject({ status: 'waiting', waitingFor: 'signin', writes: true });
+    });
+
+    it('two readers that ask for a sign-in at the same moment: at most one becomes a writer, and neither is an error', async () => {
+      for (let round = 0; round < 6; round++) {
+        const { sara, a, b } = await twoReaders();
+        const answers = await Promise.all([requestHandoverAs(a, 'signin', minutes(1)), requestHandoverAs(b, 'signin', minutes(1))]);
+        for (const answer of answers) expect([null, 'browser_shared']).toContain(answer.refused);
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, writes: true } })).toBeLessThanOrEqual(1);
+        // Each saw the other on the computer: neither landed
+        expect(answers.map((answer) => answer.refused)).toEqual(['browser_shared', 'browser_shared']);
+      }
+    });
+
+    it('end to end: the sign-in lands, the person takes over and hands back, a job asked for meanwhile waits, and the browser is cleared before it starts', async () => {
+      const { sara, a } = await oneReader();
+      expect((await requestHandoverAs(a, 'signin', minutes(1))).refused).toBeNull();
+      expect((await takeOver(sara.brickId, sara.id, minutes(2))).ok).toBe(true);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(3));
+      if (!b.ok) throw new Error('no');
+      expect(b.job.status).toBe('queued');
+      await handBack(sara.brickId, sara.id);
+      await sweepComputers(minutes(4));
+      expect(await row(a)).toMatchObject({ status: 'running', control: 'brick', writes: true });
+      expect(await row(b.job.id)).toMatchObject({ status: 'queued' });
+      // When the browser is cleared, the next job is still in line
+      let bWhenCleaned: string | null = null;
+      provider.execAnswer = async (command: string) => {
+        if (command === 'universe-clean') bWhenCleaned = (await row(b.job.id)).status;
+        return {};
+      };
+      await finishJob(a, 'done', minutes(5));
+      expect(bWhenCleaned).toBe('queued');
+      expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
+      expect(await row(b.job.id)).toMatchObject({ status: 'running' });
+    });
+
+    it('the keyboard rule: a take over with a job waiting for an answer and a reader working beside it is refused as shared', async () => {
+      const { sara, a, b } = await twoReaders();
+      await requestHandoverAs(a, 'answer', minutes(1));
+      expect(await takeOver(sara.brickId, sara.id, minutes(2))).toEqual({ ok: false, reason: 'shared' });
+      expect(await row(a)).toMatchObject({ status: 'waiting', control: 'brick', writes: false });
+      expect(await row(b)).toMatchObject({ status: 'running', control: 'brick', writes: false });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).controlState).toBe('agent');
+    });
+
+    it('the keyboard rule: a take over and a reader’s start at the same moment never put two jobs in the person’s hands, nor run a job while they have the screen', async () => {
+      for (let round = 0; round < 6; round++) {
+        const { sara, a } = await oneReader();
+        await requestHandoverAs(a, 'answer', minutes(1));
+        const [took, b] = await Promise.all([takeOver(sara.brickId, sara.id, minutes(2)), startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(2))]);
+        if (!b.ok) throw new Error('the reader was refused');
+        const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
+        const theirs = jobs.filter((job) => job.control === 'person');
+        expect(theirs.length).toBeLessThanOrEqual(1);
+        if (theirs.length === 1) {
+          expect(took.ok).toBe(true);
+          expect(theirs[0]).toMatchObject({ id: a, writes: true });
+          expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
+        } else {
+          expect(took).toEqual({ ok: false, reason: 'shared' });
+        }
+      }
+    });
+
+    it('no job is claimed onto the machine while the computer is changing hands, even one that looked before the change began', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const w = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W', writes: false }, NOW);
+      if (!w.ok) throw new Error('no');
+      let locked: () => void = () => undefined;
+      const gotLock = new Promise<void>((resolve) => (locked = resolve));
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${sara.brickId}`}, 0))`;
+          locked();
+          await hold;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      let reading: ReturnType<typeof startJob> = Promise.resolve({ ok: false, reason: 'off' });
+      try {
+        await gotLock;
+        const met = new Promise<void>((resolve) => {
+          controlInternals.onLineBusy = (botId) => {
+            if (botId === sara.brickId) resolve();
+          };
+        });
+        // The reader looked (the computer was Brick's) and stands at its claim
+        reading = startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
+        await Promise.race([met, reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
+        // A take over begins now (its first write: the computer's control)
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { controlState: 'fencing', controlEpoch: { increment: 1 }, controlLeaseUntil: minutes(60) } });
+      } finally {
+        controlInternals.onLineBusy = () => undefined;
+        release();
+        await Promise.allSettled([holder, reading]);
+      }
+      const b = await reading;
+      if (!b.ok) throw new Error('the reader was refused');
+      expect(b.job.status).toBe('queued');
+      expect(await row(b.job.id)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+    });
+
+    it('a job whose ending is already decided is not told browser_shared (it is not to ask again): the hand-over is refused with nothing to say, as before', async () => {
+      const { a } = await twoReaders();
+      expect(await recordFinishIntent(a, { outcome: 'failed', cause: 'agent', why: null, turns: null, run: null, generation: 0, epoch: 0 })).toMatchObject({ ok: true });
+      const before = kept(await row(a));
+      expect((await requestHandoverAs(a, 'signin', minutes(1))).refused).toBeNull();
+      expect(kept(await row(a))).toEqual(before);
+    });
+
+    describe('the runner gives up after 10 minutes of browser_shared: the try is given back free once Orbit’s records bear it out', () => {
+      const busy = 'The computer stayed busy with other work, so I couldn’t hand it to you to sign in.';
+      const giveUp = (jobId: string, at: Date, cause: 'ours' | 'agent' = 'ours') => finishJobUnder(jobId, null, 'failed', at, busy, cause, null, 'run-1', undefined, 'browser_shared');
+      const decision = (jobId: string) => prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
+
+      it('another job still on the computer: given back as Orbit’s own fault, never counted against the person', async () => {
+        const { a, b } = await twoReaders();
+        expect((await requestHandoverAs(a, 'signin', minutes(1))).refused).toBe('browser_shared');
+        expect((await giveUp(a, minutes(11))).stale).toBe(false);
+        expect(await row(a)).toMatchObject({ status: 'failed', endedBy: 'error', runnerFault: false, endNote: busy });
+        expect(await decision(a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared', causeHint: 'ours' });
+        expect(await row(b)).toMatchObject({ status: 'running' });
+      });
+
+      it('free even when the person’s goodwill for the month is used up', async () => {
+        await seedGiveBackLimits({ goodwillPerPersonPerMonth: 1 });
+        const { sara, a } = await twoReaders();
+        // A give-back from goodwill already this month: the bound of one is reached
+        await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Earlier', status: 'failed', endedBy: 'error', runnerFault: true, startedAt: NOW, endedAt: NOW } });
+        await giveUp(a, minutes(11));
+        expect(await decision(a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared' });
+        expect(await row(a)).toMatchObject({ endedBy: 'error', runnerFault: false });
+      });
+
+      it('another job that ended during the wait still bears it out; one that ended long before does not', async () => {
+        const within = await twoReaders();
+        await finishJob(within.b, 'done', minutes(5));
+        await giveUp(within.a, minutes(11));
+        expect(await decision(within.a)).toMatchObject({ basis: 'orbit_fault', reason: 'browser_shared' });
+
+        const before = await twoReaders();
+        await finishJob(before.b, 'done', minutes(1));
+        await giveUp(before.a, minutes(30));
+        expect(await decision(before.a)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('the runner’s word alone is not enough: alone on the computer, or a writer (never refused as shared), it is judged as any failure of ours', async () => {
+        const alone = await oneReader();
+        await giveUp(alone.a, minutes(11));
+        const lone = await decision(alone.a);
+        expect(lone).not.toBeNull();
+        expect(lone).not.toMatchObject({ basis: 'orbit_fault' });
+
+        // A writer, with another job that was on the computer just before it (within the window): only the writer check can refuse it
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const r = await startJob({ botId: sara.brickId, personId: sara.id, title: 'R', writes: false }, NOW);
+        const w = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W' }, NOW);
+        if (!r.ok || !w.ok) throw new Error('no');
+        await finishJob(r.job.id, 'done', minutes(1));
+        expect(await row(w.job.id)).toMatchObject({ status: 'running', writes: true });
+        await giveUp(w.job.id, minutes(11));
+        expect(await decision(w.job.id)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('a reader that delivered something, or has a send still unconfirmed, is judged by the normal rule, never given back free around it (Opus on #1057, M1)', async () => {
+        const delivered = await twoReaders();
+        expect(await planEffect(delivered.a, { key: 'mail-1', kind: 'send' })).toEqual({ ok: true, already: false });
+        expect(await settleEffect(delivered.a, 'mail-1', 'done', 'sent')).toBe(true);
+        await giveUp(delivered.a, minutes(11));
+        expect(await decision(delivered.a)).toMatchObject({ state: 'refused', basis: 'delivered' });
+
+        const unconfirmed = await twoReaders();
+        expect(await planEffect(unconfirmed.a, { key: 'mail-2', kind: 'send' })).toEqual({ ok: true, already: false });
+        await giveUp(unconfirmed.a, minutes(11));
+        expect(await decision(unconfirmed.a)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+      });
+
+      it('free only up to the give-back bound a month: past it the next one is judged as any failure of ours, and an earlier month does not count (Opus on #1057, M2)', async () => {
+        await seedGiveBackLimits({ goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const pair = async (at: Date) => {
+          const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, at);
+          const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, at);
+          if (!a.ok || !b.ok) throw new Error('no');
+          expect([a.job.status, b.job.status]).toEqual(['running', 'running']);
+          return { a: a.job.id, b: b.job.id };
+        };
+        const first = await pair(NOW);
+        await giveUp(first.a, minutes(11));
+        expect(await decision(first.a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared' });
+        expect(await row(first.a)).toMatchObject({ runnerFault: false });
+        await finishJob(first.b, 'done', minutes(12));
+
+        const second = await pair(minutes(13));
+        await giveUp(second.a, minutes(24));
+        expect(await decision(second.a)).not.toMatchObject({ basis: 'orbit_fault' });
+        await finishJob(second.b, 'done', minutes(25));
+
+        // The free one counted is from another month: the bound starts again
+        const lastMonth = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 1) - 60_000);
+        await prisma.computerJob.update({ where: { id: first.a }, data: { endedAt: lastMonth } });
+        const third = await pair(minutes(26));
+        await giveUp(third.a, minutes(37));
+        expect(await decision(third.a)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'browser_shared' });
+      });
+
+      it('with no give-back bound readable from Limits, nothing is free on this basis: it is judged as any failure of ours', async () => {
+        await clearGiveBackLimits();
+        const { a } = await twoReaders();
+        await giveUp(a, minutes(11));
+        expect(await decision(a)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('the job beside must overlap this job’s own life: one that ended before it started bears nothing out, even inside the window', async () => {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        if (!b.ok) throw new Error('no');
+        await finishJob(b.job.id, 'done', minutes(1));
+        const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, minutes(2));
+        if (!a.ok) throw new Error('no');
+        expect(await row(a.job.id)).toMatchObject({ status: 'running' });
+        await giveUp(a.job.id, minutes(11));
+        expect(await decision(a.job.id)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('a failure as ours that names no basis is judged as before, whoever is beside it', async () => {
+        const { a } = await twoReaders();
+        await finishJobUnder(a, null, 'failed', minutes(11), 'It broke', 'ours', null, 'run-1');
+        expect(await decision(a)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
+
+      it('the basis counts only with cause ours: an ending the runner calls the agent’s is not made free by it', async () => {
+        const { a } = await twoReaders();
+        await giveUp(a, minutes(11), 'agent');
+        expect(await decision(a)).not.toMatchObject({ basis: 'orbit_fault' });
+      });
     });
   });
 

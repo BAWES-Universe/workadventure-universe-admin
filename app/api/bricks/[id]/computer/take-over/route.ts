@@ -15,6 +15,8 @@ export const OPTIONS = optionsFor;
  * The honest check (post 0.5.0, 1B): when a program the agent left behind is still running and the fence could not stop it, nothing is stopped and the answer is
  * 409 `stillRunning` (with `restartOffered`: whether "Restart first" can still be offered for this ask). The person then restarts (`/restart`) or asks again with `anyway: true`,
  * which goes on with it running; the computer says so until the hand back. A check that passed says nothing. No program is named.
+ *
+ * The keyboard rule (GPT audit finding 5): the person takes over only while ONE job is on the computer. With more than one the answer is 409 `shared` and nothing is moved; no job, title or person is named.
  */
 export const POST = (request: NextRequest, { params }: { params: Promise<{ id: string }> }) =>
   asOwner(request, params, async (id, ownerId) => {
@@ -24,6 +26,8 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
     if (control.reason === 'not_found') return notFound(request);
     if (control.reason === 'in_progress') return brickJson(request, { error: 'The computer is still changing hands. Try again in a moment.', reason: 'in_progress', inProgress: true }, 409);
     if (control.reason === 'still_running') return brickJson(request, { error: 'A program is still running on this computer.', reason: 'still_running', stillRunning: true, restartOffered: await restartOffered(id) }, 409);
+    // More than one job is on the computer (GPT audit finding 5, rule K): nothing was moved. No job, title or person is named
+    if (control.reason === 'shared') return brickJson(request, { error: 'Brick is doing more than one job on this computer right now. You can take over once it is doing one.', reason: 'shared', shared: true }, 409);
     if (control.reason === 'not_secured') return brickJson(request, { error: 'Couldn’t get the computer ready. Nothing was changed on it. Try again.', reason: 'not_secured', notSecured: true }, 409);
     return brickJson(request, { error: 'Nothing is waiting for you' }, 409);
   });
