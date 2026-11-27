@@ -135,7 +135,7 @@ describe('the public artifact page', () => {
     expect(HEIGHT_SCRIPT).toMatch(/addEventListener\('DOMContentLoaded',function\(\)\{[^}]*ResizeObserver/);
     expect(HEIGHT_SCRIPT).toContain("addEventListener('message'");
     expect(HEIGHT_SCRIPT).toContain('e.source===parent');
-    expect(HEIGHT_SCRIPT).toContain('[360,480,600,720,840]');
+    expect(HEIGHT_SCRIPT).toContain('[180,240,300,360,480,600,720,840]');
   });
 
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {
