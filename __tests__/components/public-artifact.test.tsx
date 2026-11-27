@@ -64,7 +64,7 @@ describe('the public artifact page', () => {
     expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
   });
 
-  it('prints the whole document: the table fits the paper and the pill stays off it', () => {
+  it('prints the whole document: the table fits the paper and the pills stay off it', () => {
     const doc = markdownDocument('| a | b |\n|---|---|\n| 1 | 2 |');
     const print = doc.slice(doc.indexOf('@media print'));
     expect(print).toMatch(/table \{[^}]*display: table[^}]*width: 100%/);
@@ -75,8 +75,19 @@ describe('the public artifact page', () => {
     expect(html).toContain('print:relative');
     const hidden = html.indexOf('print:hidden');
     expect(hidden).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="downloadPill"')).toBeGreaterThan(hidden);
     expect(html.indexOf('data-testid="madeWithUniverse"')).toBeGreaterThan(hidden);
     expect(html).toContain('print:h-[var(--document-height,100dvh)]');
+  });
+
+  it('offers Download only on a document, with the choice only when it has a table', () => {
+    const doc = (content: string) => renderToStaticMarkup(<PublicArtifact view={{ ...app, kind: 'markdown', content }} universeUrl={UNIVERSE} />);
+    expect(renderToStaticMarkup(<PublicArtifact view={app} universeUrl={UNIVERSE} />)).not.toContain('downloadPill');
+    const plain = doc('# Notes\n\n- one');
+    expect(plain).toContain('data-testid="downloadPill"');
+    expect(plain).not.toContain('aria-haspopup');
+    const withTable = doc('| a | b |\n|---|---|\n| 1 | 2 |');
+    expect(withTable).toContain('aria-haspopup="menu"');
   });
 
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {

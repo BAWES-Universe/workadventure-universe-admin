@@ -3,6 +3,8 @@ import { markdownDocument } from '@/lib/artifact-public';
 import type { PublicView } from '@/lib/artifact-service';
 import { PagePaymentsBridge } from '@/components/page-payments-bridge';
 import { DocumentFrame } from '@/components/document-frame';
+import { DownloadPill } from '@/components/artifact-download';
+import { hasTable } from '@/lib/artifact-download';
 
 /** The BAWES emblem in its colours (the game's favicon), small enough for the corner pill. */
 function Emblem() {
@@ -95,6 +97,7 @@ export function PublicArtifact({ view, universeUrl, artifactId }: { view: Public
       {artifactId && view.url !== null ? <PagePaymentsBridge artifactId={artifactId} version={view.version} /> : null}
       {/* Never on paper: the pills sit over the page only on screen */}
       <div className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-[max(0.75rem,env(safe-area-inset-right))] z-10 flex items-center gap-2 print:hidden">
+        {view.content !== null ? <DownloadPill title={view.title} markdown={view.content} hasTables={hasTable(view.content)} /> : null}
         <MadeWithUniverse href={universeUrl} floating />
       </div>
     </main>
