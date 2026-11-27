@@ -6,9 +6,9 @@ import { Marked } from 'marked';
  * not). It answers whenever the page asks, so a report sent before the page was listening is never lost. It carries nothing else and reads nothing. The document's own policy allows this script by its
  * hash and no other, so no script a document writes in its text ever runs.
  */
-export const HEIGHT_SCRIPT = "(function(){var W=[360,480,600,720,840];function t(){var p=document.getElementById('paper'),r=[];if(p){var o=p.style.width;W.forEach(function(w){p.style.width=w+'px';r.push([w,p.scrollHeight])});p.style.width=o}parent.postMessage({artifactHeight:document.documentElement.scrollHeight,artifactPrintHeights:r},'*')}addEventListener('load',t);addEventListener('resize',t);addEventListener('message',function(e){if(e.source===parent)t()});addEventListener('DOMContentLoaded',function(){if(window.ResizeObserver)new ResizeObserver(t).observe(document.body);t()})})()";
+export const HEIGHT_SCRIPT = "(function(){var W=[180,240,300,360,480,600,720,840];function t(){var p=document.getElementById('paper'),r=[];if(p){var o=p.style.width;W.forEach(function(w){p.style.width=w+'px';r.push([w,p.scrollHeight])});p.style.width=o}parent.postMessage({artifactHeight:document.documentElement.scrollHeight,artifactPrintHeights:r},'*')}addEventListener('load',t);addEventListener('resize',t);addEventListener('message',function(e){if(e.source===parent)t()});addEventListener('DOMContentLoaded',function(){if(window.ResizeObserver)new ResizeObserver(t).observe(document.body);t()})})()";
 /** Its sha256, as the policy names it (a test checks it still matches the script). It is a constant because this file also runs in the browser. */
-export const HEIGHT_SCRIPT_HASH = 'xQS9iP0KuKrAfzWvkW/kuY5AjPVUABxCy8DKcnBncEY=';
+export const HEIGHT_SCRIPT_HASH = 'xyIHJllhEnyyz9lBdmWAtQ3ed1rnO3VxefSIR3sh1LE=';
 
 /** Text that is safe between tags and inside a quoted value. */
 const escapeText = (text: string): string =>
