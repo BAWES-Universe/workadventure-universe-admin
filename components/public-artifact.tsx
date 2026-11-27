@@ -2,6 +2,7 @@ import { artifactKindLabel } from '@/lib/artifact-labels';
 import { markdownDocument } from '@/lib/artifact-public';
 import type { PublicView } from '@/lib/artifact-service';
 import { PagePaymentsBridge } from '@/components/page-payments-bridge';
+import { DocumentFrame } from '@/components/document-frame';
 
 /** The BAWES emblem in its colours (the game's favicon), small enough for the corner pill. */
 function Emblem() {
@@ -29,7 +30,7 @@ function MadeWithUniverse({ href, floating = false }: { href: string; floating?:
       data-testid="madeWithUniverse"
       className={`inline-flex h-7 items-center gap-[7px] rounded-full border border-white/12 pl-[9px] pr-[11px] text-[11.5px] font-semibold leading-none text-[#b3acc7] no-underline hover:text-[#f3f1fa] [font-family:var(--font-inter),system-ui,sans-serif] ${
         floating
-          ? 'fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-[max(0.75rem,env(safe-area-inset-right))] z-10 bg-[#0A0814]/72 shadow-[0_4px_14px_rgba(0,0,0,.35)] backdrop-blur-[6px] hover:bg-[#0A0814]/90'
+          ? 'bg-[#0A0814]/72 shadow-[0_4px_14px_rgba(0,0,0,.35)] backdrop-blur-[6px] hover:bg-[#0A0814]/90'
           : 'bg-white/6 hover:bg-white/10'
       }`}
     >
@@ -54,13 +55,7 @@ function Frame({ children, footer }: { children: React.ReactNode; footer: React.
  */
 function ArtifactFrame({ view, className }: { view: PublicView; className: string }) {
   return view.content !== null ? (
-    <iframe
-      title={view.title}
-      sandbox="allow-popups allow-popups-to-escape-sandbox"
-      srcDoc={markdownDocument(view.content)}
-      referrerPolicy="no-referrer"
-      className={className}
-    />
+    <DocumentFrame title={view.title} html={markdownDocument(view.content)} className={className} />
   ) : (
     <iframe title={view.title} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" src={view.url ?? undefined} referrerPolicy="no-referrer" data-artifact-frame className={className} />
   );
@@ -95,10 +90,13 @@ export function ArtifactBox({ view }: { view: PublicView }) {
  */
 export function PublicArtifact({ view, universeUrl, artifactId }: { view: PublicView; universeUrl: string; artifactId?: string }) {
   return (
-    <main data-shared-page className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
+    <main data-shared-page className="fixed inset-0 bg-[#0A0814] print:relative print:inset-auto" data-testid="publicArtifact">
       <ArtifactFrame view={view} className="block size-full border-0" />
       {artifactId && view.url !== null ? <PagePaymentsBridge artifactId={artifactId} version={view.version} /> : null}
-      <MadeWithUniverse href={universeUrl} floating />
+      {/* Never on paper: the pills sit over the page only on screen */}
+      <div className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-[max(0.75rem,env(safe-area-inset-right))] z-10 flex items-center gap-2 print:hidden">
+        <MadeWithUniverse href={universeUrl} floating />
+      </div>
     </main>
   );
 }

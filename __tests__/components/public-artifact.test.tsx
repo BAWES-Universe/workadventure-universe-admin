@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ArtifactBox, LinkNotAvailable, PublicArtifact } from '@/components/public-artifact';
-import { markdownDocument } from '@/lib/artifact-public';
+import { createHash } from 'node:crypto';
+import { HEIGHT_SCRIPT, HEIGHT_SCRIPT_HASH, markdownDocument } from '@/lib/artifact-public';
 import type { PublicView } from '@/lib/artifact-service';
 
 const UNIVERSE = 'https://play.example';
@@ -40,18 +41,48 @@ describe('the public artifact page', () => {
     expect(html).toContain('src="https://artifacts.example/a/v2.html"');
   });
 
-  it('draws a document from its text in a frame with every permission off but opening links in a new tab', () => {
+  it('draws a document from its text in a frame with no origin of its own, opening links in a new tab', () => {
     const html = renderToStaticMarkup(<PublicArtifact view={{ ...app, kind: 'markdown', content: '# Notes\n\n<script>alert(1)</script>' }} universeUrl={UNIVERSE} />);
-    expect(html).toContain('sandbox="allow-popups allow-popups-to-escape-sandbox"');
-    expect(html).not.toContain('allow-scripts');
+    // The one script a document carries only reports its height; the frame never shares the page's origin
+    expect(html).toContain('sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"');
+    expect(html).not.toContain('allow-same-origin');
+    expect(html).not.toContain('allow-top-navigation');
     expect(html).toContain('srcDoc=');
     expect(html).not.toContain('src="https://artifacts.example');
   });
 
-  it('puts a Content-Security-Policy in the document that blocks scripts, and keeps Markdown headings', () => {
+  it('lets a document run its one height script by hash and no script of its own', () => {
+    expect(HEIGHT_SCRIPT_HASH).toBe(createHash('sha256').update(HEIGHT_SCRIPT).digest('base64'));
+    const doc = markdownDocument('<script>alert(1)</script>\n\n# Hi');
+    expect(doc).toContain(`script-src 'sha256-${HEIGHT_SCRIPT_HASH}'`);
+    expect(doc).not.toContain("'unsafe-inline'; img-src https: data:; script-src 'unsafe");
+    expect(doc).not.toMatch(/script-src[^"]*'unsafe-(inline|eval)'/);
+    // The page's own script is the only one the policy names; the document's text sits after it, in the body
+    expect(doc.indexOf(HEIGHT_SCRIPT)).toBeLessThan(doc.indexOf('alert(1)'));
+    // The script says nothing but a height
+    expect(HEIGHT_SCRIPT).toContain('artifactHeight');
+    expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
+  });
+
+  it('prints the whole document: the table fits the paper and the pill stays off it', () => {
+    const doc = markdownDocument('| a | b |\n|---|---|\n| 1 | 2 |');
+    const print = doc.slice(doc.indexOf('@media print'));
+    expect(print).toMatch(/table \{[^}]*display: table[^}]*width: 100%/);
+    expect(print).toMatch(/th, td \{[^}]*white-space: normal/);
+    expect(print).toContain('thead { display: table-header-group; }');
+    const html = renderToStaticMarkup(<PublicArtifact view={{ ...app, kind: 'markdown', content: '# Notes' }} universeUrl={UNIVERSE} />);
+    // The page grows with the document in print, and the corner pills never print over it
+    expect(html).toContain('print:relative');
+    const hidden = html.indexOf('print:hidden');
+    expect(hidden).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="madeWithUniverse"')).toBeGreaterThan(hidden);
+    expect(html).toContain('print:h-[var(--document-height,100dvh)]');
+  });
+
+  it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {
     const doc = markdownDocument('# Notes\n\n- one\n- two');
     expect(doc).toContain("default-src 'none'");
-    expect(doc).not.toContain("script-src");
+    expect(doc).not.toContain("script-src 'unsafe");
     expect(doc).toContain('<h1>Notes</h1>');
     expect(doc).toContain('<li>one</li>');
   });
