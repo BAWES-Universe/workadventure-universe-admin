@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { sharedPagePolicy } from '@/lib/shared-page-policy';
 
 /** Admin pages are a non-sensitive client shell. Authentication is enforced by
  * every data API with an opaque Authorization credential. This is intentional:
@@ -8,6 +9,10 @@ export function middleware(request: NextRequest) {
   const response = NextResponse.next();
   response.headers.set('Referrer-Policy', 'no-referrer');
   response.headers.set('X-Content-Type-Options', 'nosniff');
+  // The shared page's policy names the artifacts' address, which only the running server knows (see sharedPagePolicy)
+  if (request.nextUrl.pathname.startsWith('/a/')) {
+    response.headers.set('Content-Security-Policy', sharedPagePolicy());
+  }
 
   // Never let old credential-bearing URLs become valid again.
   if (request.nextUrl.pathname.startsWith('/admin') &&
