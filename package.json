@@ -48,6 +48,7 @@
     "@sentry/nextjs": "^10.56.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "entities": "^6.0.1",
     "ioredis": "^5.8.2",
     "lru-cache": "^11.2.4",
     "lucide-react": "^0.561.0",
@@ -64,6 +65,7 @@
     "tailwind-merge": "^3.4.0",
     "tldts": "^6.1.86",
     "web-push": "^3.6.7",
+    "xlsx": "npm:@e965/xlsx@^0.20.3",
     "zod": "^4.1.13"
   },
   "devDependencies": {
