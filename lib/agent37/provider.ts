@@ -365,17 +365,26 @@ export class Agent37ComputerProvider implements ComputerProvider {
       } else {
         await options.beforeUpdate?.();
         const wasOn = instance.template_revision;
-        await this.client.updateInstance(ref);
+        // The request may have been received and applied even when it throws (a timeout, a lost answer): the wake is looked at once either way, and the original error is the one that stops the start (CodeRabbit on #1040)
+        let updateError: unknown = null;
+        let updateThrew = false;
+        try {
+          await this.client.updateInstance(ref);
+        } catch (error) {
+          updateThrew = true;
+          updateError = error;
+        }
         try {
           await options.afterUpdate?.();
         } catch (error) {
           // The update was sent and the wake that sent it is gone: a replacement may own the machine, which the update just restarted, and the files it holds outside its home folder may have been replaced. Nothing can recall a request that
           // is sent, and Agent37's update has no condition to make it atomic with the check, so this is told to Sentry (once for each such update) for us to learn whether it ever happens (Opus on #1040)
           if (error instanceof WakeReplaced) {
-            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision } });
+            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision, updateFailed: updateThrew } });
           }
-          throw error;
+          throw updateThrew ? updateError : error;
         }
+        if (updateThrew) throw updateError;
         instance = await this.untilHealthy(ref, instance.url);
       }
     }
