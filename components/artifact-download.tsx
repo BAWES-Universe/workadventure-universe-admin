@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+/** Mirrors `MAX_SHEET_TABS` in lib/artifact-download (that file loads only on tap, so its number is repeated here and a test keeps them equal). */
+const MAX_SHEET_TABS = 64;
+
 const DOWNLOAD_ICON = (
   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M12 4v11" />
@@ -13,7 +16,7 @@ const DOWNLOAD_ICON = (
 /** How long the "Saved" line stays. */
 const NOTE_MS = 3000;
 
-type Note = { kind: 'saved'; name: string } | { kind: 'failed' };
+type Note = { kind: 'saved'; name: string; omitted: number } | { kind: 'failed' };
 
 /**
  * The quiet "Download" pill on a shared Document: its Markdown file, and when it has tables a spreadsheet file with one tab
@@ -55,10 +58,11 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
     try {
       const files = await import('@/lib/artifact-download');
       const name = files.fileNameOf(title, what === 'markdown' ? 'md' : 'xlsx');
-      const blob =
-        what === 'markdown' ? files.markdownFile(markdown) : await files.spreadsheetFile(files.markdownTables(markdown), (n) => `Table ${n}`);
+      const tables = what === 'spreadsheet' ? files.markdownTables(markdown) : [];
+      const blob = what === 'markdown' ? files.markdownFile(markdown) : await files.spreadsheetFile(tables, (n) => `Table ${n}`);
       files.saveFile(blob, name);
-      say({ kind: 'saved', name });
+      // A document with more tables than a workbook keeps says so, rather than leaving some out unseen
+      say({ kind: 'saved', name, omitted: files.tablesOmitted(tables.length) });
     } catch (error) {
       console.warn('Could not make the file', error instanceof Error ? error.message : 'unknown');
       say({ kind: 'failed' });
@@ -93,7 +97,7 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
           data-testid="downloadNote"
           className="absolute bottom-full right-0 mb-2 w-max max-w-[min(80vw,320px)] rounded-full border border-white/15 bg-[#2a2640]/95 px-3.5 py-2 text-[13px] text-[#f3f1fa]"
         >
-          {note.kind === 'failed' ? 'Could not make the file. Try again.' : `Saved “${note.name}”`}
+          {note.kind === 'failed' ? 'Could not make the file. Try again.' : `Saved “${note.name}”${note.omitted > 0 ? `. The first ${MAX_SHEET_TABS} tables are in it; ${note.omitted} more are not.` : ''}`}
         </p>
       ) : null}
       <button

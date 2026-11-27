@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
-import { fileNameOf, hasTable, markdownFile, markdownTables, sheetNamesOf, spreadsheetFile } from '@/lib/artifact-download';
+import * as fs from 'node:fs';
+import { MAX_SHEET_TABS, fileNameOf, hasTable, markdownFile, markdownTables, sheetNamesOf, spreadsheetFile, tablesOmitted } from '@/lib/artifact-download';
 
 const DOC = [
   '# Calendar notes',
@@ -127,5 +128,18 @@ describe('files', () => {
     expect(sheet['B2'].t).toBe('s');
     expect(sheet['B2'].v).toBe('12');
     expect(sheet['C2'].v).toBe('The big picture & ideas');
+  });
+});
+
+describe('a document with more tables than a spreadsheet keeps', () => {
+  it('counts the tables left out, and the pill says the same number as the file keeps', async () => {
+    expect(tablesOmitted(0)).toBe(0);
+    expect(tablesOmitted(MAX_SHEET_TABS)).toBe(0);
+    expect(tablesOmitted(MAX_SHEET_TABS + 3)).toBe(3);
+    const tables = Array.from({ length: MAX_SHEET_TABS + 2 }, (_, i) => ({ title: `T${i}`, rows: [['a'], ['1']] }));
+    const blob = await spreadsheetFile(tables, (n) => `Table ${n}`);
+    expect(XLSX.read(new Uint8Array(await blob.arrayBuffer()), { type: 'array' }).SheetNames).toHaveLength(MAX_SHEET_TABS);
+    // The pill repeats the limit in its own file (the library loads only on tap): the two must agree
+    expect(fs.readFileSync('components/artifact-download.tsx', 'utf8')).toContain(`const MAX_SHEET_TABS = ${MAX_SHEET_TABS};`);
   });
 });

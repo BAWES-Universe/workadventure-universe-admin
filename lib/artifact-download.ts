@@ -20,6 +20,11 @@ const FILE_NAME_MAX = 100;
 /** More tables than this in one document are not put in the spreadsheet (a workbook of hundreds of tabs helps no one). */
 export const MAX_SHEET_TABS = 64;
 
+/** How many tables a spreadsheet leaves out of a document with this many (none up to the limit). */
+export function tablesOmitted(count: number): number {
+  return Math.max(0, count - MAX_SHEET_TABS);
+}
+
 /** The text of inline Markdown, without its marks: **bold** is bold, [a link](url) is "a link". */
 function plainOf(tokens: Token[] | undefined, fallback: string): string {
   if (!tokens || tokens.length === 0) return fallback;
