@@ -55,7 +55,7 @@ describe('DocumentFrame', () => {
     const css = container.querySelector('style')?.textContent ?? '';
     // Narrowest first, each wider step only from its own width, and every height has a little room
     expect(css).toContain(`[data-document-frame="${id}"] { height: ${Math.ceil(6000 * 1.03) + 32}px !important; }`);
-    expect(css).toMatch(/@media \(min-width: 600px\) \{[^}]*height: 4152px !important/);
+    expect(css).toMatch(/@container \(min-width: 600px\) \{[^}]*height: 4152px !important/);
     expect(css.indexOf('min-width: 600px')).toBeLessThan(css.indexOf('min-width: 840px'));
     expect(css.startsWith('@media print {')).toBe(true);
     expect(iframe.style.getPropertyValue('--document-height')).toBe('900px');
