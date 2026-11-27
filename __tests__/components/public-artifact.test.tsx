@@ -61,7 +61,7 @@ describe('the public artifact page', () => {
     expect(doc.indexOf(HEIGHT_SCRIPT)).toBeLessThan(doc.indexOf('alert(1)'));
     // The script says nothing but a height
     expect(HEIGHT_SCRIPT).toContain('artifactHeight');
-    expect(HEIGHT_SCRIPT).toContain('artifactPrintHeight');
+    expect(HEIGHT_SCRIPT).toContain('artifactPrintHeights');
     expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
   });
 
@@ -100,7 +100,7 @@ describe('the public artifact page', () => {
     const hidden = html.indexOf('print:hidden');
     expect(hidden).toBeGreaterThan(-1);
     expect(html.indexOf('data-testid="madeWithUniverse"')).toBeGreaterThan(hidden);
-    expect(html).toContain('print:h-[var(--document-print-height,var(--document-height,100dvh))]');
+    expect(html).toContain('print:h-[var(--document-height,100dvh)]');
   });
 
   it('measures the document as paper, with the print rules it really prints with, and never prints the measuring copy', () => {
@@ -115,6 +115,16 @@ describe('the public artifact page', () => {
     expect(print).toMatch(/ th, td \{[^}]*white-space: normal/);
     // The copy is for measuring only: hidden from readers of the page
     expect(doc).toContain('id="paper" class="paper" aria-hidden="true"');
+    // A long word in a cell may break anywhere on paper, so a table never grows wider than the page
+    expect(print).toMatch(/ th, td \{[^}]*overflow-wrap: anywhere/);
+  });
+
+  it('starts watching the document only once it has a body, answers whenever the page asks, and reports several page widths', () => {
+    // The script sits in the head: the body (and the measuring copy) can only be watched after the document is read
+    expect(HEIGHT_SCRIPT).toMatch(/addEventListener\('DOMContentLoaded',function\(\)\{[^}]*ResizeObserver/);
+    expect(HEIGHT_SCRIPT).toContain("addEventListener('message'");
+    expect(HEIGHT_SCRIPT).toContain('e.source===parent');
+    expect(HEIGHT_SCRIPT).toContain('[360,480,600,720,840]');
   });
 
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {
