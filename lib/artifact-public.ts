@@ -46,13 +46,20 @@ function printRules(scope: string): string {
   ].join('\n');
 }
 
+/** One setting for how a single new line is drawn; the docs window in the game does the same (keepLineBreaks). */
+export const KEEP_SINGLE_LINE_BREAKS = true;
+
 /**
  * A document for the public link page: the Markdown drawn as HTML, in a page of its own that the page shows in an iframe
  * without its own origin. The document's own policy blocks everything but styles, https images and the one script above
  * (by its hash), so nothing a document says can run or reach anything of the viewer.
+ *
+ * A single new line inside a paragraph, a list item or a quote is drawn as a line break (`KEEP_SINGLE_LINE_BREAKS`), the same as the
+ * docs window in the game, so one document reads the same in both. Lists, code blocks, tables and two-space breaks
+ * are drawn as before.
  */
 export function markdownDocument(markdown: string): string {
-  const html = documents.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
+  const html = documents.parse(markdown, { async: false, gfm: true, breaks: KEEP_SINGLE_LINE_BREAKS }) as string;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; script-src 'sha256-${HEIGHT_SCRIPT_HASH}'">
 <base target="_blank">
