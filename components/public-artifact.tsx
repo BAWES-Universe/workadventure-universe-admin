@@ -77,7 +77,8 @@ export function ArtifactBox({ view }: { view: PublicView }) {
           </p>
         </div>
       </header>
-      <div className="min-h-[60dvh] flex-1 overflow-hidden rounded-2xl border border-[#2a2638] bg-[#15121f]">
+      {/* On paper the box is just the document: no border, corners, clipping or tint, so nothing of the document can be cut */}
+      <div className="min-h-[60dvh] flex-1 overflow-hidden rounded-2xl border border-[#2a2638] bg-[#15121f] print:min-h-0 print:overflow-visible print:rounded-none print:border-0 print:bg-white">
         <ArtifactFrame view={view} className="block size-full min-h-[60dvh] border-0" />
       </div>
     </>

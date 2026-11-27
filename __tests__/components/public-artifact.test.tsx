@@ -127,6 +127,15 @@ describe('the public artifact page', () => {
     expect(HEIGHT_SCRIPT).toContain('[180,240,300,360,480,600,720,840]');
   });
 
+  it("prints the owner's preview as just the document: the box has no border, corners, clipping or tint on paper, and the frame sits in a box it is measured by", () => {
+    const html = renderToStaticMarkup(<ArtifactBox view={{ ...app, kind: 'markdown', content: '# Notes' }} />);
+    for (const rule of ['print:overflow-visible', 'print:border-0', 'print:rounded-none', 'print:bg-white', 'print:min-h-0']) {
+      expect(html).toContain(rule);
+    }
+    // The frame is inside the box the print steps ask for its own width, whatever surrounds it
+    expect(html).toMatch(/container-type:inline-size[^>]*><iframe[^>]*data-document-frame/);
+  });
+
   it('puts a Content-Security-Policy in the document that blocks every script but its own height one, and keeps Markdown headings', () => {
     const doc = markdownDocument('# Notes\n\n- one\n- two');
     expect(doc).toContain("default-src 'none'");

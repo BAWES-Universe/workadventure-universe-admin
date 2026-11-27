@@ -27,15 +27,18 @@ function paperHeightsOf(value: unknown): PaperHeight[] | null {
 }
 
 /**
- * The print styles for one frame: its height on paper at the width the page prints at. A narrower page wraps the text onto
- * more lines, so each step of page width has the height measured at that step's own width, and the page takes the step it
- * is at or above (never a shorter one). Written as one stylesheet because a frame's height can only be set from the page.
+ * The print styles for one frame: its height on paper at the width the frame itself prints at. A narrower frame wraps the
+ * text onto more lines, so each step of width has the height measured at that step's own width, and the frame takes the
+ * step it is at or above (never a shorter one). The width is the frame's own box (the box around it is the container the
+ * steps ask), not the page's, so a frame inside padding or a border is measured at what it really gets. The first rule is
+ * the tallest, so a browser that does not know container queries still prints all of it. Written as one stylesheet because
+ * a frame's height can only be set from the page.
  */
 function printStyles(id: string, heights: PaperHeight[]): string {
   const selector = `[data-document-frame="${id}"]`;
   const tall = (height: number) => `height: ${Math.ceil(height * 1.03) + 32}px !important;`;
   const steps = heights.map(([width, height], index) =>
-    index === 0 ? `${selector} { ${tall(height)} }` : `@media (min-width: ${width}px) { ${selector} { ${tall(height)} } }`
+    index === 0 ? `${selector} { ${tall(height)} }` : `@container (min-width: ${width}px) { ${selector} { ${tall(height)} } }`
   );
   return `@media print { ${steps.join(' ')} }`;
 }
@@ -72,17 +75,20 @@ export function DocumentFrame({ title, html, className }: { title: string; html:
   return (
     <>
       {paper ? <style>{printStyles(id, paper)}</style> : null}
-      <iframe
-        ref={frame}
-        title={title}
-        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-        srcDoc={html}
-        referrerPolicy="no-referrer"
-        data-document-frame={id}
-        onLoad={ask}
-        style={height ? { ['--document-height' as string]: `${height}px` } : undefined}
-        className={`${className} print:h-[var(--document-height,100dvh)] print:min-h-0`}
-      />
+      {/* The box the print steps ask for the frame's width: it is as wide as the frame and nothing else */}
+      <div style={{ containerType: 'inline-size', width: '100%', height: '100%' }}>
+        <iframe
+          ref={frame}
+          title={title}
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+          srcDoc={html}
+          referrerPolicy="no-referrer"
+          data-document-frame={id}
+          onLoad={ask}
+          style={height ? { ['--document-height' as string]: `${height}px` } : undefined}
+          className={`${className} print:h-[var(--document-height,100dvh)] print:min-h-0`}
+        />
+      </div>
     </>
   );
 }
