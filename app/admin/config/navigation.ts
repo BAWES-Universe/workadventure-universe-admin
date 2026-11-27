@@ -15,6 +15,8 @@ import {
   DoorOpen,
   KeyRound,
   Sparkles,
+  Github,
+  Inbox,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 import { Planet } from '@/app/admin/components/ds/planet-icon';
@@ -63,10 +65,14 @@ export const NAV_ITEMS: NavItem[] = [
   // Admin section (super admin only)
   { href: '/admin/avatars', label: 'Avatar sets', icon: Layers, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots', label: 'Bots', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
+  // What Bricks hit, counted across every Brick (mock "Brick reports inbox")
+  { href: '/admin/brick-reports', label: 'Brick reports', icon: Inbox, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/ai-providers', label: 'Universe AI', icon: Sparkles, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/ai-providers/usage', label: 'AI usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots/database', label: 'Bot database', icon: Database, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots/mcp-servers', label: 'Apps', icon: Server, requiresSuperAdmin: true, group: 'admin' },
+  // The one-time setup of Universe's GitHub App (game #2041): done once and forgotten, so it is only in the menu, never on home
+  { href: '/admin/github-app', label: 'GitHub for Universe', icon: Github, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export const NAV_GROUP_LABELS: Record<NavGroup, string> = {

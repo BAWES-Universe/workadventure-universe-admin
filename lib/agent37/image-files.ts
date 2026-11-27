@@ -1210,9 +1210,17 @@ find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \)
  *   universe-cold restore   (node)  reads {url, token, sha256} on standard input, fetches the copy straight from Orbit, checks its SHA-256, unpacks it
  *                                   into the home folder and compares EVERY file with the copy; prints restored=1, or restored=0 reason=...
  *   universe-cold finish    (root)  puts back what was outside the home folder and installs the software the agent had added; prints finished=1, or finished=0 reason=...
+ *   universe-cold list-piece OFFSET LENGTH  (root)  prints a slice of the list prepack wrote (a root-only file), so the list never has to fit in one answer (Agent37 cuts one over 512 KB)
+ *   universe-cold list-put OFFSET           (root)  appends a slice (standard input) to a root-only file on this computer, so a list too big for one command can be sent in pieces; finish reads it
  */
+/**
+ * How long after the end of the unpack of the image on a computer a file copied there with its old modification time is still taken for one of the image (see `CTIME_MARGIN` in the script). Nothing the agent
+ * does counts before it has passed: a new computer is handed over only after it, and a restore puts nothing back before it.
+ */
+export const COLD_CTIME_MARGIN_S = 120;
+
 export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
-import hashlib, json, os, pwd, re, shutil, subprocess, sys, tarfile, threading, urllib.request
+import errno, fcntl, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, time, urllib.request
 
 try:
     NODE = pwd.getpwnam("node")
@@ -1233,7 +1241,23 @@ SKIP = ("/etc/universe/", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/e
         "/etc/group", "/etc/gshadow", "/etc/subuid", "/etc/subgid", "/etc/machine-id", "/etc/profile.d/universe", "/etc/ca-certificates")
 MAX_FILES = 5000
 MAX_BYTES = 200 * 1024 * 1024
+MAX_PACKAGES = 2000
+# The list prepack made travels through a root-only file in a folder of its own (the folder is skipped by the scan, so it is never part of a copy): written by prepack and read back
+# in slices, or written in slices and read by finish. Plain ASCII (json escapes everything else), so a slice of N characters is N bytes
+COLD_DIR = "/usr/local/share/universe/cold"
+LIST_FILE = "list.json"
+MAX_LIST_BYTES = 32 * 1024 * 1024
+MAX_PIECE = 256 * 1024
 PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.:-]{0,100}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# A test can put the whole file system of the computer under a folder of its own (only ever together with its own home folder)
+FSROOT = os.environ.get("UNIVERSE_COLD_FS", "") if os.environ.get("UNIVERSE_COLD_HOME") else ""
+
+def real(path):
+    return FSROOT + path
+
+def logical(path):
+    return path[len(FSROOT):] if FSROOT and path.startswith(FSROOT) else path
 
 def skipped(path):
     return path.endswith("-") or any(path == item or path.startswith(item) for item in SKIP)
@@ -1253,47 +1277,333 @@ def home_stats():
                 pass
     return files, size
 
-def newer_than(info, reference):
-    # True when a file was written or changed after the reference time: its modification time or its change time (which a copy cannot set back)
-    return max(info.st_mtime, info.st_ctime) > reference
+# On a real computer the image is unpacked onto the disk when the computer is made, and every image file gets that moment as its change time (its modification time stays the image's own). The unpack
+# ends with the marker files: measured on a real Agent37 computer, every file of the image had a change time between 20 s before and 5.2 s after the marker's. So a file is "changed after the
+# image" when its modification time is later than the time the image was built (a file written or edited here), or its change time is later than the end of the unpack plus this margin (a file
+# copied or unpacked here with its old modification time kept: cp -p, tar x, rsync -a). A file so copied within this margin of the end of the unpack is not seen, so nothing is let act that early: a new computer is handed over only after it (Orbit waits), and finish waits before it puts a file back
+CTIME_MARGIN = ${COLD_CTIME_MARGIN_S}
 
-def prepack():
-    if os.getuid() != 0:
-        print("prepack=" + json.dumps({"blocked": "not_root", "home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": []}))
-        return 1
-    os.makedirs(STATE, exist_ok=True)
-    shutil.rmtree(OUTSIDE, ignore_errors=True)
-    os.makedirs(OUTSIDE, exist_ok=True)
-    # A job's key is never part of a copy
-    for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
+def unpack_end():
+    # When the image was unpacked on this computer: the change time of the two files the image marks itself with. The earlier of the two, so that a later change of one of them moves nothing
+    times = []
+    for path in (BUILT, BASELINE):
         try:
-            os.remove(os.path.join(STATE, name))
+            times.append(os.stat(real(path)).st_ctime)
         except OSError:
             pass
+    return min(times)
+
+def wait_past_unpack():
+    # Files are put back with their old modification time and a change time of now. Put back within the margin of the end of the unpack (a restore onto a new computer can be that soon), a file
+    # copied here with its old time kept would look like one of the image the next time a computer is packed away, and be lost. So nothing is put back until the margin has passed
+    if FSROOT and os.environ.get("UNIVERSE_COLD_NO_WAIT"):
+        return
+    try:
+        until = unpack_end() + CTIME_MARGIN + 1
+    except ValueError:
+        return
+    pause = until - time.time()
+    if pause > 0:
+        time.sleep(min(pause, CTIME_MARGIN + 2))
+
+def newer_than(info, built_at, unpacked_at):
+    # True when a file was written or changed after the image: see CTIME_MARGIN
+    return info.st_mtime > built_at or info.st_ctime > unpacked_at + CTIME_MARGIN
+
+def plain(path, folder):
+    # None when nothing is there; True when it is what it should be (a real folder, or a real file); False for anything else, a link above all
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    return statmod.S_ISDIR(mode) if folder else statmod.S_ISREG(mode)
+
+def digest_of(path):
+    digest = hashlib.sha256()
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def open_steps(start_fd, parts, create=False, give=False, modes=None, base=""):
+    # A folder reached from start_fd one step at a time, never through a link (a link at any step fails). create: missing folders are made (and, with give, handed to the agent's user);
+    # modes: the mode a folder that is made here had on the old computer (by its whole path, base being the path of start_fd), through the descriptor: all others are made 0755
+    fd = os.dup(start_fd)
+    here = base
+    try:
+        for part in parts:
+            here = here + "/" + part
+            if create:
+                made = False
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    made = True
+                except FileExistsError:
+                    pass
+            step = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            # Handed over through the descriptor, never by name: a name the agent swapped for another file would be given away instead
+            if create and made and give and os.getuid() == 0:
+                os.fchown(step, UID, GID)
+            # The old computer's mode (never the set-user-id or set-group-id bits): a folder that was private is not made readable by everyone
+            if create and made and modes and here in modes:
+                os.fchmod(step, modes[here] & 0o1777)
+            os.close(fd)
+            fd = step
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def remove_tree(parent_fd, name):
+    # Removes a folder (or file) by descriptors: a link is removed, never followed
+    info = os.lstat(name, dir_fd=parent_fd)
+    if not statmod.S_ISDIR(info.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        for entry in os.listdir(fd):
+            remove_tree(fd, entry)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+def folder_modes(entries):
+    # The mode of every folder above a listed file whose mode is not the usual 0755 (a private folder stays private when it is made again on the new computer). A folder that is not a real folder
+    # (a link above a file would have been refused already) is left out. Listed by path, in path order
+    seen = {}
+    for entry in entries:
+        parts = entry[1].lstrip("/").split("/")[:-1]
+        for at in range(1, len(parts) + 1):
+            path = "/" + "/".join(parts[:at])
+            # Only the folders INSIDE a root: the root itself and what is above it (/usr, /var, /var/spool) belong to the computer, are never made or given a mode by a restore, and a list that named
+            # one would not pass Orbit's check (a computer that could never be packed)
+            if path in seen or not any(path.startswith(root + "/") for root in ROOTS):
+                continue
+            try:
+                info = os.lstat(real(path))
+            except OSError:
+                continue
+            seen[path] = (info.st_mode & 0o7777) if statmod.S_ISDIR(info.st_mode) else None
+    return [[path, mode] for path, mode in sorted(seen.items()) if mode is not None and mode != 0o755]
+
+class TooBig(Exception):
+    pass
+
+def copy_into(outside_fd, root_fd, path, budget):
+    # One path of the computer copied into the folder held open as outside_fd: both ends are reached one step at a time without following a link, so a folder swapped for a link
+    # while this runs fails the copy (or lands in the real folder, which is held open), never somewhere else. Returns (the list entry, bytes)
+    parts = path.lstrip("/").split("/")
+    parent = open_steps(outside_fd, parts[:-1], create=True, give=True)
+    try:
+        source_dir = open_steps(root_fd, parts[:-1])
+        try:
+            name = parts[-1]
+            info = os.lstat(name, dir_fd=source_dir)
+            if statmod.S_ISLNK(info.st_mode):
+                target = os.readlink(name, dir_fd=source_dir)
+                # Not handed to the agent's user: a link owned by root in the home folder is harmless (the restore unpacks without owners), and a name there could be swapped
+                os.symlink(target, name, dir_fd=parent)
+                return ["l", path, 0, 0, target], len(os.fsencode(target))
+            source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_dir)
+        finally:
+            os.close(source_dir)
+        with os.fdopen(source, "rb") as reader:
+            seen = os.fstat(reader.fileno())
+            if not statmod.S_ISREG(seen.st_mode):
+                raise OSError("not a regular file")
+            out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            try:
+                with os.fdopen(out, "wb") as writer:
+                    digest = hashlib.sha256()
+                    taken = 0
+                    for chunk in iter(lambda: reader.read(1 << 20), b""):
+                        # A file that grew after the scan counted it is held to what is left of the size limit as it is read, never read to its end first
+                        taken += len(chunk)
+                        if taken > budget:
+                            raise TooBig()
+                        digest.update(chunk)
+                        writer.write(chunk)
+                    writer.flush()
+                    os.fchmod(writer.fileno(), seen.st_mode & 0o7777)
+                    os.utime(writer.fileno(), ns=(seen.st_atime_ns, seen.st_mtime_ns))
+                    if os.getuid() == 0:
+                        os.fchown(writer.fileno(), UID, GID)
+                    # Read AFTER the hand-over (a change of owner clears the set-user-id bits, and the list must say the mode the copy has now)
+                    done = os.fstat(writer.fileno())
+            except TooBig:
+                # The part that was written is not kept
+                try:
+                    os.unlink(name, dir_fd=parent)
+                except OSError:
+                    pass
+                raise
+            return ["f", path, done.st_size, done.st_mode & 0o7777, digest.hexdigest()], done.st_size
+    finally:
+        os.close(parent)
+
+def utf8_ok(text):
+    # A name that is not valid UTF-8 reads here as lone surrogate characters: it cannot be kept in a list that goes to a database, so the computer says so instead
+    try:
+        text.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+def cold_dir(create):
+    # The folder the list travels through, opened without following a link and only if it is ours (owned by whoever runs this, closed to everyone else)
+    path = real(COLD_DIR)
+    if create:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(fd).st_uid != os.getuid():
+            raise OSError("not ours")
+        os.fchmod(fd, 0o700)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def write_list(text):
+    # The whole list, as one file made new (a name that is there is unlinked, never written through). Returns (bytes, sha256)
+    data = text.encode("ascii")
+    if len(data) > MAX_LIST_BYTES:
+        raise OverflowError("list")
+    folder = cold_dir(True)
+    try:
+        try:
+            os.unlink(LIST_FILE, dir_fd=folder)
+        except FileNotFoundError:
+            pass
+        with os.fdopen(os.open(LIST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder), "wb") as handle:
+            handle.write(data)
+    finally:
+        os.close(folder)
+    return len(data), hashlib.sha256(data).hexdigest()
+
+def drop_list():
+    try:
+        folder = cold_dir(False)
+    except OSError:
+        return
+    try:
+        os.unlink(LIST_FILE, dir_fd=folder)
+    except OSError:
+        pass
+    finally:
+        os.close(folder)
+
+def list_piece():
+    if os.getuid() != 0 and not FSROOT:
+        print("listpiece_failed reason=not_root")
+        return 1
+    try:
+        offset, length = int(sys.argv[2]), int(sys.argv[3])
+    except (IndexError, ValueError):
+        print("listpiece_failed reason=usage")
+        return 2
+    if offset < 0 or length < 1 or length > MAX_PIECE:
+        print("listpiece_failed reason=usage")
+        return 2
+    try:
+        folder = cold_dir(False)
+        try:
+            fd = os.open(LIST_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "rb") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise OSError("not a file")
+            data = os.pread(handle.fileno(), length, offset)
+        text = data.decode("ascii")
+    except (OSError, UnicodeDecodeError):
+        print("listpiece_failed reason=unreadable")
+        return 1
+    if "\n" in text:
+        print("listpiece_failed reason=unreadable")
+        return 1
+    # The marker after the text keeps a piece that ends in a space whole when whatever carries the answer trims the end of it
+    print("listpiece=" + text + "|end|")
+    return 0
+
+def list_put():
+    if os.getuid() != 0 and not FSROOT:
+        print("listput=0 reason=not_root")
+        return 1
+    try:
+        offset = int(sys.argv[2])
+    except (IndexError, ValueError):
+        print("listput=0 reason=usage")
+        return 2
+    raw = sys.stdin.read()
+    # The command ends the slice with a line break of its own (and the slice has none, a list is one line)
+    text = raw[:-1] if raw.endswith("\n") else raw
+    if offset < 0 or not text or len(text) > MAX_PIECE or any(ord(ch) < 0x20 or ord(ch) > 0x7e for ch in text) or offset + len(text) > MAX_LIST_BYTES:
+        print("listput=0 reason=usage")
+        return 2
+    try:
+        folder = cold_dir(True)
+        try:
+            if offset == 0:
+                try:
+                    os.unlink(LIST_FILE, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+                fd = os.open(LIST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            else:
+                fd = os.open(LIST_FILE, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "wb") as handle:
+            # One slice at a time on this file: two that arrive together at the same offset are told apart here (the second finds the file longer and is refused), not at the write
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            info = os.fstat(handle.fileno())
+            # Only the next slice is taken: a repeat of one that already arrived, or one that skips ahead, is refused and the sender starts again
+            if not statmod.S_ISREG(info.st_mode) or info.st_size != offset:
+                print("listput=0 reason=out_of_order")
+                return 1
+            handle.write(text.encode("ascii"))
+            handle.flush()
+            print("listput=1 size=%d" % os.fstat(handle.fileno()).st_size)
+    except OSError:
+        print("listput=0 reason=not_written")
+        return 1
+    return 0
+
+def scan_added(first_only=False):
+    """What this computer holds outside its home folder that the image did not have: (paths, bytes, why it stopped or None). With first_only it stops at the first file found."""
     blocked = None
     found = []
     total = 0
-    if os.path.exists(BUILT):
-        reference = os.stat(BUILT).st_mtime
+    if os.path.exists(real(BUILT)):
+        reference = os.stat(real(BUILT)).st_mtime
+        unpacked = unpack_end()
         for root in ROOTS:
-            for current, dirs, names in os.walk(root, followlinks=False):
-                if current.startswith("/usr/local/share/universe"):
+            for current, dirs, names in os.walk(real(root), followlinks=False):
+                if logical(current).startswith("/usr/local/share/universe"):
                     dirs[:] = []
                     continue
-                for name in names:
-                    path = os.path.join(current, name)
+                # A link to a folder is listed with the folders (and never walked); it is a file of the computer like any other link, so it is looked at here
+                for name in names + [d for d in dirs if os.path.islink(os.path.join(current, d))]:
+                    path = logical(os.path.join(current, name))
                     if skipped(path):
                         continue
                     try:
-                        info = os.lstat(path)
+                        info = os.lstat(real(path))
                     except OSError:
                         continue
-                    # A file the image did not have: written or changed here after the image was built. Its change time too, because a file that was
-                    # copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
-                    if not newer_than(info, reference):
+                    # A file the image did not have: written or changed here after the image was built. Its change time too (later than the unpack of the image on this computer, with a
+                    # margin), because a file that was copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
+                    if not newer_than(info, reference, unpacked):
                         continue
+                    if not utf8_ok(path):
+                        blocked = "outside_name_not_utf8"
+                        break
                     found.append(path)
-                    total += info.st_size if not os.path.islink(path) else 0
+                    total += info.st_size if not statmod.S_ISLNK(info.st_mode) else 0
+                    if first_only:
+                        return found, total, None
                     if len(found) > MAX_FILES or total > MAX_BYTES:
                         blocked = "outside_too_big"
                         break
@@ -1303,41 +1613,140 @@ def prepack():
                 break
     else:
         blocked = "image_marker_missing"
-    copied = 0
-    if blocked is None:
-        for path in found:
-            target = os.path.join(OUTSIDE, path.lstrip("/"))
-            try:
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                if os.path.islink(path):
-                    os.symlink(os.readlink(path), target)
-                else:
-                    shutil.copy2(path, target)
-                copied += 1
-            except OSError:
-                blocked = "outside_not_copied"
-                break
-    packages = []
-    if blocked is None:
+    return found, total, blocked
+
+def outside_check():
+    """Whether anything is held outside the home folder that an image update would wipe (a file the image did not have, or software added): printed, and never copied. Run by Orbit before it moves a computer to a newer image."""
+    if os.getuid() != 0 and not FSROOT:
+        print("outside_check=0 reason=not_root")
+        return 1
+    found, total, blocked = scan_added(True)
+    if blocked == "image_marker_missing":
+        print("outside_check=0 reason=" + blocked)
+        return 1
+    any_files = bool(found) or blocked == "outside_name_not_utf8"
+    any_packages = False
+    if not any_files:
         try:
             current = set(subprocess.run(["apt-mark", "showmanual"], capture_output=True, text=True, timeout=120, check=True).stdout.split())
-            with open(BASELINE) as handle:
+            with open(real(BASELINE)) as handle:
                 base = set(handle.read().split())
-            packages = sorted(name for name in current - base if PACKAGE_NAME.match(name))
-            with open(PACKAGES_FILE, "w") as handle:
-                handle.write("\n".join(packages) + ("\n" if packages else ""))
+            any_packages = any(PACKAGE_NAME.match(name) for name in current - base)
         except Exception:
-            blocked = "packages_unknown"
-    subprocess.run(["chown", "-R", "%d:%d" % (UID, GID), OUTSIDE, PACKAGES_FILE], capture_output=True)
-    files, size = home_stats()
-    out_bytes = 0
-    for root, _d, names in os.walk(OUTSIDE):
-        for name in names:
+            print("outside_check=0 reason=packages_unknown")
+            return 1
+    print("outside_check=1 any=%d" % (1 if any_files or any_packages else 0))
+    return 0
+
+def prepack():
+    empty = {"home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": [], "manifest_bytes": None, "manifest_sha256": None}
+    def stop(why):
+        print("prepack=" + json.dumps(dict(empty, blocked=why)))
+        return 1
+    # On a computer only root may run this; under the test seam (a file system of the test's own) whoever owns the folders may
+    if os.getuid() != 0 and not FSROOT:
+        return stop("not_root")
+    # The agent owns every one of these: none is ever followed. A link (or anything that is not a plain folder or file) where one belongs is refused, and nothing is removed through it
+    if plain(STATE, True) is False or plain(OUTSIDE, True) is False or plain(PACKAGES_FILE, False) is False:
+        return stop("outside_link")
+    state_fd = outside_fd = root_fd = None
+    try:
+        try:
+            made_state = False
+            if not os.path.lexists(STATE):
+                os.mkdir(STATE)
+                made_state = True
+            # From here on the folders are held open: a name the agent swaps for a link afterwards is never looked up again, so nothing root writes can land anywhere else.
+            # A state folder this made is handed over through the descriptor, never by name (a name the agent swapped for a link would give away what the link points at)
+            state_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            if made_state and os.getuid() == 0:
+                os.fchown(state_fd, UID, GID)
+            if plain(OUTSIDE, True) is not None:
+                remove_tree(state_fd, "outside")
+            os.mkdir("outside", 0o755, dir_fd=state_fd)
+            outside_fd = os.open("outside", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+            seen = os.fstat(outside_fd)
+            if not statmod.S_ISDIR(seen.st_mode) or seen.st_uid != os.getuid():
+                return stop("outside_link")
+        except OSError:
+            return stop("outside_link")
+        # A job's key is never part of a copy
+        for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
             try:
-                out_bytes += os.lstat(os.path.join(root, name)).st_size
+                os.unlink(name, dir_fd=state_fd)
             except OSError:
                 pass
-    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked}))
+        found, total, blocked = scan_added()
+        # In path order, so the list (and the copy) is the same whatever order the file system reads its folders in
+        found.sort()
+        copied = 0
+        out_bytes = 0
+        entries = []
+        if blocked is None:
+            root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
+            for path in found:
+                try:
+                    entry, size = copy_into(outside_fd, root_fd, path, MAX_BYTES - out_bytes)
+                except TooBig:
+                    blocked = "outside_too_big"
+                    break
+                except OSError:
+                    blocked = "outside_not_copied"
+                    break
+                if entry[0] == "l" and not utf8_ok(entry[4]):
+                    blocked = "outside_name_not_utf8"
+                    break
+                entries.append(entry)
+                out_bytes += size
+                copied += 1
+        packages = []
+        if blocked is None:
+            try:
+                current = set(subprocess.run(["apt-mark", "showmanual"], capture_output=True, text=True, timeout=120, check=True).stdout.split())
+                with open(real(BASELINE)) as handle:
+                    base = set(handle.read().split())
+                packages = sorted(name for name in current - base if PACKAGE_NAME.match(name))
+                if len(packages) > MAX_PACKAGES:
+                    raise OverflowError("packages")
+                # Whatever is at the name is removed (a name, never what it points at: a hard link to a root file is only unlinked) and the file is made new, exclusively and without
+                # following a link, through the held folder; it is handed over through its descriptor
+                try:
+                    os.unlink("outside-packages.txt", dir_fd=state_fd)
+                except FileNotFoundError:
+                    pass
+                with os.fdopen(os.open("outside-packages.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=state_fd), "w") as handle:
+                    if os.getuid() == 0:
+                        os.fchown(handle.fileno(), UID, GID)
+                    handle.write("\n".join(packages) + ("\n" if packages else ""))
+            except OSError as error:
+                blocked = "outside_link" if error.errno == errno.ELOOP else "packages_unknown"
+            except OverflowError:
+                blocked = "packages_too_many"
+            except Exception:
+                blocked = "packages_unknown"
+        if os.getuid() == 0:
+            os.fchown(outside_fd, UID, GID)
+    finally:
+        for fd in (state_fd, outside_fd, root_fd):
+            if fd is not None:
+                os.close(fd)
+    files, size = home_stats()
+    # The list is not printed (Agent37 cuts what a command prints over 512 KB, and a list of thousands of files can be that long): it is written to a root-only file, and what is
+    # printed is how long it is and its SHA-256, so the caller reads it back in slices (list-piece) and checks every byte
+    list_bytes = list_sha = None
+    if blocked is None:
+        modes = folder_modes(entries)
+        # A list finish would refuse is never made: more folder modes than finish takes is a computer that holds too much to carry, said here
+        if len(modes) > MAX_FILES * 4:
+            blocked = "outside_too_big"
+    if blocked is None:
+        try:
+            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages, "dirs": modes}, separators=(",", ":")))
+        except OverflowError:
+            blocked = "outside_list_too_big"
+        except (OSError, UnicodeEncodeError):
+            blocked = "outside_list_unwritten"
+    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked, "manifest_bytes": list_bytes, "manifest_sha256": list_sha}, separators=(",", ":")))
     return 0 if blocked is None else 1
 
 def prefix_for(names):
@@ -1388,7 +1797,7 @@ def restore():
         total = 0
         # --no-overwrite-dir: the folders that already exist (the home folder itself, or "/" and "/home" when the names start at the root) keep their own
         # owner and times, so a restore run by the computer's own user does not fail on a folder it is not allowed to touch
-        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner", "--no-overwrite-dir"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner", "--no-overwrite-dir", "-p"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         while True:
             chunk = resp.read(1 << 20)
             if not chunk:
@@ -1410,7 +1819,7 @@ def restore():
     try:
         resp = fetch()
         compare = subprocess.Popen(
-            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*"],
+            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*", "--exclude=*.hermes/logs*", "--exclude=*gateway.heartbeat*", "--exclude=*.config/universe-chromium*"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         fed = {"whole": False}
         def pour():
@@ -1446,6 +1855,8 @@ def restore():
             os.remove(os.path.join(STATE, name))
         except OSError:
             pass
+    # The old-proxy settings in the agent's own files are cleaned here, as the computer's own user, which runs this: finish (root) never reads or rewrites a file the agent can change
+    drop_legacy_home()
     print("restored=1 sha=%s bytes=%d" % (digest.hexdigest(), total))
     return 0
 
@@ -1454,76 +1865,466 @@ def restore():
 # in the usual settings files, the apt setting, git's system setting, the hosts-file block and the old settings file). Never touches anything else.
 LEGACY = "127.0.0.1:3128"
 
-def drop_legacy_proxy():
-    for path in ("/etc/apt/apt.conf.d/99universe-egress", "/etc/universe/egress.json"):
+def strip_legacy(text):
+    # The text without the old-proxy lines, and whether any were there
+    kept, inside, changed = [], False, False
+    for line in text.split("\n"):
+        if line.startswith("# universe-egress begin"):
+            inside, changed = True, True
+            continue
+        if inside:
+            if line.startswith("# universe-egress end"):
+                inside = False
+            continue
+        if LEGACY in line:
+            changed = True
+            continue
+        kept.append(line)
+    return "\n".join(kept), changed
+
+def clean_file(path):
+    # Takes the old-proxy lines out of one of the agent's own settings files, in place (run as the computer's own user). Nothing when it is not there or has none
+    try:
+        with open(path) as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    text, changed = strip_legacy(text)
+    if changed:
         try:
-            os.remove(path)
+            with open(path, "w") as handle:
+                handle.write(text)
         except OSError:
             pass
-    try:
-        got = subprocess.run(["git", "config", "--system", "--get-all", "http.proxy"], capture_output=True, text=True, timeout=30)
-        if LEGACY in got.stdout:
-            subprocess.run(["git", "config", "--system", "--unset-all", "http.proxy"], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    targets = ["/etc/environment", "/etc/profile.d/proxy.sh", "/etc/hosts"] + [os.path.join(HOME, name) for name in (".gitconfig", ".npmrc", ".profile", ".bashrc", ".bash_profile", ".wgetrc", ".curlrc", ".pip/pip.conf", ".config/pip/pip.conf", ".hermes/.env")]
-    for path in targets:
-        try:
-            with open(path) as handle:
-                lines = handle.read().split("\n")
-        except (OSError, UnicodeDecodeError):
-            continue
-        kept, inside, changed = [], False, False
-        for line in lines:
-            if line.startswith("# universe-egress begin"):
-                inside, changed = True, True
-                continue
-            if inside:
-                if line.startswith("# universe-egress end"):
-                    inside = False
-                continue
-            if LEGACY in line:
-                changed = True
-                continue
-            kept.append(line)
-        if changed:
-            try:
-                with open(path, "w") as handle:
-                    handle.write("\n".join(kept))
-            except OSError:
-                pass
 
-def finish():
-    if os.getuid() != 0:
-        print("finished=0 reason=not_root")
-        return 1
-    files = 0
-    if os.path.isdir(OUTSIDE):
-        for root, _dirs, names in os.walk(OUTSIDE, followlinks=False):
-            for name in names:
-                source = os.path.join(root, name)
-                target = "/" + os.path.relpath(source, OUTSIDE)
-                if skipped(target) or not any(target.startswith(r + "/") for r in ROOTS):
+def clean_system_file(path):
+    # Root, in finish. The file is reached from the top of the file system one step at a time and never through a link (a link at any step, or anything that is not a plain file, is left
+    # alone: a copy can have put a link at one of these names), and what is left of it is written through the descriptor it was read from, never by opening the name again
+    parts = path.lstrip("/").split("/")
+    try:
+        root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        parent = open_steps(root_fd, parts[:-1])
+        try:
+            fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        finally:
+            os.close(parent)
+        with os.fdopen(fd, "r+") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return
+            text, changed = strip_legacy(handle.read())
+            if changed:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(text)
+    except (OSError, UnicodeDecodeError):
+        pass
+    finally:
+        os.close(root_fd)
+
+def drop_legacy_home():
+    # The agent's own settings files: run by restore, as the computer's own user (never as root, which would read a file, then open it again by a name the agent can swap for a link).
+    # A link, or a file below a folder that is one, is left alone
+    for name in (".gitconfig", ".npmrc", ".profile", ".bashrc", ".bash_profile", ".wgetrc", ".curlrc", ".pip/pip.conf", ".config/pip/pip.conf", ".hermes/.env"):
+        path = os.path.join(HOME, name)
+        current = HOME
+        linked = False
+        for part in name.split("/"):
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                linked = True
+        if not linked:
+            clean_file(path)
+
+def drop_legacy_proxy():
+    # Root, in finish: only files of the computer itself (folders the agent cannot write)
+    for path in ("/etc/apt/apt.conf.d/99universe-egress", "/etc/universe/egress.json"):
+        try:
+            os.remove(real(path))
+        except OSError:
+            pass
+    # git's own settings are the computer's, not the test's file system: left alone under the test seam
+    if not FSROOT:
+        try:
+            got = subprocess.run(["git", "config", "--system", "--get-all", "http.proxy"], capture_output=True, text=True, timeout=30)
+            if LEGACY in got.stdout:
+                subprocess.run(["git", "config", "--system", "--unset-all", "http.proxy"], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for path in ("/etc/environment", "/etc/profile.d/proxy.sh", "/etc/hosts"):
+        clean_system_file(path)
+
+class Tampered(Exception):
+    pass
+
+def read_manifest(manifest):
+    # What prepack printed, as Orbit kept it: a bad shape is a failure of its own (outside_manifest)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list) or not isinstance(manifest.get("packages"), list):
+        raise ValueError("shape")
+    entries = []
+    for item in manifest["files"]:
+        if not isinstance(item, list) or len(item) != 5:
+            raise ValueError("entry")
+        kind, path, size, mode, value = item
+        if kind not in ("f", "l") or not isinstance(path, str) or not path.startswith("/") or "\x00" in path or os.path.normpath(path) != path:
+            raise ValueError("path")
+        if skipped(path) or not any(path.startswith(r + "/") for r in ROOTS):
+            raise ValueError("root")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0 or not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o7777 or not isinstance(value, str):
+            raise ValueError("fields")
+        if kind == "f" and not SHA256.match(value):
+            raise ValueError("sha")
+        entries.append((kind, path, size, mode, value))
+    if len(entries) > MAX_FILES or len(set(entry[1] for entry in entries)) != len(entries):
+        raise ValueError("count")
+    packages = manifest["packages"]
+    if len(packages) > 2000 or any(not isinstance(name, str) or not PACKAGE_NAME.match(name) for name in packages):
+        raise ValueError("packages")
+    # The modes of folders that are not 0755 (a copy made before they were kept has none): by path, under the same roots, each checked like a file's path
+    modes = {}
+    listed = manifest.get("dirs", [])
+    if not isinstance(listed, list) or len(listed) > MAX_FILES * 4:
+        raise ValueError("dirs")
+    for item in listed:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("dirs")
+        path, mode = item
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or os.path.normpath(path) != path or not any(path.startswith(r + "/") for r in ROOTS):
+            raise ValueError("dirs")
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o7777 or path in modes:
+            raise ValueError("dirs")
+        modes[path] = mode
+    return entries, packages, modes
+
+def open_parent(rel):
+    # The folder that holds rel inside OUTSIDE, opened one step at a time and never through a link: returns (the folder's descriptor, the last name)
+    parts = rel.split("/")
+    fd = os.open(OUTSIDE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            step = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = step
+        return fd, parts[-1]
+    except BaseException:
+        os.close(fd)
+        raise
+
+def open_entry(entry):
+    # The file of the entry as a descriptor, opened without following any link and checked against what prepack saw (never its size or mode from anywhere else)
+    kind, path, size, mode, value = entry
+    parent, name = open_parent(path.lstrip("/"))
+    try:
+        # O_NONBLOCK: a pipe where a file should be is refused by the check below, not waited on until the command times out
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    info = os.fstat(fd)
+    if not statmod.S_ISREG(info.st_mode) or info.st_size != size or (info.st_mode & 0o7777) != mode:
+        os.close(fd)
+        raise Tampered()
+    return fd, info
+
+def check_link(entry):
+    kind, path, size, mode, value = entry
+    parent, name = open_parent(path.lstrip("/"))
+    try:
+        if os.readlink(name, dir_fd=parent) != value:
+            raise Tampered()
+    finally:
+        os.close(parent)
+
+def outside_present():
+    # Every file and link in the folder (a link to a folder is listed with the folders and never walked)
+    present = set()
+    for root, dirs, names in os.walk(OUTSIDE, followlinks=False):
+        for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+            present.add("/" + os.path.relpath(os.path.join(root, name), OUTSIDE))
+    return present
+
+def verify_outside(entries):
+    # Everything is checked BEFORE anything is written: an extra, missing or different file means nothing at all is put back (and install_outside stages and re-checks every file before it moves the first one)
+    try:
+        if plain(STATE, True) is False or plain(OUTSIDE, True) is False:
+            raise Tampered()
+        if plain(OUTSIDE, True) is None:
+            if entries:
+                raise Tampered()
+            return
+        if outside_present() != set(entry[1] for entry in entries):
+            raise Tampered()
+        for entry in entries:
+            if entry[0] == "l":
+                check_link(entry)
+                continue
+            fd, _info = open_entry(entry)
+            digest = hashlib.sha256()
+            with os.fdopen(fd, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != entry[4]:
+                raise Tampered()
+    except OSError:
+        raise Tampered()
+
+def make_stage(parent):
+    # A fresh private folder inside the folder held as parent (so the same file system), where each file or link is made and then renamed into place from. Only root can change what is inside it, so what is
+    # published is exactly what was checked. A name that is taken is never removed to make room: another one is tried. Returns (name, descriptor, identity)
+    for _ in range(5):
+        name = ".uc-" + os.urandom(4).hex()
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            continue
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        except OSError:
+            raise Tampered()
+        info = os.fstat(fd)
+        # The folder opened must be the one just made: a folder, ours, on the same file system (anything else means the name was swapped meanwhile). A folder of anyone else is never touched below
+        if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_dev != os.fstat(parent).st_dev:
+            os.close(fd)
+            raise Tampered()
+        # A folder made inside one that passes the set-group-id bit on (a Debian /usr/local and its folders are 2775) comes out with that bit too, whatever mode it was asked for: it is set to exactly
+        # 0700 here, through the descriptor, and must read back as that (nothing else is accepted)
+        try:
+            os.fchmod(fd, 0o700)
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            raise Tampered()
+        if (info.st_mode & 0o7777) != 0o700:
+            os.close(fd)
+            raise Tampered()
+        return name, fd, (info.st_dev, info.st_ino)
+    raise Tampered()
+
+def reopen_stage(parent, item):
+    # The private folder is found again by its name, and is used only when it is the very folder that was made (same device and number, ours, closed to everyone else): a folder the agent put there
+    # under that name, or moved over from another place, is never used
+    fd = os.open(item["stage"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    info = os.fstat(fd)
+    if not statmod.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or (info.st_mode & 0o7777) != 0o700 or (info.st_dev, info.st_ino) != item["stage_ident"]:
+        os.close(fd)
+        raise Tampered()
+    return fd
+
+def install_outside(entries, modes):
+    # Two steps. First EVERY file and link is made in a private folder of its own beside its target and checked (read again from the copy, hashed again as it is written): a copy that changed after the
+    # check, or anything else that goes wrong while reading, stops here with nothing put in place. Only then each is renamed over its target, from the private folder to the target's folder, both held as
+    # descriptors. What can still fail in the second step is a folder swapped at that moment in a folder the agent can write (refused), or a target that is a folder; what was already moved stays, and the
+    # private folders that are left are removed again
+    count = 0
+    staged = []
+    root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            for entry in entries:
+                kind, path, size, mode, value = entry
+                parts = path.lstrip("/").split("/")
+                # The folder that holds the target is reached from the top of the file system one step at a time, never through a link: a link found on the way (one the agent put in a folder it can write)
+                # means the list does not match what is on this computer, and nothing more is written
+                try:
+                    parent = open_steps(root_fd, parts[:-1], create=True, modes=modes)
+                except OSError:
+                    raise Tampered()
+                try:
+                    if kind == "l":
+                        check_link(entry)
+                        stage_name, stage, stage_ident = make_stage(parent)
+                        item = {"kind": "l", "parts": parts, "stage": stage_name, "stage_ident": stage_ident, "ident": None}
+                        staged.append(item)
+                        try:
+                            os.symlink(value, "f", dir_fd=stage)
+                            made = os.lstat("f", dir_fd=stage)
+                            item["ident"] = (made.st_dev, made.st_ino)
+                        finally:
+                            os.close(stage)
+                        continue
+                    # Copied from the descriptor that was checked, hashed again as it is copied, written in the private folder. The set-user-id and set-group-id bits are never put back
+                    fd, info = open_entry(entry)
+                    try:
+                        stage_name, stage, stage_ident = make_stage(parent)
+                    except BaseException:
+                        os.close(fd)
+                        raise
+                    item = {"kind": "f", "parts": parts, "stage": stage_name, "stage_ident": stage_ident, "ident": None}
+                    staged.append(item)
+                    try:
+                        try:
+                            out = os.open("f", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=stage)
+                        except BaseException:
+                            os.close(fd)
+                            raise
+                    finally:
+                        os.close(stage)
+                    digest = hashlib.sha256()
+                    with os.fdopen(fd, "rb") as source, os.fdopen(out, "wb") as sink:
+                        for chunk in iter(lambda: source.read(1 << 20), b""):
+                            digest.update(chunk)
+                            sink.write(chunk)
+                        sink.flush()
+                        if digest.hexdigest() != value:
+                            raise Tampered()
+                        if os.getuid() == 0:
+                            os.fchown(sink.fileno(), 0, 0)
+                        os.fchmod(sink.fileno(), mode & 0o1777)
+                        os.utime(sink.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+                        os.fsync(sink.fileno())
+                        done = os.fstat(sink.fileno())
+                        item["ident"] = (done.st_dev, done.st_ino)
+                finally:
+                    os.close(parent)
+            for item in staged:
+                try:
+                    parent = open_steps(root_fd, item["parts"][:-1])
+                except OSError:
+                    raise Tampered()
+                try:
+                    try:
+                        stage = reopen_stage(parent, item)
+                    except OSError:
+                        raise Tampered()
+                    try:
+                        # Looked at through the held folder just before it is moved: it must still be the very file or link that was made and checked (one name, nothing else linked to it)
+                        now = os.lstat("f", dir_fd=stage)
+                        regular = statmod.S_ISREG(now.st_mode) and now.st_nlink == 1
+                        if (item["kind"] == "f" and not regular) or (item["kind"] == "l" and not statmod.S_ISLNK(now.st_mode)) or (now.st_dev, now.st_ino) != item["ident"]:
+                            raise Tampered()
+                        os.rename("f", item["parts"][-1], src_dir_fd=stage, dst_dir_fd=parent)
+                        item["placed"] = True
+                        count += 1
+                    finally:
+                        os.close(stage)
+                    try:
+                        os.rmdir(item["stage"], dir_fd=parent)
+                        item["stage"] = None
+                    except OSError:
+                        pass
+                finally:
+                    os.close(parent)
+        except BaseException:
+            # What was made and not moved is taken away again, and so are the private folders: each is opened again by name and used only when it is the folder that was made
+            for item in staged:
+                if not item.get("stage"):
                     continue
                 try:
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    if os.path.islink(source):
-                        if os.path.lexists(target):
-                            os.remove(target)
-                        os.symlink(os.readlink(source), target)
-                    else:
-                        shutil.copy2(source, target)
-                        os.chown(target, 0, 0)
-                    files += 1
+                    parent = open_steps(root_fd, item["parts"][:-1])
                 except OSError:
-                    print("finished=0 reason=outside_not_written")
-                    return 1
-    packages = []
+                    continue
+                try:
+                    try:
+                        stage = reopen_stage(parent, item)
+                    except (OSError, Tampered):
+                        continue
+                    try:
+                        os.unlink("f", dir_fd=stage)
+                    except OSError:
+                        pass
+                    finally:
+                        os.close(stage)
+                    try:
+                        os.rmdir(item["stage"], dir_fd=parent)
+                    except OSError:
+                        pass
+                finally:
+                    os.close(parent)
+            raise
+    finally:
+        os.close(root_fd)
+    return count
+
+def drop_outside():
+    # The copy folder is not needed once finish has read it: removed by descriptors (a link is removed, never followed), so nothing of it stays readable in the home folder afterwards
     try:
-        with open(PACKAGES_FILE) as handle:
-            packages = [name for name in handle.read().split() if PACKAGE_NAME.match(name)]
+        state_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
-        packages = []
+        return
+    try:
+        remove_tree(state_fd, "outside")
+    except OSError:
+        pass
+    finally:
+        os.close(state_fd)
+
+def read_list(spec):
+    # The list Orbit sent in slices (list-put): as long as it said and with the SHA-256 it said, or it is refused
+    if not isinstance(spec, dict) or not isinstance(spec.get("bytes"), int) or isinstance(spec.get("bytes"), bool) or not isinstance(spec.get("sha256"), str) or not SHA256.match(spec["sha256"]):
+        raise ValueError("spec")
+    if spec["bytes"] < 2 or spec["bytes"] > MAX_LIST_BYTES:
+        raise ValueError("size")
+    try:
+        folder = cold_dir(False)
+        try:
+            fd = os.open(LIST_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "rb") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode) or os.fstat(handle.fileno()).st_size != spec["bytes"]:
+                raise ValueError("size")
+            data = handle.read(spec["bytes"] + 1)
+    except OSError:
+        raise ValueError("unreadable")
+    if len(data) != spec["bytes"] or hashlib.sha256(data).hexdigest() != spec["sha256"]:
+        raise ValueError("sha")
+    return json.loads(data.decode("ascii"))
+
+def finish():
+    try:
+        return finish_with_list()
+    finally:
+        # Whatever was sent in slices is gone once this ends, however it ended
+        if os.getuid() == 0 or FSROOT:
+            drop_list()
+
+def finish_with_list():
+    if os.getuid() != 0 and not FSROOT:
+        print("finished=0 reason=not_root")
+        return 1
+    # What prepack printed comes from Orbit on standard input, never from the home folder: {"outside": {...}} (null for a copy made before the list was kept),
+    # or {"outside_file": {"bytes", "sha256"}} when the list was too long for one command and was sent in slices (list-put)
+    try:
+        raw = sys.stdin.read()
+        config = json.loads(raw) if raw.strip() else {}
+        if isinstance(config, dict) and "outside_file" in config:
+            manifest = read_list(config["outside_file"])
+        else:
+            manifest = config.get("outside") if isinstance(config, dict) else None
+    except ValueError:
+        print("finished=0 reason=outside_manifest")
+        return 1
+    entries = []
+    packages = []
+    modes = {}
+    if manifest is not None:
+        try:
+            entries, packages, modes = read_manifest(manifest)
+        except ValueError:
+            print("finished=0 reason=outside_manifest")
+            return 1
+    # From here the copy folder is not needed again, whatever the outcome (a retry comes from the saved copy, never from this folder): it is removed when this ends, so a file that only root
+    # could read is not left in the home folder after a restore
+    try:
+        return finish_apply(manifest, entries, packages, modes)
+    finally:
+        drop_outside()
+
+def finish_apply(manifest, entries, packages, modes):
+    files = 0
+    unverified = manifest is None
+    if not unverified:
+        try:
+            verify_outside(entries)
+            wait_past_unpack()
+            files = install_outside(entries, modes)
+        except Tampered:
+            print("finished=0 reason=outside_tampered")
+            return 1
+        except OSError:
+            print("finished=0 reason=outside_not_written")
+            return 1
     if packages:
         update = subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=600)
         install = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "-qq"] + packages, capture_output=True, timeout=1800)
@@ -1531,12 +2332,14 @@ def finish():
             print("finished=0 reason=packages")
             return 1
     drop_legacy_proxy()
-    print("finished=1 files=%d packages=%d" % (files, len(packages)))
+    # A copy with no list kept (made before it was) puts nothing back outside the home folder: the folder it carries is not trusted, and this says so
+    # Always one of the two words: a caller that does not see either did not run this script (an older one prints neither), and does not take the restore for good
+    print("finished=1 files=%d packages=%d outside=%s" % (files, len(packages), "unverified" if unverified else "applied"))
     return 0
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    code = {"prepack": prepack, "restore": restore, "finish": finish}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish") or 2))()
+    code = {"prepack": prepack, "restore": restore, "finish": finish, "list-piece": list_piece, "list-put": list_put, "outside-check": outside_check}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish|list-piece|list-put|outside-check") or 2))()
     sys.exit(code)
 `;
 

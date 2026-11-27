@@ -234,6 +234,8 @@ describe('Apps: use and demand', () => {
     let reads = 0;
     fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
       if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      // The GitHub App read is not a read of the page
+      if (url === '/api/admin/github-app') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
       reads += 1;
       return reads === 1 ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }) : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
     });
@@ -298,5 +300,98 @@ describe('Apps: use and demand', () => {
     await screen.findByText('14,017');
     fireEvent.click(screen.getByTestId('apps-range-7'));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+  });
+});
+
+/** Universe's own GitHub App on the Apps page (game #2041): the one place a super admin starts it, with no typed address. */
+describe('GitHub row: Universe’s GitHub App', () => {
+  const github = (over: Partial<AppRow> = {}) => app({ key: 'github', name: 'GitHub', kind: 'own', ...over });
+  const serve = (githubAnswer: { made: boolean; slug?: string; url?: string } | number) =>
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/admin/github-app') {
+        return typeof githubAnswer === 'number' ? Promise.resolve({ ok: false, status: githubAnswer, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(githubAnswer) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report({ apps: [app(), github()] })) });
+    });
+
+  it('before the App is made: the row says Composio and points at the setup, and the sheet has the button to the setup page', async () => {
+    serve({ made: false });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    expect(screen.getByTestId('apps-github-hint')).toHaveTextContent('Tap to set up Universe’s GitHub App');
+    expect(screen.getByTestId('apps-github-hint')).not.toHaveTextContent('own');
+    // Only GitHub gets it
+    expect(screen.getByTestId('apps-row-video')).not.toHaveTextContent('GitHub App');
+
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    const button = within(sheet).getByTestId('apps-github-setup');
+    expect(button).toHaveTextContent('Set up Universe’s GitHub App');
+    // A link Orbit follows itself, not an address someone types
+    expect(button.getAttribute('href')).toBe('/admin/github-app');
+    expect(within(sheet).getByTestId('apps-github-text')).toHaveTextContent('keep running as they do now');
+    // The guidance names no provider: what GitHub runs on is the Runs on choice's job (operator-only)
+    expect(within(sheet).getByTestId('apps-github-text')).not.toHaveTextContent('Composio');
+    expect(within(sheet).queryByTestId('apps-github-status')).not.toBeInTheDocument();
+    // How GitHub runs through Composio is untouched: the Runs on choice is still there, in its old words
+    expect(within(sheet).getByTestId('apps-route-composio')).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-route-universe')).toHaveTextContent('We have no version of our own for this App yet.');
+    expect(within(sheet).queryByTestId('apps-github-runs-on-note')).not.toBeInTheDocument();
+  });
+
+  it('once the App is made: the row STILL says Runs on Composio (people still use it) with the line about new connections, and the sheet shows the status, where it lives, no setup button and new words under Runs on', async () => {
+    serve({ made: true, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    await waitFor(() => expect(screen.getByTestId('apps-github-hint')).toHaveTextContent('New connections use Universe’s GitHub App'));
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    // Other Apps are not touched
+    expect(screen.getByTestId('apps-runs-on-video')).toHaveTextContent('Runs on Composio');
+    expect(screen.getByTestId('apps-row-video')).not.toHaveTextContent('New connections');
+
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-github-status')).toHaveTextContent('Set up');
+    expect(within(sheet).queryByTestId('apps-github-setup')).not.toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-github-open').getAttribute('href')).toBe('https://github.com/apps/bawes-universe');
+    expect(within(sheet).getByTestId('apps-github-open')).toHaveTextContent('bawes-universe');
+    expect(within(sheet).getByTestId('apps-github-runs-on-note')).toHaveTextContent('Only for GitHub connections people made before.');
+    expect(within(sheet).getByTestId('apps-github-runs-on-note')).not.toHaveTextContent('Composio');
+    expect(within(sheet).getByTestId('apps-route-universe')).toHaveTextContent('New connections use Universe’s GitHub App above.');
+    expect(within(sheet).getByTestId('apps-route-universe')).not.toHaveTextContent('no version of our own');
+    // The choice itself works as before: still Composio, still not pickable
+    expect(within(sheet).getByTestId('apps-route-composio')).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-route-universe')).toBeDisabled();
+  });
+
+  it('made but its address not known (another server just made it): says it is set up and shows no link', async () => {
+    serve({ made: true });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    await waitFor(() => expect(within(sheet).getByTestId('apps-github-status')).toBeInTheDocument());
+    expect(within(sheet).queryByTestId('apps-github-open')).not.toBeInTheDocument();
+    expect(within(sheet).queryByTestId('apps-github-setup')).not.toBeInTheDocument();
+  });
+
+  it('when it cannot be read, the setup is still offered (the setup page says when the App is already made), and the page works as before', async () => {
+    serve(500);
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    expect(screen.getByTestId('apps-runs-on-github')).toHaveTextContent('Runs on Composio');
+    fireEvent.click(screen.getByTestId('apps-row-github'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-github-setup')).toBeInTheDocument();
+  });
+
+  it('no other App’s sheet has the GitHub panel', async () => {
+    serve({ made: false });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).queryByTestId('apps-github-panel')).not.toBeInTheDocument();
   });
 });

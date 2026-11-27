@@ -272,6 +272,21 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     );
   });
 
+  it('an ack takes only the person’s lock, so its transactions keep the usual 15 s (not the longer wait of a claim that takes the computer’s row)', async () => {
+    const sara = await owner();
+    const key = keyOf();
+    expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', startKey: key }, NOW)).toMatchObject({ ok: true });
+    const spy = jest.spyOn(prisma, '$transaction');
+    try {
+      expect(await ackStart(sara.brickId, sara.id, key)).toBe(true);
+      const options = spy.mock.calls.map((call) => call[1]).filter((option) => option !== undefined);
+      expect(options.length).toBeGreaterThan(0);
+      for (const option of options) expect(option).toEqual({ timeout: 15_000, maxWait: 15_000 });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('an ack waits for the start that is still deciding under the person’s lock, then confirms the job it made: `true` is never answered with the job left unconfirmed (CodeRabbit)', async () => {
     const sara = await owner();
     const key = keyOf();

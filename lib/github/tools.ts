@@ -4,7 +4,8 @@ import { gitHubMessage, gitHubRequest, type FetchLike, type GitHubAnswer } from 
  * What a Brick can do on GitHub (game #2041), always as its owner with the owner's own sign-in. Served by Orbit as an app link
  * (POST /api/ready-made/link), so the token never leaves Orbit. There is no tool that deletes a repository, a branch or a tag.
  *
- * Each tool says whether it only looks (readOnlyHint) or changes something, which the Brick's four headings are suggested from.
+ * Each tool says whether it only looks (readOnlyHint) or changes something. Universe sorts each under one of the Brick's four headings
+ * itself (lib/github/actions.ts), and the person picks Right away, Asks first or Off per heading and per tool, like any App's actions.
  */
 
 export interface ToolDefinition {
@@ -52,9 +53,9 @@ export const GITHUB_TOOLS: ToolDefinition[] = [
   look('github_get_pull_request', 'Read a pull request', 'One pull request: its text, branches, whether it can be merged, and the files it changes.', { repo: REPO, number: NUMBER }, ['repo', 'number']),
   look('github_list_issues', 'List issues', 'Issues of a repository (not pull requests).', { repo: REPO, state: { type: 'string', enum: ['open', 'closed', 'all'] }, labels: { type: 'string', description: 'Comma-separated label names' } }, ['repo']),
   look('github_get_issue', 'Read an issue', 'One issue or pull request conversation, with its latest comments.', { repo: REPO, number: NUMBER }, ['repo', 'number']),
-  look('github_ci_status', 'Check CI', 'The checks of a branch, pull request head or commit: each job, its result and its id (for its log).', { repo: REPO, ref: { type: 'string', description: 'Branch, tag or commit' } }, ['repo', 'ref']),
-  look('github_list_ci_runs', 'List CI runs', 'Recent workflow runs of a repository, with their ids (for running them again).', { repo: REPO, branch: { type: 'string' } }, ['repo']),
-  look('github_ci_job_log', 'Read a CI log', 'The end of one CI job’s log (the job id comes from Check CI).', { repo: REPO, job_id: NUMBER }, ['repo', 'job_id']),
+  look('github_ci_status', 'Read checks', 'The checks of a branch, pull request head or commit: each job, its result and its id (for its log).', { repo: REPO, ref: { type: 'string', description: 'Branch, tag or commit' } }, ['repo', 'ref']),
+  look('github_list_ci_runs', 'List workflow runs', 'Recent workflow runs of a repository, with their ids (for running them again).', { repo: REPO, branch: { type: 'string' } }, ['repo']),
+  look('github_ci_job_log', 'Read a check log', 'The end of one check’s log (the job id comes from Read checks).', { repo: REPO, job_id: NUMBER }, ['repo', 'job_id']),
   make('github_create_repo', 'Make a repository', 'A new repository in the owner’s account, or in an organization where Universe’s GitHub app works.', { name: { type: 'string' }, owner: { type: 'string', description: 'An organization; the owner’s own account when left out' }, private: { type: 'boolean' }, description: { type: 'string' } }, ['name']),
   make('github_create_branch', 'Make a branch', 'A new branch, from another branch or commit (the default branch when left out).', { repo: REPO, branch: { type: 'string' }, from: { type: 'string' } }, ['repo', 'branch']),
   make('github_write_files', 'Commit files', 'One commit on a branch that writes (or deletes) files. Makes the branch from the default branch when it does not exist yet.', {
@@ -83,7 +84,24 @@ export const GITHUB_TOOLS: ToolDefinition[] = [
   make('github_comment', 'Comment', 'A comment on an issue or pull request.', { repo: REPO, number: NUMBER, body: { type: 'string' } }, ['repo', 'number', 'body']),
   change('github_merge_pull_request', 'Merge a pull request', 'Merges a pull request.', { repo: REPO, number: NUMBER, method: { type: 'string', enum: ['merge', 'squash', 'rebase'] } }, ['repo', 'number']),
   change('github_update_issue', 'Change an issue', 'Changes an issue or pull request: its title, text, labels, or open or closed.', { repo: REPO, number: NUMBER, title: { type: 'string' }, body: { type: 'string' }, state: { type: 'string', enum: ['open', 'closed'] }, labels: { type: 'array', items: { type: 'string' } } }, ['repo', 'number'], true),
-  change('github_rerun_ci', 'Run CI again', 'Runs a workflow run again (only its failed jobs, unless all is asked).', { repo: REPO, run_id: NUMBER, all: { type: 'boolean' } }, ['repo', 'run_id']),
+  change('github_rerun_ci', 'Run checks again', 'Runs a workflow run again (only its failed jobs, unless all is asked). A run that was started by hand, like a deploy, is run again with Run a workflow instead.', { repo: REPO, run_id: NUMBER, all: { type: 'boolean' } }, ['repo', 'run_id']),
+  change(
+    'github_run_workflow',
+    'Run a workflow',
+    'Starts a workflow that is started by hand, like a deploy (its file must allow workflow_dispatch). Read a file on .github/workflows lists the workflow files. List workflow runs shows the run a few seconds later.',
+    {
+      repo: REPO,
+      workflow: { type: 'string', description: 'The workflow file name in .github/workflows (for example deploy.yml), or its id' },
+      branch: { type: 'string', description: 'The branch or tag it runs on; the default branch when left out' },
+      // A list of plain name and value pairs, not a map: every model provider takes this shape (some refuse maps and mixed types)
+      inputs: {
+        type: 'array',
+        description: 'The workflow’s inputs, when it has some: each with its name and its value as text (true, false and numbers written as text)',
+        items: { type: 'object', properties: { name: { type: 'string' }, value: { type: 'string' } }, required: ['name', 'value'] },
+      },
+    },
+    ['repo', 'workflow'],
+  ),
 ];
 
 const NAMES = new Set(GITHUB_TOOLS.map((tool) => tool.name));
@@ -152,6 +170,35 @@ function whole(value: unknown, field: string): number {
   return n;
 }
 
+/** A workflow as it goes in a path: its file name in .github/workflows (deploy.yml), or its id. */
+function workflowPath(value: unknown): string {
+  const workflow = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim().replace(/^\.github\/workflows\//, '') : '';
+  if (/^[1-9][0-9]{0,18}$/.test(workflow) || /^[A-Za-z0-9._-]{1,200}\.ya?ml$/.test(workflow)) return encodeURIComponent(workflow);
+  throw new ToolError('Give the workflow as its file name in .github/workflows (for example deploy.yml) or its id.');
+}
+
+/** A workflow's inputs: names to text, numbers or true/false (sent as text, which is what GitHub takes). Undefined when not given. */
+function workflowInputs(value: unknown): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object') throw new ToolError('inputs must be a list of the workflow’s inputs, each with its name and value.');
+  // The list the tool asks for; inputs by name are taken too
+  const entries: [string, unknown][] = Array.isArray(value)
+    ? value.map((entry, index) => {
+        const pair = entry as { name?: unknown; value?: unknown } | null;
+        if (!pair || typeof pair !== 'object' || typeof pair.name !== 'string' || !pair.name) throw new ToolError(`Input ${index + 1} needs a name and a value.`);
+        return [pair.name, pair.value];
+      })
+    : Object.entries(value as Record<string, unknown>);
+  if (entries.length > 25) throw new ToolError('A workflow takes at most 25 inputs.');
+  const inputs: Record<string, string> = {};
+  for (const [key, item] of entries) {
+    if (typeof item === 'string') inputs[key] = item;
+    else if (typeof item === 'number' || typeof item === 'boolean') inputs[key] = String(item);
+    else throw new ToolError(`Input ${key} must be text, a number or true/false.`);
+  }
+  return inputs;
+}
+
 const filePath = (path: string) =>
   path
     .replace(/^\/+/, '')
@@ -183,7 +230,21 @@ function refusal(answer: GitHubAnswer, what: string): ToolResult {
 type Request = <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => Promise<GitHubAnswer<T>>;
 
 /** Runs one tool as the person whose token this is. Never throws: a failure is a result the Brick reads. */
-export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch): Promise<ToolResult> {
+export interface RunOptions {
+  /**
+   * Set when a run that was started by hand (like a deploy) may not be run again with Run checks again, because Run a workflow is not
+   * Right away for this Brick: the words the Brick reads. Running such a run again is the same as starting it, so it goes through Run a
+   * workflow and its choice instead (it may ask first). Left out, any run may be run again.
+   */
+  handStartedRerun?: string;
+  /**
+   * Set when Commit files may not make a branch that is not there yet, because Make a branch is not Right away for this Brick: the words
+   * the Brick reads. A commit onto a branch that is there runs as usual. Left out, Commit files makes a new branch as it always did.
+   */
+  newBranchStop?: string;
+}
+
+export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch, options: RunOptions = {}): Promise<ToolResult> {
   // Whether a change may have happened: set once a change is sent and GitHub does not plainly turn it down
   let mayHaveChanged = false;
   const request: Request = async <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => {
@@ -200,7 +261,7 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   };
   let result: ToolResult;
   try {
-    result = await run(request, name, args ?? {}, fetchImpl);
+    result = await run(request, name, args ?? {}, fetchImpl, options);
   } catch (error) {
     if (error instanceof ToolError) result = error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true };
     else {
@@ -248,7 +309,7 @@ async function shaOf(request: Request, repo: string, ref: string): Promise<strin
   return answer.data.sha;
 }
 
-async function run(request: Request, name: string, args: Record<string, unknown>, fetchImpl: FetchLike): Promise<ToolResult> {
+async function run(request: Request, name: string, args: Record<string, unknown>, fetchImpl: FetchLike, options: RunOptions): Promise<ToolResult> {
   switch (name) {
     case 'github_whoami': {
       const answer = await request<{ login?: string; name?: string; html_url?: string }>('/user');
@@ -413,7 +474,7 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       return answer.ok ? out({ branch, from, sha }) : refusal(answer, `making branch ${branch}`);
     }
     case 'github_write_files':
-      return writeFiles(request, args);
+      return writeFiles(request, args, options);
     case 'github_create_pull_request': {
       const repo = repoPath(args.repo);
       const base = text(args.base, 'base', false) ?? (await defaultBranch(request, repo));
@@ -451,8 +512,26 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       return answer.ok ? out({ number: answer.data.number, state: answer.data.state, url: answer.data.html_url }) : refusal(answer, 'changing it');
     }
     case 'github_rerun_ci': {
-      const answer = await request(`${repoPath(args.repo)}/actions/runs/${whole(args.run_id, 'run_id')}/${args.all === true ? 'rerun' : 'rerun-failed-jobs'}`, { method: 'POST', body: {} });
-      return answer.ok ? out({ started: true }) : refusal(answer, 'running CI again');
+      const run = `${repoPath(args.repo)}/actions/runs/${whole(args.run_id, 'run_id')}`;
+      if (options.handStartedRerun) {
+        // Only a run known not to be started by hand is run again here: one that cannot be read is not run
+        const found = await request<{ event?: string }>(run);
+        if (!found.ok) return refusal(found, 'reading the run');
+        if (found.data.event === 'workflow_dispatch') return { text: options.handStartedRerun, isError: true };
+      }
+      const answer = await request(`${run}/${args.all === true ? 'rerun' : 'rerun-failed-jobs'}`, { method: 'POST', body: {} });
+      return answer.ok ? out({ started: true }) : refusal(answer, 'running the checks again');
+    }
+    case 'github_run_workflow': {
+      const repo = repoPath(args.repo);
+      const workflow = workflowPath(args.workflow);
+      const ref = text(args.branch, 'branch', false) ?? (await defaultBranch(request, repo));
+      const inputs = workflowInputs(args.inputs);
+      const answer = await request<{ workflow_run_id?: number; html_url?: string } | string>(`${repo}/actions/workflows/${workflow}/dispatches`, { method: 'POST', body: { ref, ...(inputs ? { inputs } : {}) } });
+      if (!answer.ok) return refusal(answer, `running workflow ${String(args.workflow).trim()}`);
+      // GitHub answers 204 with nothing, or (newer) the run it started: said when it is there, else the Brick looks with List workflow runs
+      const run = typeof answer.data === 'object' && answer.data ? answer.data : {};
+      return out({ started: true, workflow: String(args.workflow).trim(), branch: ref, ...(run.workflow_run_id ? { runId: run.workflow_run_id } : {}), ...(run.html_url ? { url: run.html_url } : {}) });
     }
     default:
       return { text: `There is no GitHub tool called ${name}.`, isError: true };
@@ -505,7 +584,7 @@ async function modesOf(request: Request, repo: string, treeSha: string, paths: s
 }
 
 /** One commit that writes (or deletes) files on a branch, through GitHub's git data API. The branch is made when it is new. */
-async function writeFiles(request: Request, args: Record<string, unknown>): Promise<ToolResult> {
+async function writeFiles(request: Request, args: Record<string, unknown>, options: RunOptions): Promise<ToolResult> {
   const repo = repoPath(args.repo);
   const branch = text(args.branch, 'branch') as string;
   const message = text(args.message, 'message') as string;
@@ -525,6 +604,8 @@ async function writeFiles(request: Request, args: Record<string, unknown>): Prom
   let parent = await headOf(request, repo, branch);
   let made = false;
   if (!parent) {
+    // Making the branch is Make a branch: it follows that action's choice (the same as a push from the Brick's computer)
+    if (options.newBranchStop) return { text: options.newBranchStop, isError: true };
     parent = await headOf(request, repo, await defaultBranch(request, repo));
     if (!parent) throw new ToolError('The repository has no commits to start a branch from.');
     made = true;

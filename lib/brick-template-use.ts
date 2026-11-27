@@ -348,6 +348,7 @@ export async function makeBrickFromTemplate(viewerId: string, templateId: string
       viewerId,
       { name: input.name ?? version.name, description: version.description, chatInstructions: version.chatInstructions, characterTextureId: version.characterTextureId, hello: version.firstThing },
       tx,
+      limits.newPerHour,
     );
     const makerName = nameOf(template.maker.name);
     await tx.brickTemplateUse.create({ data: { botId: brick.id, templateId: template.id, versionNumber: version.number, makerId: template.makerId, makerName, templateName: version.name, needs: version.needs ?? [] } });

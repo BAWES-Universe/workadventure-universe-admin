@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Cpu } from 'lucide-react';
+import { Cpu, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PickCard, PickChip, Radio } from '@/components/ui/choice';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
@@ -10,11 +10,14 @@ import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import styles from '../../components/ds/ds.module.css';
 import { dollars } from '@/lib/costs-words';
-import { askedLine, byRouteLine, costLine, costTotalLabel, costTotalNote, dayWords, runsOnWords, sheetLine, usesLine } from '@/lib/app-demand-words';
+import { GITHUB_APP_KEY, askedLine, byRouteLine, costLine, costTotalLabel, costTotalNote, dayWords, githubAppWords, runsOnWords, sheetLine, usesLine } from '@/lib/app-demand-words';
 import type { AppRow, DemandReport } from '@/lib/app-demand';
 import type { AppRouteName } from '@/lib/app-routes';
 
 const RANGES = [7, 30, 90];
+
+/** Whether Universe's own GitHub App is made (game #2041). `null` while it is being read, or when it could not be read: the page then offers the setup, which says so itself when the App is already made. */
+type GitHubApp = { made: boolean; slug?: string; url?: string } | null;
 
 /** The page a super admin opens to see which Apps are used and wanted (spec "Paying for Apps", section 22), and to choose what each runs on (section 21). */
 export default function AppsDemandPage() {
@@ -37,6 +40,26 @@ export default function AppsDemandPage() {
   };
   // Only the latest read may show: a slower read of other days must not land on top of the days now showing
   const latest = useRef(0);
+
+  // Whether Universe's GitHub App is made: read once, apart from the report, so the report never waits on it
+  const [githubApp, setGitHubApp] = useState<GitHubApp>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/admin/github-app');
+        if (!response.ok) return;
+        const body = (await response.json()) as { made?: unknown; slug?: unknown; url?: unknown };
+        if (alive && typeof body.made === 'boolean') setGitHubApp({ made: body.made, slug: typeof body.slug === 'string' ? body.slug : undefined, url: typeof body.url === 'string' ? body.url : undefined });
+      } catch {
+        // Not known: the sheet offers the setup anyway
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const load = useCallback(async (): Promise<boolean> => {
     const mine = ++latest.current;
@@ -122,6 +145,11 @@ export default function AppsDemandPage() {
                     <strong className="text-sm font-semibold leading-snug">{row.name}</strong>
                     <StatLine items={usesLine(row)} />
                     <StatLine items={costLine(row)} />
+                    {row.key === GITHUB_APP_KEY && (
+                      <span className="text-xs font-semibold text-primary" data-testid="apps-github-hint">
+                        {githubApp?.made ? githubAppWords.rowHintAfter : githubAppWords.rowHintBefore}
+                      </span>
+                    )}
                   </div>
                   <div className={styles.aside}>
                     <span className={styles.pill} data-testid={`apps-runs-on-${row.key}`}>
@@ -158,7 +186,7 @@ export default function AppsDemandPage() {
 
       <Sheet open={app !== null} onOpenChange={(next) => !next && setOpen(null)}>
         <SheetContent side="bottom" data-testid="apps-sheet">
-          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={(words) => opening.current === thisOpening && setNote(words)} onClose={() => opening.current === thisOpening && setOpen(null)} onSaved={() => loadRef.current()} />}
+          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} githubApp={githubApp} days={report.days} note={note} onNote={(words) => opening.current === thisOpening && setNote(words)} onClose={() => opening.current === thisOpening && setOpen(null)} onSaved={() => loadRef.current()} />}
         </SheetContent>
       </Sheet>
     </div>
@@ -166,13 +194,15 @@ export default function AppsDemandPage() {
 }
 
 /** One App: its numbers, and "Runs on" with the note that people see no change. */
-function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow; days: number; note: string | null; onNote: (words: string | null) => void; onClose: () => void; onSaved: () => Promise<boolean> }) {
+function RouteSheet({ app, githubApp, days, note, onNote, onClose, onSaved }: { app: AppRow; githubApp: GitHubApp; days: number; note: string | null; onNote: (words: string | null) => void; onClose: () => void; onSaved: () => Promise<boolean> }) {
   const [route, setRoute] = useState<AppRouteName>(app.route);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const split = byRouteLine(app);
   const shown = error ?? note;
   const universeOff = !app.own.ready && app.route !== 'universe';
+  // GitHub once Universe's own GitHub App is made: words only, the choice itself works as it always did
+  const githubMade = app.key === GITHUB_APP_KEY && githubApp?.made === true;
 
   // A radio group moves with the arrow keys: the picked one is the one Tab stops on, and an arrow picks the next one that can be picked and focuses it
   const moveBetweenRoutes = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -236,8 +266,15 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
         </p>
       )}
 
+      {app.key === GITHUB_APP_KEY && <GitHubAppPanel githubApp={githubApp} />}
+
       <div className="grid gap-2" role="radiogroup" aria-label="Runs on" onKeyDown={moveBetweenRoutes}>
         <h3 className="text-sm font-semibold">Runs on</h3>
+        {githubMade && (
+          <p className="text-xs leading-relaxed text-muted-foreground" data-testid="apps-github-runs-on-note">
+            {githubAppWords.runsOnOnly}
+          </p>
+        )}
         <PickCard role="radio" tabIndex={route === 'composio' ? 0 : -1} picked={route === 'composio'} indicator={<Radio checked={route === 'composio'} />} title="Composio" onClick={() => setRoute('composio')} data-testid="apps-route-composio" />
         <PickCard
           role="radio"
@@ -245,7 +282,7 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
           picked={route === 'universe'}
           indicator={<Radio checked={route === 'universe'} />}
           title="Universe"
-          description={app.own.ready ? (app.own.passedChecksOn ? `Our own version passed its checks on ${dayWords(app.own.passedChecksOn)}.` : undefined) : app.own.why.join(' ')}
+          description={githubMade ? githubAppWords.universeLine : app.own.ready ? (app.own.passedChecksOn ? `Our own version passed its checks on ${dayWords(app.own.passedChecksOn)}.` : undefined) : app.own.why.join(' ')}
           disabled={universeOff}
           onClick={() => setRoute('universe')}
           data-testid="apps-route-universe"
@@ -270,6 +307,46 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
           Save
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * GitHub's own panel in its sheet (game #2041): the one place a super admin starts Universe's GitHub App from, and, once it is made, where it
+ * says so. The button goes to the setup page inside Orbit; nothing about how GitHub runs through Composio changes.
+ */
+function GitHubAppPanel({ githubApp }: { githubApp: GitHubApp }) {
+  const made = githubApp?.made === true;
+  return (
+    <div className="grid gap-3 rounded-2xl border bg-card p-3" data-testid="apps-github-panel">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold">{githubAppWords.title}</h3>
+        {made && (
+          <span className={styles.pill} data-status="live" data-testid="apps-github-status">
+            <i className={styles.statusDot} aria-hidden="true" />
+            {githubAppWords.madeStatus}
+          </span>
+        )}
+      </div>
+      <p className="text-sm leading-relaxed text-muted-foreground" data-testid="apps-github-text">
+        {made ? githubAppWords.made : githubAppWords.notMade}
+      </p>
+      {made ? (
+        <>
+          {githubApp?.url && githubApp.slug && (
+            <a className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary" href={githubApp.url} target="_blank" rel="noreferrer" data-testid="apps-github-open">
+              {githubAppWords.openOnGitHub}: {githubApp.slug}
+              <ExternalLink size={14} aria-hidden="true" />
+            </a>
+          )}
+        </>
+      ) : (
+        <div>
+          <Button asChild className="h-11" data-testid="apps-github-setup">
+            <Link href="/admin/github-app">{githubAppWords.button}</Link>
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

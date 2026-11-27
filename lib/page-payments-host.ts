@@ -30,7 +30,11 @@
 /** The id a page gives its request: short and plain, so it can only be echoed back and never carry anything else. */
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
+/**
+ * `not_published`: the owner set the page's payment on a version newer than the one this link shows; nothing was made (the page is told `unavailable`).
+ * `page_changed`: the page open here is older than the published one the payment was set on; nothing was made, and a reload shows it.
+ */
+export type PayProblem = 'unavailable' | 'not_published' | 'page_changed' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
 
 /** What the host says under the page while a payment is on its way. */
 export interface PayLine {
@@ -128,6 +132,8 @@ export interface PagePaymentsHostOptions {
   indexedDB?: Pick<IDBFactory, 'open'> | null;
   /** This tab's own storage (sessionStorage: it survives a reload of the tab and is never shared with another tab). Only a code that nothing could coordinate lives here. */
   tabStorage?: Pick<Storage, 'getItem' | 'setItem'> | null;
+  /** The version of the page this host's frame shows: sent with a start, so Orbit never charges terms set on a newer version than the one on screen. */
+  version?: number;
 }
 
 export interface PagePaymentsHost {
@@ -556,7 +562,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         let answer: Answer | null = null;
         for (let attempt = 0; attempt < START_TRIES && !answer; attempt += 1) {
           try {
-            const got = await post({ intentId }, abort.signal);
+            const got = await post({ intentId, ...(options.version ? { shownVersion: options.version } : {}) }, abort.signal);
             // The service had trouble: the order may exist, so the same wish is sent again (it finds the order it made), like a lost answer
             if (got.status >= 500 && attempt + 1 < START_TRIES) {
               await waitFor(TRY_AGAIN_MS);
@@ -583,7 +589,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           // Trouble on the way (a 5xx, a refusal that says `unsure`, or a good answer that holds nothing usable) may have left an order behind: Check payment asks about the same
           // wish. A definite answer (the page is gone, the owner stopped it, too many tries) does not
           const unsure = !limit && (answer.status >= 500 || answer.body?.unsure === true || (answer.ok && (!orderId || !url)));
-          return end({ problem: limit ? 'limit' : 'unavailable', canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
+          // The owner changed the payment on a version this link does not show yet: definite, nothing was made, and the line says why
+          const code = answer.body?.code;
+          const refusal: PayProblem = limit ? 'limit' : !unsure && (code === 'not_published' || code === 'page_changed') ? code : 'unavailable';
+          return end({ problem: refusal, canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
         }
         if (popup) popup.location.href = url;
         adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, ticket);

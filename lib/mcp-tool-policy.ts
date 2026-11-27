@@ -1,6 +1,8 @@
 import { ensureKeyAppTools } from '@/lib/app-direct/policy';
+import { ensureAppActionTools, hasDuplicateActions, holdsAppActions, lockGrant } from '@/lib/app-actions/grant';
+import { keepMovedTool, settleOwnAppTools, universeSortsTools } from '@/lib/app-own-tools';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 
@@ -90,6 +92,12 @@ export const catalogSchema = z
 
 export const moveSchema = z.object({ heading: headingSchema }).strict();
 
+/** An App action's own choice over its heading's; null follows the heading again. */
+export const toolSettingSchema = z.object({ setting: settingSchema.nullable() }).strict();
+
+/** PATCH .../tools/:toolId takes one of the two: a move under another heading (a bot's own server), or an App action's own choice. */
+export const toolPatchSchema = z.union([moveSchema, toolSettingSchema]);
+
 export const confirmSchema = z
   .object({
     toolIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_TOOLS_PER_SERVER).optional(),
@@ -121,6 +129,13 @@ export const botToolSettingsSchema = z
 
 export type ToolsState = 'notCheckedYet' | 'notConfirmedYet' | 'confirmed';
 
+/**
+ * What a server's rows are. `tools`: a bot's own server, its tools as the bot server read them, each confirmed and moved by people.
+ * `appActions`: a ready-made App's grant, its rows are the App's actions as Universe sorted them (lib/app-actions): nothing to confirm,
+ * no moving between headings, and each may carry its own choice (`setting`) over its heading's.
+ */
+export type ServerKind = 'tools' | 'appActions';
+
 export interface ToolJson {
   id: string;
   name: string;
@@ -136,10 +151,13 @@ export interface ToolJson {
   confirmedBy: { name: string | null } | null;
   confirmedAt: string | null;
   movedBy: { name: string | null } | null;
+  /** An App action's own choice over its heading's (Right away, Asks first or Off). Null follows the heading; always null on a bot's own server. */
+  setting: Setting | null;
 }
 
 export interface ServerToolsJson {
   serverId: string;
+  kind: ServerKind;
   /** Not checked yet: an old server that works as it did. Not confirmed yet: tools wait. Confirmed: every tool is. */
   state: ToolsState;
   policyRevision: number;
@@ -163,6 +181,7 @@ const TOOL_SELECT = {
   confirmedAt: true,
   confirmedBy: { select: { name: true } },
   movedBy: { select: { name: true } },
+  setting: true,
 } as const;
 
 type ToolRow = Prisma.BotMcpToolGetPayload<{ select: typeof TOOL_SELECT }>;
@@ -178,6 +197,8 @@ const SERVER_SELECT = {
   policyRevision: true,
   toolsCut: true,
   toolsSeen: true,
+  appActionsVersion: true,
+  connection: { select: { source: true, providerToolkit: true } },
 } as const;
 
 type ServerRow = Prisma.BotMcpServerGetPayload<{ select: typeof SERVER_SELECT }>;
@@ -195,7 +216,10 @@ const toToolJson = (row: ToolRow): ToolJson => ({
   confirmedBy: row.confirmedAt ? { name: row.confirmedBy?.name ?? null } : null,
   confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
   movedBy: row.movedBy ? { name: row.movedBy.name } : null,
+  setting: (row.setting as Setting | null) ?? null,
 });
+
+const kindOf = (server: Pick<ServerRow, 'connection' | 'appActionsVersion'>): ServerKind => (holdsAppActions(server) ? 'appActions' : 'tools');
 
 export function settingsOf(server: Pick<ServerRow, 'lookUpSetting' | 'makeSetting' | 'changeSetting' | 'deleteSendSetting'>): Record<Heading, Setting> {
   return {
@@ -218,14 +242,17 @@ async function loadServer(db: Prisma.TransactionClient | typeof prisma, botId: s
   return server;
 }
 
-async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: string): Promise<ServerToolsJson> {
-  const [server, rows] = await Promise.all([
-    db.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: SERVER_SELECT }),
-    db.botMcpTool.findMany({ where: { serverId }, select: TOOL_SELECT, orderBy: [{ name: 'asc' }] }),
-  ]);
+/**
+ * The server and its tools as one answer: its kind says how to read its rows, so both must come from the same moment. Inside a write
+ * the grant is held (`lockGrant`); a plain read takes one snapshot of the database for both (`describeNow`).
+ */
+async function describe(db: Prisma.TransactionClient, serverId: string): Promise<ServerToolsJson> {
+  const server = await db.botMcpServer.findUniqueOrThrow({ where: { id: serverId }, select: SERVER_SELECT });
+  const rows = await db.botMcpTool.findMany({ where: { serverId }, select: TOOL_SELECT, orderBy: [{ name: 'asc' }] });
   const tools = rows.map(toToolJson);
   return {
     serverId,
+    kind: kindOf(server),
     state: toolsState(server.legacyText, tools),
     policyRevision: server.policyRevision,
     settings: settingsOf(server),
@@ -235,14 +262,41 @@ async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: 
   };
 }
 
+/** A server and its tools read outside a write: one snapshot, so a grant brought over in between is never half seen. */
+const describeNow = (serverId: string): Promise<ServerToolsJson> =>
+  prisma.$transaction((tx) => describe(tx, serverId), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+
 const bump = { policyRevision: { increment: 1 } } as const;
+/**
+ * A write that holds a grant may wait for it behind one that is bringing the grant over (which itself may wait for the App's list
+ * while a read of the provider saves it): more time than the default five seconds, the same as that write allows.
+ */
+const GRANT_WRITE = { maxWait: 15_000, timeout: 60_000 } as const;
+
+export interface ReadToolsOptions {
+  /**
+   * The reader knows App actions (the bot server's and the game's `?actions=1`): a ready-made App's grant is brought over to its
+   * actions here. A reader that does not ask keeps seeing the grant as it was until a reader that asks brought it over.
+   */
+  appActions?: boolean;
+}
 
 /** One server's tools, their settings and state. */
-export async function readServerTools(botId: string, serverId: string): Promise<ServerToolsJson> {
-  await loadServer(prisma, botId, serverId);
+export async function readServerTools(botId: string, serverId: string, options: ReadToolsOptions = {}): Promise<ServerToolsJson> {
+  const server = await loadServer(prisma, botId, serverId);
   // A key app's operations are its tools (game #2044): they are made to match its definition before they are read, so the gate never sees a stale list
   await ensureKeyAppTools(serverId);
-  return describe(prisma, serverId);
+  // A ready-made App's actions are its rows: made to match the App's list before they are read (a grant brought over stays current for every reader)
+  if (options.appActions || holdsAppActions(server)) await ensureAppActionTools(serverId);
+  // A person's own App is sorted and confirmed by Universe (lib/app-own-tools.ts): a grant made before that is brought up to date when read
+  await settleOwnAppTools(serverId);
+  const described = await describeNow(serverId);
+  // Two rows for one action (only data from before one row per action): made one before anyone sees them
+  if (described.kind === 'appActions' && hasDuplicateActions(described.tools)) {
+    await ensureAppActionTools(serverId, 0, true);
+    return describeNow(serverId);
+  }
+  return described;
 }
 
 export interface CatalogResult extends ServerToolsJson {
@@ -263,12 +317,21 @@ export interface CatalogResult extends ServerToolsJson {
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
+    // Held first: a grant brought over to App actions at the same moment is either wholly before this list or wholly after it (Universe
+    // settling a person's own App on a read, lib/app-own-tools.ts, holds the same grant)
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
+    // A ready-made App's rows are its actions, made by Orbit from the App's list: what the bot server read on the App's link (the
+    // provider's meta tools) never replaces them. Answered as saved, with nothing changed.
+    if (kindOf(server) === 'appActions') return { ...(await describe(tx, serverId)), added: [], changed: [], removed: [] };
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, confirmedById: true, heading: true, personHeading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
+    // On the person's own App a tool Universe confirmed (no person) keeps following the bot server's suggestion, so it is sorted again when a
+    // suggestion comes later (lib/app-own-tools.ts); one a person confirmed or moved keeps what they decided
+    const universeSorts = await universeSortsTools(serverId, tx);
     const added: string[] = [];
     const changed: string[] = [];
     // Any tool whose fingerprint is different, confirmed or not: a list a person opened before it changed is out of date
@@ -284,10 +347,20 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       if (!before) {
         await tx.botMcpTool.create({ data: { serverId, name: tool.name, fingerprint: tool.fingerprint, ...shown, ...suggestion } });
         added.push(tool.name);
+      } else if (before.fingerprint !== tool.fingerprint && universeSorts && !server.legacyText && (before.movedById || before.confirmedById) && before.heading) {
+        // On a person's own App a tool they moved or confirmed sits, once it changed, under the stricter of their own heading and the rule
+        // for the new version, confirmed by Universe (lib/app-own-tools.ts). Their own heading is kept apart, so what they decided is never
+        // lost (a tool they only confirmed, from before Universe sorted own Apps, is kept as their choice the same way)
+        const personHeading = (before.personHeading ?? before.heading) as Heading;
+        await tx.botMcpTool.update({
+          where: { id: before.id },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, personHeading, movedById: before.movedById ?? before.confirmedById, heading: keepMovedTool(tool.name, personHeading, suggestion.suggestedHeading as Heading | null, settingsOf(server)), confirmedById: null, confirmedAt: new Date() },
+        });
+        reworded = true;
       } else if (before.fingerprint !== tool.fingerprint) {
         await tx.botMcpTool.update({
           where: { id: before.id },
-          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, movedById: null, confirmedById: null, confirmedAt: null },
+          data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, personHeading: null, movedById: null, confirmedById: null, confirmedAt: null },
         });
         reworded = true;
         if (before.confirmedAt || before.heading) changed.push(tool.name);
@@ -298,7 +371,11 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
           reworded = true;
         }
-        await tx.botMcpTool.update({ where: { id: before.id }, data: before.confirmedAt ? shown : { ...shown, ...suggestion } });
+        // A suggestion also follows the server on a tool a person moved that Universe keeps for them since it changed (confirmed by
+        // nobody): its heading is worked out again from their own heading when this write settles (lib/app-own-tools.ts keepMovedTool)
+        const keptForPerson = universeSorts && !!before.movedById && !before.confirmedById && !!before.confirmedAt;
+        const follows = !before.confirmedAt || keptForPerson || (universeSorts && !before.confirmedById && !before.movedById);
+        await tx.botMcpTool.update({ where: { id: before.id }, data: follows ? { ...shown, ...suggestion } : shown });
       }
     }
 
@@ -306,7 +383,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     // person confirmed or moved stays. A leftover nobody decided on goes, so it can't block confirming the real list.
     const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const decided = (tool: (typeof existing)[number]) => !!tool.confirmedAt || !!tool.heading || !!tool.movedById;
+    // On a person's own App, Universe's own confirmation is not a decision: only what a person confirmed or moved is kept
+    const decided = (tool: (typeof existing)[number]) => (universeSorts ? !!tool.movedById || (!!tool.confirmedAt && !!tool.confirmedById) : !!tool.confirmedAt || !!tool.heading || !!tool.movedById);
     const removed = existing.filter((tool) => !offered.has(tool.name) && !(cut && decided(tool)));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
@@ -318,8 +396,38 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     if (server.toolsCut !== cut || server.toolsSeen !== seen) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });
     }
+    // On a person's own App, every new or changed tool is sorted and confirmed by Universe in the same write (lib/app-own-tools.ts): no review gate
+    await settleOwnAppTools(serverId, tx);
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
-  });
+  }, GRANT_WRITE);
+}
+
+export const APP_ACTIONS_DONT_MOVE = 'An App’s actions stay under their heading. Give this one its own choice instead';
+
+/**
+ * An App action's own choice over its heading's (Right away, Asks first or Off), or null to follow the heading again. Only on a
+ * ready-made App's grant (409 on a bot's own server). The policy revision goes up when it changes, so a card or a remembered approval
+ * made under the older choice can be told apart.
+ */
+export async function setToolSetting(botId: string, serverId: string, toolId: string, setting: Setting | null): Promise<ServerToolsJson> {
+  const before = await loadServer(prisma, botId, serverId);
+  // Kept matching the App's list first. Only a grant already brought over (by a reader that asked for App actions): a choice never
+  // brings one over itself, so a refused one (an id that is not there) leaves the grant exactly as it was
+  if (holdsAppActions(before)) await ensureAppActionTools(serverId);
+  return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
+    const server = await loadServer(tx, botId, serverId);
+    if (kindOf(server) !== 'appActions') throw new BotSettingsError(409, 'Only an App’s actions take their own choice');
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { serverId: true, setting: true, settingByPerson: true } });
+    if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
+    // Marked as the person's, even when it is the choice Universe started the action on: from now on it is theirs and never moves
+    const byPerson = setting !== null;
+    if ((tool.setting ?? null) !== setting || tool.settingByPerson !== byPerson) {
+      await tx.botMcpTool.update({ where: { id: toolId }, data: { setting, settingByPerson: byPerson } });
+      await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
+    }
+    return describe(tx, serverId);
+  }, GRANT_WRITE);
 }
 
 /** A tool the server changed while a person was looking at it: what they saw is not what is there now. */
@@ -331,21 +439,28 @@ const TOOL_CHANGED = 'This tool changed, review it again';
  */
 export async function moveTool(botId: string, serverId: string, toolId: string, heading: Heading, personId: string): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
-    await loadServer(tx, botId, serverId);
-    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true } });
+    await lockGrant(tx, serverId);
+    const server = await loadServer(tx, botId, serverId);
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true, confirmedById: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
-    if (tool.heading !== heading) {
+    // An App's actions stay where Universe sorted them (Send email can never be filed under Looks things up): their own choice replaces a move
+    if (kindOf(server) === 'appActions') throw new BotSettingsError(409, APP_ACTIONS_DONT_MOVE);
+    // On a person's own App, a tool Universe placed (confirmed by nobody: sorted, or kept for them since it changed): a move to the heading
+    // it sits under now is still the person's choice, and is recorded as theirs (lib/app-own-tools.ts), so Universe never moves it again.
+    // Elsewhere (a key App's tested operation, also confirmed by nobody) a move to the same heading changes nothing, as before
+    const placedByUniverse = tool.heading === heading && !!tool.confirmedAt && !tool.confirmedById && (await universeSortsTools(serverId, tx));
+    if (tool.heading !== heading || placedByUniverse) {
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between
       const moved = await tx.botMcpTool.updateMany({
         where: { id: toolId, fingerprint: tool.fingerprint, heading: tool.heading, confirmedAt: tool.confirmedAt },
-        data: { heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
+        data: { heading, personHeading: heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
       });
       if (moved.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 /**
@@ -362,7 +477,10 @@ export async function confirmTools(
   seenRevision?: number,
 ): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
+    // An App's actions are confirmed by Universe when they are made: there is nothing for a person to confirm (no review gate on Apps)
+    if (kindOf(server) === 'appActions') return describe(tx, serverId);
     // The page names the list it showed: a sync or another person's change since then means it is not the list to confirm
     if (seenRevision !== undefined && seenRevision !== server.policyRevision) throw new BotSettingsError(409, TOOL_CHANGED);
     const all = await tx.botMcpTool.findMany({
@@ -400,12 +518,13 @@ export async function confirmTools(
       if (settled.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
     }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 /** Set what a bot does under each heading on one server. Only the headings named change. */
 export async function saveServerSettings(botId: string, serverId: string, body: z.infer<typeof serverSettingsSchema>): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
+    await lockGrant(tx, serverId);
     const server = await loadServer(tx, botId, serverId);
     const current = settingsOf(server);
     const data: Record<string, string> = {};
@@ -413,9 +532,13 @@ export async function saveServerSettings(botId: string, serverId: string, body: 
       const value = body[heading];
       if (value !== undefined && value !== current[heading]) data[SETTING_COLUMN[heading]] = value;
     }
-    if (Object.keys(data).length > 0) await tx.botMcpServer.update({ where: { id: serverId }, data: { ...data, ...bump } });
+    if (Object.keys(data).length > 0) {
+      await tx.botMcpServer.update({ where: { id: serverId }, data: { ...data, ...bump } });
+      // On a person's own App a tool they moved that Universe keeps for them is placed again by the new settings (an Off stays off)
+      await settleOwnAppTools(serverId, tx);
+    }
     return describe(tx, serverId);
-  });
+  }, GRANT_WRITE);
 }
 
 export interface BotToolSettings {

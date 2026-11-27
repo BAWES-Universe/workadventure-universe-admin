@@ -84,6 +84,27 @@ describe('job control routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('Cancel guard: `{ expected: "not_started" }` is passed to the library, no body is the call it always was, and a `started` refusal is a 409 with its reason', async () => {
+    lib.cancelJob.mockResolvedValue({ ok: true, view });
+    await cancelRoute(post('cancel'), jobParams);
+    expect(lib.cancelJob).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, ...asked);
+    expect((lib.cancelJob as jest.Mock).mock.calls[0]).toHaveLength(5);
+    await cancelRoute(post('cancel', JSON.stringify({ expected: 'not_started' })), jobParams);
+    expect(lib.cancelJob).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, ...asked, 'not_started');
+    lib.cancelJob.mockResolvedValue({ ok: false, reason: 'started' });
+    const res = await cancelRoute(post('cancel', JSON.stringify({ expected: 'not_started' })), jobParams);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ reason: 'started' });
+  });
+
+  it('Cancel guard: a body that is not exactly `{ expected: "not_started" }` is 400 and nothing is asked of the library', async () => {
+    for (const body of ['{"expected":"running"}', '{"expected":""}', '{"expected":"not_started","x":1}', '{nope', '[]', '"not_started"']) {
+      const res = await cancelRoute(post('cancel', body), jobParams);
+      expect(res.status).toBe(400);
+    }
+    expect(lib.cancelJob).not.toHaveBeenCalled();
+  });
+
   it('N11 (d522f4b3 pass): a Cancel that left the job live is a retryable 503 with `retry: true`, never a 409 state of the job and never a 200', async () => {
     lib.cancelJob.mockResolvedValue({ ok: false, reason: 'not_ended' });
     const res = await cancelRoute(post('cancel'), jobParams);

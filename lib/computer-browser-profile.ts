@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { ownsBrick } from '@/lib/brick';
+import { refreshMarkParts } from '@/lib/computer-mark';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { isSafeJobId, readSignInsAnswer, signInsCommand, type SignInsAction, type SignInsAnswer } from '@/lib/computer-browser-profile-script';
 import { CLEAN_CLAIM_STALE_MS, MACHINE_COMMAND_MS } from '@/lib/computer-values';
@@ -87,6 +88,7 @@ function keptOfPark(answer: SignInsResult): boolean | undefined {
 const isHeld = (status: string) => status === 'running' || status === 'waiting';
 
 interface Machine {
+  botId: string;
   ref: string;
   provider: ComputerProvider;
 }
@@ -96,7 +98,7 @@ async function awakeMachine(botId: string): Promise<Machine | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { provider: true, providerRef: true, machine: true } });
   const provider = getComputerProvider();
   if (!row?.providerRef || !provider || row.provider !== provider.kind || row.machine !== 'working') return null;
-  return { ref: row.providerRef, provider };
+  return { botId, ref: row.providerRef, provider };
 }
 
 /** When the job was last paused while it ran (its last pause row), or null when it never was. */
@@ -159,10 +161,13 @@ async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>)
 }
 
 /** Runs one action on the machine as root and reads its answer. A machine that cannot be reached is a failure, never an exception. */
-async function onMachine(machine: Machine, action: SignInsAction, jobId: string, keep: string[], hours: number, /** The pause a restore brings back, or a commit is for (N29). */ generation = 0): Promise<SignInsAnswer> {
+async function onMachine(machine: Machine, action: SignInsAction, jobId: string, keep: string[], hours: number, /** The pause a restore brings back, or a commit is for (N29). */ generation = 0, /** The claim's renewal: the parts are saved again only while the claim is still ours (Sentry on #1033). */ renew?: () => Promise<boolean>): Promise<SignInsAnswer> {
   try {
     const done = await machine.provider.exec(machine.ref, signInsCommand(action, jobId, keep, hours, undefined, generation), { user: 'root', timeoutMs: COMMAND_MS });
-    return readSignInsAnswer(action, done.exitCode, done.stdout);
+    const answer = readSignInsAnswer(action, done.exitCode, done.stdout);
+    // These put a new browser up (park and clear start an empty one, a restore starts the job's own): the parts the take-over fence keeps are saved again. Best effort, never throws.
+    if (answer.done !== 'failed' && (action === 'park' || action === 'restore' || action === 'clear')) await refreshMarkParts(machine.botId, machine.ref, machine.provider, renew);
+    return answer;
   } catch (error) {
     console.error(`[Computer] Could not ${action} a job’s browser sign-ins:`, error instanceof Error ? error.message : 'unknown');
     return { done: 'failed', reason: 'unreachable', cookies: 0, pages: 0 };
@@ -197,7 +202,7 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
     const machine = await awakeMachine(botId);
     if (!machine) return result('left', 'not_awake');
     const hours = await keepHours();
-    const outcome = await withClaim(botId, async () => {
+    const outcome = await withClaim(botId, async (renew) => {
       // Read AGAIN inside the claim: a job that started again, or paused again, while this waited for the claim is not the pause this park settles (the claim is what a start waits for too, so from here on it cannot move)
       if ((await prisma.computerJob.count({ where: { id: jobId, status: 'queued', pauses: generation } })) === 0) return result('left', 'not_paused');
       const others = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
@@ -211,7 +216,7 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
       // count above (its flag is committed, and is seen now) or was still held at the count (the shared branch above, where nothing is put away). A job cannot start under the claim, so no other job can come into the held states after the count
       if (await prisma.brickComputer.findFirst({ where: { botId, parkPendingWipe: true }, select: { botId: true } })) return result('left', 'wipe_pending');
       const keep = [...new Set([...(await allowedToKeep(botId, now, hours)), jobId])];
-      const answer = await onMachine(machine, 'park', jobId, keep, hours);
+      const answer = await onMachine(machine, 'park', jobId, keep, hours, 0, renew);
       if (answer.done === 'kept') return result('parked', null, answer);
       if (answer.done === 'already') return result('left', 'already');
       if (answer.done === 'none') return result('left', 'nothing_saved');
@@ -310,7 +315,7 @@ async function restoreUnder(machine: Machine, botId: string, jobId: string, pers
   // No number, no note: a number that cannot be read is never replaced by a shared stand-in (0), because an older commit and a newer restore would then carry the same one and the older could remove the newer note. The restore is not run, the
   // machine's note is left as it is for the recovery, and the sweep tries again (CodeRabbit on #1025, d522f4b3 pass, N24)
   if (generation === null) return result('failed', 'error');
-  const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours, generation);
+  const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours, generation, renew);
   if (answer.done === 'kept') return result('restored', null, answer);
   if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
   return result('failed', answer.reason);
@@ -350,7 +355,7 @@ export async function wipeLiveProfile(botId: string, jobId: string, now: Date = 
     const machine = await awakeMachine(botId);
     if (!machine) return result('left', 'not_awake');
     const hours = await keepHours();
-    const outcome = await withClaim(botId, async () => wipeUnder(machine, botId, jobId, now, hours, fence));
+    const outcome = await withClaim(botId, async (renew) => wipeUnder(machine, botId, jobId, now, hours, fence, renew));
     return logged('emptied', outcome ?? result('left', 'not_awake'));
   } catch (error) {
     console.error('[Computer] Could not empty the live browser:', error instanceof Error ? error.message : 'unknown');
@@ -359,13 +364,13 @@ export async function wipeLiveProfile(botId: string, jobId: string, now: Date = 
 }
 
 /** The emptying itself, under the claim. */
-async function wipeUnder(machine: Machine, botId: string, jobId: string, now: Date, hours: number, fence?: ResumeFence | PauseFence): Promise<SignInsResult> {
+async function wipeUnder(machine: Machine, botId: string, jobId: string, now: Date, hours: number, fence?: ResumeFence | PauseFence, renew?: () => Promise<boolean>): Promise<SignInsResult> {
   // Read INSIDE the claim, so a job that starts in between is seen (the claim that starts a job and this one exclude each other): the browser of a job that runs beside is its own, and is never emptied under it
   const beside = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
   if (beside > 0) return result('left', 'shared');
   // And the job this is for: its reservation and prep state (or its pause) are checked before the command, never after it, because a clear that already ran cannot be undone by a check that comes later (CodeRabbit A6)
   if (fence && !(await fenceHolds(jobId, fence))) return result('left', 'superseded');
-  const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours);
+  const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours, 0, renew);
   return cleared.done === 'dropped' ? result('cleared', null, cleared) : result('failed', cleared.reason);
 }
 
@@ -426,7 +431,7 @@ async function settleUnder(under: Under, jobId: string, botId: string, back: Sig
   let ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
   if (!ready && back.state === 'fresh' && (await under.renew())) {
     // A browser a job beside it is using is left exactly as it is, and the job is ready (the wipe decides this inside its claim)
-    const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, typeof now === 'function' ? now() : now, under.hours, fence));
+    const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, typeof now === 'function' ? now() : now, under.hours, fence, under.renew));
     ready = wiped.state === 'cleared' || (wiped.state === 'left' && wiped.reason === 'shared');
   }
   const generation = await pauseNumberOf(jobId);

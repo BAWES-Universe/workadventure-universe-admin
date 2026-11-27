@@ -1,25 +1,62 @@
+import { createHash } from 'node:crypto';
+import * as Sentry from '@sentry/nextjs';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
+import type { ExecOptions } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
+import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
+import { asciiJson, LIST_SEND_PIECE } from '@/lib/computer-outside';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
+import { isMarkCommand } from '@/lib/computer-fence-script';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
 
+const BOOT = '3f2b6c1e-8a44-4d0b-9c15-5e7d2a9b1c33';
+/** What a command is, in a word: the mark command carries a whole script. */
+const labelled = (command: string) => (isMarkCommand(command) ? 'mark' : command);
+
 /** A pretend Agent37: instances that keep a status, and a record of every call. */
+const COLD_PATH = '/usr/local/share/universe/cold-bin/universe-cold';
+const COLD_RUN = `python3 ${COLD_PATH}`;
+const COLD_MOVE = `chmod 644 ${COLD_PATH}.new && mv -f ${COLD_PATH}.new ${COLD_PATH}`;
+const FINISH = `python3 ${COLD_PATH} finish`;
+/** The size a list-put command leaves on the computer (its offset plus the piece it carries). */
+const asPutSize = (command: string) => {
+  const found = /list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command)!;
+  return Number(found[1]) + found[3].length;
+};
+const LISTPUT = `python3 ${COLD_PATH} list-put`;
+const COLD_PREPACK = `python3 ${COLD_PATH} prepack`;
+const COLD_SHA = createHash('sha256').update(UNIVERSE_COLD).digest('hex');
+
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const instances = new Map<string, Instance>();
   const calls: string[] = [];
+  /** How each stop and sleep asked to be repeated (the second argument the provider gave). */
+  const retries: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
-  let execOut: (command: string) => string = () => 'ok';
-  let markOut = 'marked=1\n';
-  let revisionAfterUpdate = 2;
+  let coldSum: string | null = COLD_SHA;
+  let coldInstall = true;
+  /** The sum of the script already in place on the computer (null: none there). */
+  let coldInPlace: string | null = null;
+  let execOut: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean } = () => 'ok';
+  let markOut = `boot=${BOOT}\nticks=1234\npart=77:500:p\nrunner=${'a'.repeat(64)}\nmarked=1\n`;
+  const revisionAfterUpdate = 2;
   /** What Agent37 holds as each machine's managed budget: the monthly cap and the remaining one-time credit (a machine not here has both at zero). */
   const budgets = new Map<string, { cap: number; credit: number }>();
   const refuse: Record<string, Error | undefined> = {};
   const client = {
     async listInstances() {
       calls.push('list');
+      return [...instances.values()];
+    },
+    /** The one look at the whole account (one request, never asked again): a test makes it fail with `refuse.listOnce`. */
+    async listInstancesOnce(timeoutMs: number) {
+      calls.push(`listOnce:${timeoutMs}`);
+      if (refuse.listOnce) throw refuse.listOnce;
       return [...instances.values()];
     },
     async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }) {
@@ -42,19 +79,27 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       if (!found) throw new Agent37Error(404, 'not_found', 'gone');
       return found;
     },
+    async getInstanceOnce(id: string, timeoutMs: number) {
+      calls.push(`getOnce:${id}:${timeoutMs}`);
+      const found = instances.get(id);
+      if (!found) throw new Agent37Error(404, 'not_found', 'gone');
+      return found;
+    },
     async startInstance(id: string) {
       calls.push(`start:${id}`);
       instances.get(id)!.status = 'running';
       return { id, status: 'running' };
     },
-    async sleepInstance(id: string) {
+    async sleepInstance(id: string, retry?: string) {
       calls.push(`sleep:${id}`);
+      retries.push(`sleep:${retry ?? 'any'}`);
       instances.get(id)!.status = 'sleeping';
       instances.get(id)!.slept_at = Math.floor(Date.now() / 1000);
       return { id, status: 'sleeping' };
     },
-    async stopInstance(id: string) {
+    async stopInstance(id: string, retry?: string) {
       calls.push(`stop:${id}`);
+      retries.push(`stop:${retry ?? 'any'}`);
       instances.get(id)!.status = 'stopped';
       return { id, status: 'stopped' };
     },
@@ -79,7 +124,9 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
+      // Putting the current script on the machine (before a pack-away) is answered here unless a test says otherwise
+      const answer = command === `sha256sum ${COLD_PATH}` ? (coldInPlace === null ? { stdout: '', exitCode: 1 } : { stdout: `${coldInPlace}  ${COLD_PATH}\n` }) : isMarkCommand(command) ? markOut : /^sha256sum /.test(command) && coldSum !== null ? { stdout: `${coldSum}  ${COLD_PATH}.new\n` } : /^(umask 077 && |chmod 644 )/.test(command) && coldInstall ? { stdout: '' } : execOut(command);
+      return typeof answer === 'string' ? { exitCode: 0, stdout: answer, stderr: '', truncated: false } : { exitCode: answer.exitCode ?? 0, stdout: answer.stdout, stderr: '', truncated: answer.truncated ?? false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -135,15 +182,22 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, retries, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value), setColdInPlace: (value: string | null) => (coldInPlace = value) };
 }
 
-function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
+function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; sleepLog?: string[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
   const clock = extra.clock ?? { t: 1_000_000 };
   return new Agent37ComputerProvider({
     client: w.client,
     outstandingReserveMicros: async () => extra.reserved ?? 0,
-    sleep: async () => {
+    sleep: async (ms?: number) => {
+      extra.slept?.push(ms ?? 0);
+      // With a log asked for, a pause really takes a turn of the event loop and says when it began and when it ended: a caller that does not wait for it is seen
+      if (extra.sleepLog) {
+        extra.sleepLog.push(`sleep-begin:${ms ?? 0}`);
+        await new Promise((resolve) => setImmediate(resolve));
+        extra.sleepLog.push(`sleep-end:${ms ?? 0}`);
+      }
       clock.t += 3_000;
     },
     now: () => clock.t,
@@ -380,6 +434,62 @@ describe('the Agent37 provider', () => {
     expect(await p.awake('m1')).toBe(false);
   });
 
+  describe('the look says only what its status says (Sentry on a4ed472c: an odd status is never taken for asleep)', () => {
+    const withStatus = async (status: string) => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.status = status as Instance['status'];
+      return p;
+    };
+
+    it.each(['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'])('%s is awake, in both looks', async (status) => {
+      const p = await withStatus(status);
+      expect(await p.awake('m1')).toBe(true);
+      expect(await p.awakeOnce('m1', 3_000)).toBe(true);
+    });
+
+    it.each(['stopped', 'sleeping', 'stopping', 'deleting', 'deleted', 'failed'])('%s is not running, in both looks', async (status) => {
+      const p = await withStatus(status);
+      expect(await p.awake('m1')).toBe(false);
+      expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+    });
+
+    it.each(['hibernating', 'migrating', ''])('the status "%s" is not known: both looks throw instead of saying asleep, so nothing is paused, no proof moves and no stop is proved', async (status) => {
+      const p = await withStatus(status);
+      await expect(p.awake('m1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(p.awakeOnce('m1', 3_000)).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('a status that is not documented is told to Sentry with the word, and a documented one is not', async () => {
+      const said = Sentry.captureMessage as jest.Mock;
+      said.mockClear();
+      try {
+        await expect((await withStatus('hibernating')).awake('m1')).rejects.toBeInstanceOf(Agent37Unreached);
+        expect(said).toHaveBeenCalledTimes(1);
+        expect(said).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ level: 'warning', extra: { status: 'hibernating' } }));
+        said.mockClear();
+        for (const status of ['running', 'stopping', 'sleeping', 'stopped', 'failed']) await (await withStatus(status)).awake('m1');
+        expect(said).not.toHaveBeenCalled();
+      } finally {
+        said.mockClear();
+      }
+    });
+  });
+
+  it('the quick look reads the same, from one request with the caller’s timeout', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.calls.length = 0;
+    expect(await p.awakeOnce('m1', 3_000)).toBe(true);
+    await p.rest('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+    expect(w.calls.filter((call) => call.startsWith('getOnce:'))).toEqual(['getOnce:m1:3000', 'getOnce:m1:3000']);
+    await p.remove('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+  });
+
   it('looking never wakes: a machine that is not running has no screen and no signed link is asked for', async () => {
     const w = world();
     const p = provider(w);
@@ -499,6 +609,44 @@ describe('the Agent37 provider', () => {
   });
 });
 
+describe('the look at every machine of the account (the sweep stops a machine that runs behind a stopped row, CodeRabbit on #1040)', () => {
+  it('says each machine by its status in ONE request: awake for a running or starting one, asleep for a stopped, sleeping, stopping or gone one, not known for a status Agent37 never documented (said to Sentry)', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.create('bot-2');
+    await p.create('bot-3');
+    await p.create('bot-4');
+    const set = (id: string, status: string) => {
+      (w.instances.get(id) as { status: string }).status = status;
+    };
+    set('m1', 'running');
+    set('m2', 'stopping');
+    set('m3', 'sleeping');
+    set('m4', 'quantum');
+    (Sentry.captureMessage as jest.Mock).mockClear();
+    w.calls.length = 0;
+    const said = await p.awakeMachinesOnce(5_000);
+    expect(said.get('m1')).toBe(true);
+    expect(said.get('m2')).toBe(false);
+    expect(said.get('m3')).toBe(false);
+    expect(said.get('m4')).toBeNull();
+    // One request with the short timeout, no other call
+    expect(w.calls).toEqual(['listOnce:5000']);
+    expect(Sentry.captureMessage).toHaveBeenCalledWith('Agent37 said a machine status that is not in the list', expect.objectContaining({ level: 'warning' }));
+  });
+
+  it('a list that gets no clean answer throws (an error, a rate limit) and is asked once: nothing is read from it', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.refuse.listOnce = new Agent37Error(429, null, 'slow down');
+    w.calls.length = 0;
+    await expect(p.awakeMachinesOnce(5_000)).rejects.toBeInstanceOf(Agent37Error);
+    expect(w.calls).toEqual(['listOnce:5000']);
+  });
+});
+
 describe("Agent37's bill for a day", () => {
   it('says which machine of Agent37 is a Brick of ours, one that is not ours, and one that is gone, and what its published rates make of the awake minutes', async () => {
     const w = world();
@@ -570,11 +718,52 @@ describe('getting a machine ready for a job', () => {
     const p = provider(w);
     await p.create('bot-1');
     w.setExec(() => 'ready=1 restart=0\n');
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    // The note the take-over fence tells the agent's processes by is written last, as root
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
+    // The mark the take-over fence tells the agent's processes by is read last, and handed to Orbit (which keeps it): the computer writes nothing, and the command runs as the normal user
+    await expect(p.ready('m1')).resolves.toEqual({ bootId: BOOT, ticks: 1234, parts: [{ pid: 77, start: 500, kind: 'part' }], runners: ['a'.repeat(64)] });
+    // The wait for the margin after the image's unpack is asked first, as root; the mark is read as the normal user
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', expect.stringContaining('unpack_wait='), 'mark']);
     expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    expect(w.execs[2].options).not.toHaveProperty('user');
+    expect(w.execs[2].command).not.toMatch(/\/run\/universe|mkdir|chown|>\s*"?\$DIR/);
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('a brand-new computer is handed over only after the margin that follows the unpack of its image (the computer says how many seconds are left), a computer that is not new is not waited for, and one that cannot say is not held up', async () => {
+    const answer = (wait: string) => (command: string) => (command === 'universe-up' ? 'ready=1 restart=0\n' : command.includes('unpack_wait=') ? wait : 'ok');
+    for (const [said, expected] of [['unpack_wait=7\n', [7000]], ['unpack_wait=0\n', []], ['', []], ['unpack_wait=99999\n', []], ['not a number\n', []]] as const) {
+      const w = world();
+      const slept: number[] = [];
+      // Everything the computer is asked and every pause, in the order they began and ended
+      const order: string[] = [];
+      const p = provider(w, { slept, sleepLog: order });
+      await p.create('bot-1');
+      slept.length = 0;
+      order.length = 0;
+      const ask = w.client.exec.bind(w.client);
+      (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+        order.push(isMarkCommand(command) ? 'mark' : command.includes('unpack_wait=') ? 'unpack-asked' : command);
+        return ask(id, command, options);
+      };
+      w.setExec(answer(said));
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(slept).toEqual(expected);
+      // The wait ENDED before the mark was read (a wait that is not waited for would let the mark be read inside the margin): asked, waited, then marked, nothing between
+      expect(order.filter((entry) => entry !== 'universe-up')).toEqual(['unpack-asked', ...expected.flatMap((ms) => [`sleep-begin:${ms}`, `sleep-end:${ms}`]), 'mark']);
+      // The note the fence tells by is written after the wait, never before
+      const commands = w.execs.map((entry) => labelled(entry.command));
+      expect(commands.at(-1)).toBe('mark');
+    }
+    // A command that fails does not make the computer not ready
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const execute = w.client.exec.bind(w.client);
+    (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+      if (command.includes('unpack_wait=')) throw new Agent37Unreached('lost');
+      return execute(id, command, options);
+    };
+    w.setExec((command) => (command === 'universe-up' ? 'ready=1 restart=0\n' : 'ok'));
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
   });
 
   describe('the network rule when a machine is made ready', () => {
@@ -614,7 +803,7 @@ describe('getting a machine ready for a job', () => {
     });
   });
 
-  it('is not ready when the note for the fence cannot be written: a computer that cannot be fenced is never handed to a job', async () => {
+  it('is not ready when the mark for the fence cannot be read: a computer that cannot be fenced is never handed to a job', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
@@ -633,8 +822,85 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
     await p.ready('m1');
     // The note is written once, after the restart (a note from before it would be for the old boot)
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  describe('a fresh boot', () => {
+    const OLD_BOOT = '11111111-2222-4333-8444-555555555555';
+    const reading = (boot: string) => (command: string) => (command === 'cat /proc/sys/kernel/random/boot_id' ? `${boot}\n` : 'ready=1 restart=0\n');
+
+    it('starts the machine afresh before anything else when asked for it, and never otherwise (a computer that worked before and has no mark saved by Orbit)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(OLD_BOOT));
+      await p.ready('m1');
+      expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+      await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+      // The restart comes before the screen and browser are brought up and before the mark is read: the mark is of the new boot, taken with nothing of an earlier job running
+      const second = w.calls.slice(w.calls.lastIndexOf('stop:m1'));
+      const kinds = second.flatMap((call) => (call.startsWith('stop:') ? ['stop'] : call.startsWith('start:') ? ['start'] : call.startsWith('exec:m1:') ? [labelled(call.slice('exec:m1:'.length)) === 'universe-up' ? 'up' : isMarkCommand(call.slice('exec:m1:'.length)) ? 'mark' : 'other'] : []));
+      // The wait for the margin after the image's unpack (shown as 'other') comes between the start-up and the mark
+      expect(kinds).toEqual(['stop', 'start', 'up', 'other', 'mark']);
+    });
+
+    it('answers no mark when the boot did not change, and is still ready: a stop that became a sleep, or a start that resumed the same boot, never leaves a mark on the boot the jobs ran on, and never refuses the job (Opus on #1033)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(BOOT));
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('did not change'), expect.objectContaining({ level: 'error', extra: expect.objectContaining({ ref: 'm1', before: BOOT, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    it('answers no mark when the boot before the restart could not be read: nothing proves the restart gave a new one, and the job still runs', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? 'cat: no such file\n' : 'ready=1 restart=0\n'));
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('was not read'), expect.objectContaining({ extra: expect.objectContaining({ ref: 'm1', before: null, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    it('asks nothing of the boot when no fresh boot is asked for', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(reading(BOOT));
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.execs.some((entry) => entry.command === 'cat /proc/sys/kernel/random/boot_id')).toBe(false);
+    });
+  });
+
+  it('CodeRabbit on #1040, Opus F4: a stop or a sleep that is a power operation of ours asks not to be repeated after a gateway answer, and the readiness restarts (under a wake\'s own ticket) keep the retry', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.rest('m1');
+    w.instances.get('m1')!.status = 'running';
+    await p.stop('m1');
+    expect(w.retries).toEqual(['sleep:refused', 'stop:refused']);
+    // The fresh-boot restart and the restart a part asked for are readiness steps: the default retry
+    w.retries.length = 0;
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await p.ready('m1');
+    expect(w.retries).toEqual(['stop:any']);
   });
 
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
@@ -663,14 +929,109 @@ describe('getting a machine ready for a job', () => {
     expect(reads).toBeGreaterThanOrEqual(3);
   });
 
+  describe('a start that lost its wake sends no power call (Opus on #1040: stillMine is asked right before EVERY stop and start)', () => {
+    const OLD_BOOT = '11111111-2222-4333-8444-555555555555';
+    const prepare = async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let ups = 0;
+      // A fresh boot AND a part that asks for a restart: all four power calls of `ready` are reached
+      w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? `${OLD_BOOT}\n` : command === 'universe-up' ? (++ups === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n') : 'ok'));
+      return { w, p };
+    };
+    const power = (w: { calls: string[] }) => w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
+
+    // The asks of a fresh boot that is followed by a restart a part asked for: before the stop, before the start, right after the start (the sender may have been paused since the check), then the same again
+    it.each([
+      [1, []],
+      [2, ['stop:m1']],
+      [3, ['stop:m1', 'start:m1']],
+      [4, ['stop:m1', 'start:m1']],
+      [5, ['stop:m1', 'start:m1', 'stop:m1']],
+      [6, ['stop:m1', 'start:m1', 'stop:m1', 'start:m1']],
+    ])('ready: refused at ask %i, only the calls before it were sent, and WakeReplaced is thrown', async (refusedAt, sent) => {
+      const { w, p } = await prepare();
+      let asks = 0;
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks < refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(power(w)).toEqual(sent);
+      expect(asks).toBe(refusedAt);
+    });
+
+    it('ready: true before and false right after a start: the start was sent once, WakeReplaced is thrown, and no health poll, universe-up or mark follows (freshBoot start, then the restart a part asked for)', async () => {
+      for (const refusedAt of [3, 6]) {
+        const { w, p } = await prepare();
+        let asks = 0;
+        await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks !== refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+        const at = w.calls.lastIndexOf('start:m1');
+        expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(refusedAt === 3 ? 1 : 2);
+        // Nothing follows the start: no health poll (getInstance), no exec of any kind, no other power call
+        expect(w.calls.slice(at + 1)).toEqual([]);
+      }
+    });
+
+    it('ready: a start that still owns its wake asks before each of the four calls and after each start, and every call is sent once', async () => {
+      const { w, p } = await prepare();
+      const order: string[] = [];
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => (order.push(`ask@${power(w).length}`), true) })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+      // Asked right before each call, and again right after each start (CodeRabbit on #1040)
+      expect(order).toEqual(['ask@0', 'ask@1', 'ask@2', 'ask@2', 'ask@3', 'ask@4']);
+    });
+
+    it('ready: an Orbit that asks nothing (no stillMine) restarts as before', async () => {
+      const { w, p } = await prepare();
+      await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+    });
+
+    it('wake: refused after the waits (a machine going down, the billing call), no start is sent', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('start:m1');
+      // Still its own: started once
+      await p.wake('m1', { stillMine: async () => true });
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a start whose sender was paused after the check and lost its wake is told right after the request returns, not after the wait for the machine to be healthy (CodeRabbit on #1040)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      // The machine never answers as healthy: without the second ask the start would wait for it (and fail with the error of the wait, the machine left running)
+      w.setHealthy(false);
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a machine that is already running is not asked about (nothing is sent to it)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let asks = 0;
+      await p.wake('m1', { stillMine: async () => (asks++, false) });
+      expect(asks).toBe(0);
+    });
+  });
+
   it('is ready when the second ask succeeds after a part that was still coming up', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
     let runs = 0;
     w.setExec(() => (++runs === 1 ? 'ready=0 reason=browser\n' : 'ready=1 restart=0\n'));
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'mark']);
   });
 
   it('asks again once after the restart too, when the browser is still starting then', async () => {
@@ -679,8 +1040,8 @@ describe('getting a machine ready for a job', () => {
     await p.create('bot-1');
     let runs = 0;
     w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
-    await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+    expect(w.execs.map((entry) => labelled(entry.command))).toEqual(['universe-up', 'universe-up', 'universe-up', expect.stringContaining('unpack_wait='), 'mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -696,42 +1057,716 @@ describe('getting a machine ready for a job', () => {
     await expect(p.ready('m1')).rejects.toThrow('not ready');
   });
 
-  it('moves a machine made from an older image to the current one before it is brought up', async () => {
-    const w = world();
-    const p = provider(w, { image: async () => state({ revision: 2 }) });
-    await p.create('bot-1');
-    w.instances.get('m1')!.template_revision = 1;
-    w.setExec(() => 'ready=1 restart=0\n');
-    await p.ready('m1');
-    expect(w.calls).toContain('update:m1');
-    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
-    // a machine already on the current image is left alone
-    const again = world();
-    const q = provider(again, { image: async () => state({ revision: 2 }) });
-    await q.create('bot-1');
-    again.instances.get('m1')!.template_revision = 2;
-    again.setExec(() => 'ready=1 restart=0\n');
-    await q.ready('m1');
-    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
+  describe('a machine behind the image (the image update replaces the disk outside the home folder)', () => {
+    const CHECK = `${COLD_RUN} outside-check`;
+    /** A machine on revision 1 while the image is on 2, answering the check with `says` and everything else as a ready computer. */
+    async function behind(says: string | { stdout: string; exitCode?: number } | Error) {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec((command) => {
+        if (command === CHECK) {
+          if (says instanceof Error) throw says;
+          return says;
+        }
+        return 'ready=1 restart=0\n';
+      });
+      return { w, p };
+    }
+
+    it('a start that lost its wake sends no image update (Opus on #1040: stillMine is asked right before it, after the check that can take minutes), and ready throws WakeReplaced', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      await expect(p.ready('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('update:m1');
+      expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+      // Still its own: the update is sent once, after the check
+      await expect(p.ready('m1', { stillMine: async () => true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+    });
+
+    it('a start that lost its wake while the image update was on its way is told as soon as it returns, before anything else is brought up (CodeRabbit on #1040)', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+      expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(false);
+      // The update was sent and the wake that sent it was lost: one warning, with the machine and both revisions (Opus on #1040)
+      const warnings = (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2 } });
+    });
+
+    it('an image update that throws while the wake is replaced is told too (it may have been applied), and WakeReplaced stops the start (the original error is in the warning); one that throws while the wake is still its own warns nothing and throws the original error (CodeRabbit on #1040)', async () => {
+      const failure = new Agent37Unreached('update answer lost');
+      const warnings = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
+      const lost = await behind('outside_check=1 any=0\n');
+      lost.w.client.updateInstance = (async (id: string) => (lost.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      let asks = 0;
+      await expect(lost.p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(warnings()).toHaveLength(1);
+      expect(warnings()[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2, updateFailed: true, updateError: 'update answer lost' } });
+      const own = await behind('outside_check=1 any=0\n');
+      own.w.client.updateInstance = (async (id: string) => (own.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(own.p.ready('m1', { stillMine: async () => true })).rejects.toBe(failure);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('a start that is still its own after the image update, and one that lost its wake BEFORE the update (nothing was sent), warn nothing', async () => {
+      const own = await behind('outside_check=1 any=0\n');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await own.p.ready('m1', { stillMine: async () => true });
+      const lost = await behind('outside_check=1 any=0\n');
+      await expect(lost.p.ready('m1', { stillMine: async () => false })).rejects.toBeInstanceOf(WakeReplaced);
+      expect((Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement')).toEqual([]);
+    });
+
+    it('a machine that is not behind the image is not asked about for an update (nothing is sent)', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      let asks = 0;
+      await p.ready('m1', { stillMine: async () => (asks++, true) });
+      expect(asks).toBe(0);
+    });
+
+    it('moves it to the current image only after the computer says it holds nothing outside its home folder, and before it is brought up', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls).toContain('update:m1');
+      const asked = w.calls.indexOf(`exec:m1:${CHECK}`);
+      expect(asked).toBeGreaterThan(-1);
+      expect(asked).toBeLessThan(w.calls.indexOf('update:m1'));
+      expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+      // The check is the CURRENT script (sent first, as for a pack-away) run as root
+      expect(w.execs.find((entry) => entry.command === CHECK)?.options).toMatchObject({ user: 'root' });
+      expect(w.calls.findIndex((call) => /^exec:m1:.*cold-bin\/universe-cold\.new/.test(call))).toBeLessThan(asked);
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the computer holds files or software outside its home folder', 'outside_check=1 any=1\n'],
+      ['the check ended with a reason', 'outside_check=0 reason=image_marker_missing\n'],
+      ['the check said nothing a check says', 'nothing useful\n'],
+      ['the check ran but exited with an error', { stdout: 'outside_check=1 any=0\n', exitCode: 1 }],
+      ['the check could not be asked (the computer was not reached)', new Agent37Unreached('lost')],
+    ])('does NOT move it when %s: nothing outside its home folder is deleted on a guess, the job still runs, and it is told to Sentry', async (_name, says) => {
+      const { w, p } = await behind(says);
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(true);
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining('not updated'), expect.objectContaining({ level: 'warning' }));
+    });
+
+    it('does not move it when the current script could not be put on the computer (the check cannot run)', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      w.setColdInstall(false);
+      w.setColdSum(null);
+      w.setExec((command) => (command.startsWith('sha256sum') ? { stdout: '', exitCode: 1 } : command === CHECK ? 'outside_check=1 any=0\n' : 'ready=1 restart=0\n'));
+      await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+    });
+
+    it('sends the script once to a machine that stays behind: a second job finds it in place (its sum is the right one) and sends no piece again, but a wrong or missing one is sent', async () => {
+      const { w, p } = await behind('outside_check=1 any=1\n');
+      const pieces = () => w.execs.filter((entry) => /base64 -d/.test(entry.command)).length;
+      await p.ready('m1');
+      expect(pieces()).toBeGreaterThan(0);
+      // The first job put it there: the computer now says the sum of the current script
+      w.setColdInPlace(COLD_SHA);
+      w.execs.length = 0;
+      await p.ready('m1');
+      expect(pieces()).toBe(0);
+      expect(w.execs.some((entry) => entry.command === CHECK)).toBe(true);
+      // Another script in place (an older one) is sent over
+      w.setColdInPlace('c'.repeat(64));
+      w.execs.length = 0;
+      await p.ready('m1');
+      expect(pieces()).toBeGreaterThan(0);
+    });
+
+    it('tells Sentry once for each computer and image revision, however many jobs it runs; another revision is told again', async () => {
+      const w = world();
+      let revision = 2;
+      const p = provider(w, { image: async () => state({ revision }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec((command) => (command === CHECK ? 'outside_check=1 any=1\n' : 'ready=1 restart=0\n'));
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await p.ready('m1');
+      await p.ready('m1');
+      await p.ready('m1');
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      // The image moved on again: a new fact about the same computer, told again (once)
+      revision = 3;
+      await p.ready('m1');
+      await p.ready('m1');
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks nothing of a machine already on the current image, and leaves it where it is', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 2;
+      w.setExec(() => 'ready=1 restart=0\n');
+      await p.ready('m1');
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.execs.some((entry) => entry.command.includes('outside-check'))).toBe(false);
+    });
+
+    it('a restore onto a computer behind the image still moves it first (a computer made for a restore holds nothing yet)', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      w.setExec(() => 'ok');
+      await p.restoreInto('m1', { url: 'https://orbit.example/x', token: 't', sha256: 'a'.repeat(64) }).catch(() => null);
+      expect(w.calls).toContain('update:m1');
+      expect(w.execs.some((entry) => entry.command.includes('outside-check'))).toBe(false);
+    });
   });
 });
 
 describe('cold storage operations on a computer', () => {
   const source = { url: 'https://orbit.example/api/computer/archives/a1/download', token: 'tok', sha256: 'a'.repeat(64) };
 
-  it('reads the inventory a pack-away is decided on, as root, and refuses one it cannot read whole', async () => {
+  const SHA = 'b'.repeat(64);
+  const manifest = { files: [['f', '/etc/app.conf', 4, 0o640, SHA], ['l', '/opt/tool/latest', 0, 0, 'run.sh']], packages: ['ffmpeg'] };
+
+  it('reads the inventory a pack-away is decided on, as root, with the list of what it copied, and refuses one it cannot read whole', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec(() => 'noise\nprepack={"home_files":12,"home_bytes":3400,"outside_files":2,"outside_bytes":90,"packages":["ffmpeg","bad name!"],"blocked":null}\n');
-    await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null });
-    expect(w.execs.at(-1)).toMatchObject({ command: 'universe-cold prepack', options: { user: 'root' } });
-    w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside"}\n');
+    w.setExec(() => `noise\nprepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: ['ffmpeg', 'bad name!'], blocked: null, manifest })}\n`);
+    await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null, outside: manifest });
+    expect(w.execs.at(-1)).toMatchObject({ command: COLD_PREPACK, options: { user: 'root' } });
+    // A computer that cannot be packed has no list (and needs none)
+    w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside","manifest":null}\n');
     expect((await p.prepack('m1')).blocked).toBe('too_big_outside');
     w.setExec(() => 'nothing useful\n');
     await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
     w.setExec(() => 'prepack={"home_files":-1,"home_bytes":1,"outside_files":0,"outside_bytes":0}\n');
     await expect(p.prepack('m1')).rejects.toThrow('not whole');
+    // One that can be packed but has no usable list is not packed (a copy with no list would put nothing back)
+    for (const bad of [undefined, null, { files: [['f', '/etc/a', 1, 0o600, 'nothex']], packages: [] }, { files: [['f', '/home/node/x', 1, 0o600, SHA]], packages: [] }]) {
+      w.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null, manifest: bad })}\n`);
+      await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+    }
+  });
+
+  describe('a long list of what is outside the home folder (Sentry on #1035)', () => {
+    /** Thousands of files with long paths: the list is far over one command line (128 KiB) and over what Agent37 prints in one answer (512 KB). */
+    const crowd = (count: number, extra: Partial<{ path: string }> = {}) => ({
+      files: Array.from({ length: count }, (_, i) => ['f', extra.path && i === 0 ? extra.path : `/opt/many/${String(i).padStart(5, '0')}-${'x'.repeat(150)}`, 10 + i, 0o644, SHA] as ['f', string, number, number, string]),
+      packages: ['ffmpeg'],
+    });
+    const hash = (text: string) => createHash('sha256').update(text, 'latin1').digest('hex');
+    const line = (list: unknown, over: Record<string, unknown> = {}) => {
+      const text = asciiJson(list);
+      return `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 3000, outside_bytes: 90, packages: ['ffmpeg'], blocked: null, manifest_bytes: text.length, manifest_sha256: hash(text), ...over })}\n`;
+    };
+    /** The computer: prints the line, and answers `python3 /usr/local/share/universe/cold-bin/universe-cold list-piece OFFSET LENGTH` from the list it holds, the way the script does. */
+    const holding = (w: ReturnType<typeof world>, list: unknown, over: Record<string, unknown> = {}, tweak: (piece: string, at: number) => string = (piece) => piece) => {
+      // The script writes plain ASCII (every other character is an escape), so that is what it serves
+      const text = asciiJson(list);
+      w.setExec((command) => {
+        if (command === COLD_PREPACK) return line(list, over);
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-piece (\d+) (\d+)$/.exec(command);
+        if (!asked) return 'ok';
+        const at = Number(asked[1]);
+        const piece = tweak(text.slice(at, at + Number(asked[2])), at);
+        return `listpiece=${piece}|end|\n`;
+      });
+    };
+
+    it('reads a list far longer than one answer in pieces, each asked as root, and every byte is checked', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      expect(JSON.stringify(list).length).toBeGreaterThan(512 * 1024);
+      holding(w, list);
+      const result = await p.prepack('m1');
+      expect(result).toMatchObject({ blocked: null, outsideFiles: 3000, packages: ['ffmpeg'] });
+      expect(result.outside).toEqual(list);
+      const reads = w.execs.filter((entry) => entry.command.startsWith('python3 /usr/local/share/universe/cold-bin/universe-cold list-piece'));
+      expect(reads.length).toBeGreaterThanOrEqual(3);
+      for (const read of reads) {
+        expect(read.options).toMatchObject({ user: 'root' });
+        expect(Number(/ (\d+)$/.exec(read.command)![1])).toBeLessThanOrEqual(200_000);
+      }
+    });
+
+    it('the modes of folders that are not 0755 travel with the list and are kept on the copy (a private folder stays private when a restore makes it again)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = { ...crowd(3), dirs: [['/opt/many/private', 0o700]] };
+      holding(w, list);
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+      // And a restore sends them to finish with the rest of the list
+      w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=3 packages=0 outside=applied\n' : 'ok'));
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true });
+      expect(w.execs.find((entry) => entry.command.includes(FINISH))!.command).toContain('"dirs":[["/opt/many/private",448]]');
+    });
+
+    it('a piece that is short, cut, missing or changed is an error (the pack-away is tried again), never a shorter or different list', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      holding(w, list, {}, (piece) => piece.slice(0, -1));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      holding(w, list, {}, (piece, at) => (at === 0 ? piece : piece.replace(/x/, 'y')));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      // Same length, one character changed in the last piece: only the SHA-256 can tell
+      holding(w, list, {}, (piece, at) => (at > 0 ? `${piece.slice(0, -2)}9${piece.slice(-1)}` : piece));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      w.setExec((command) => (command === COLD_PREPACK ? line(list) : { stdout: 'listpiece=x|end|\n', truncated: true }));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      w.setExec((command) => (command === COLD_PREPACK ? line(list) : { stdout: '', exitCode: 1 }));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      // A line that says no length or no SHA-256 is not a list
+      for (const over of [{ manifest_bytes: null }, { manifest_sha256: 'nothex' }, { manifest_bytes: 1 }]) {
+        holding(w, list, over);
+        await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+      }
+    });
+
+    it('every reason the script can give for a computer that cannot be packed (digits too) is read as a blocked computer, never a throw', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // The reasons are read from the script itself, so a new one cannot be forgotten here
+      const reasons = [...new Set([...UNIVERSE_COLD.matchAll(/(?:blocked = |stop\()"([a-z0-9_]+)"/g)].map((found) => found[1]))];
+      expect(reasons).toEqual(expect.arrayContaining(['outside_name_not_utf8', 'packages_too_many', 'outside_too_big', 'outside_link', 'outside_list_too_big']));
+      for (const reason of reasons) {
+        w.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: reason, manifest_bytes: null, manifest_sha256: null })}\n`);
+        await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: reason, outside: null });
+      }
+    });
+
+    it('a piece with the right length but a character that is not plain printable ASCII is read again, never taken: the hash reads each character as one byte, so another character of the same length would pass it', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3);
+      let changed = false;
+      // The first answer for the first piece has its first x replaced by a character that is as long and hashes to the same byte (U+0178 is 0x78 in latin1)
+      holding(w, list, {}, (piece, at) => {
+        if (at !== 0 || changed) return piece;
+        changed = true;
+        return piece.replace('x', '\u0178');
+      });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+      expect(changed).toBe(true);
+      // The piece at offset 0 was asked twice: the changed answer was refused, the second was taken
+      expect(w.execs.filter((entry) => / list-piece 0 \d+$/.test(entry.command))).toHaveLength(2);
+    });
+
+    it('a pack-away is not held up by a lookup of the image that fails: it never moves the machine to the image, so it does not look at it', async () => {
+      const w = world();
+      let looked = 0;
+      let down = false;
+      const p = provider(w, { image: async () => {
+        looked++;
+        if (down) throw new Error('image lookup down');
+        return { hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null } as ImageState;
+      } });
+      await p.create('bot-1');
+      down = true;
+      looked = 0;
+      holding(w, { files: [], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      expect(looked).toBe(0);
+    });
+
+    it('output Agent37 cut (over 512 KB, the middle removed) is a computer that is blocked with a reason, never an inventory read from what is left', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // The line itself cut: nothing to read
+      w.setExec(() => ({ stdout: `${'noise\n'.repeat(100)}prepack={"home_files":1,"home_bytes":\n[... 700000 bytes cut ...]\nxxxx}`, truncated: true }));
+      await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 0, homeBytes: 0, outsideFiles: 0, outsideBytes: 0, packages: [], blocked: 'inventory_output_too_long', outside: null });
+      w.setExec(() => ({ stdout: 'noise only\n', truncated: true }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'inventory_output_too_long' });
+      // The same output that was not cut is still an error of its own
+      w.setExec(() => 'noise only\n');
+      await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
+      // A short line that survived the cut whole is read as it is
+      w.setExec((command) => (command === COLD_PREPACK ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}|end|\n' }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: { files: [], packages: [] } });
+    });
+
+    it('a name a database would refuse, more software than a list can carry, or more files than it can carry is a blocked computer with a reason, never a failure', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // A file name that is not valid UTF-8 reads as a lone surrogate
+      holding(w, crowd(3, { path: '/opt/many/bad-\udcff-name' }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_name_not_utf8', outside: null, outsideFiles: 3000 });
+      holding(w, { files: [['l', '/opt/tool/odd', 0, 0, 'to-\ud800']], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_name_not_utf8', outside: null });
+      // A pair is a character, not a lone surrogate: a name in any script is fine
+      holding(w, { files: [['f', '/opt/many/\u0627\u0644-\ud83d\ude00', 1, 0o644, SHA]], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      holding(w, { files: [], packages: Array.from({ length: 2001 }, (_, i) => `pkg${i}`) });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'packages_too_many', outside: null });
+      holding(w, { files: [], packages: Array.from({ length: 2000 }, (_, i) => `pkg${i}`) });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      holding(w, crowd(5001));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_too_big', outside: null });
+      holding(w, crowd(5000));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      // A list that is not the shape the script prints is still an error
+      holding(w, { files: [['f', '/home/node/x', 1, 0o600, SHA]], packages: [] });
+      await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+      // A list longer than a computer may hand over is blocked before any piece is read
+      holding(w, crowd(1), { manifest_bytes: 33 * 1024 * 1024 });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_list_too_big' });
+      expect(w.execs.at(-1)!.command).toBe(COLD_PREPACK);
+    });
+
+    it('a restore sends a list too long for one command in pieces, each command well under the 128 KiB a single argument may be, then finish reads that file', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      // A name in another script too: sent as plain ASCII escapes, so no piece is cut inside a character
+      list.files[1][1] = '/opt/many/\u0627\u0644\u0645\u0644\u0641-\ud83d\ude00';
+      const received: string[] = [];
+      w.setExec((command) => {
+        if (command.startsWith(`${COLD_RUN} restore`)) return 'restored=1\n';
+        const put = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command);
+        if (put) {
+          expect(Number(put[1])).toBe(received.join('').length);
+          received.push(put[3]);
+          return `listput=1 size=${received.join('').length}\n`;
+        }
+        return command.includes(FINISH) ? 'finished=1 files=3000 packages=1 outside=applied\n' : 'ok';
+      });
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
+      const text = received.join('');
+      expect(JSON.parse(text)).toEqual(list);
+      expect(/^[\x20-\x7e]*$/.test(text)).toBe(true);
+      expect(received.length).toBeGreaterThan(8);
+      const commands = w.execs.map((entry) => entry.command);
+      for (const command of commands) expect(Buffer.byteLength(command)).toBeLessThan(100 * 1024);
+      const puts = w.execs.filter((entry) => entry.command.includes(LISTPUT));
+      for (const put of puts) expect(put.options).toMatchObject({ user: 'root' });
+      const finish = w.execs.at(-1)!;
+      expect(finish.command).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside_file: { bytes: text.length, sha256: hash(text) } })}\nFINISH_JSON`);
+      expect(finish.options).toMatchObject({ user: 'root' });
+      // Every piece went before the finish, after the restore
+      expect(commands.findIndex((command) => command.includes(LISTPUT))).toBe(commands.findIndex((command) => command.startsWith(`${COLD_RUN} restore`)) + 1);
+    });
+
+    it('a piece the computer did not take exactly as sent is a failed restore with a reason, and finish is never run', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      const answers: Array<(command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }> = [
+        () => 'listput=0 reason=not_written\n',
+        () => ({ stdout: 'listput=1 size=1\n' }),
+        // The size it says is the right one: the exit code is the only thing wrong with this answer
+        (command) => ({ stdout: `listput=1 size=${asPut(command)}\n`, exitCode: 1 }),
+        () => '',
+      ];
+      for (const answer of answers) {
+        w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(LISTPUT) ? answer(command) : 'ok'));
+        await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
+        expect(w.execs.some((entry) => entry.command.includes(FINISH))).toBe(false);
+        w.execs.length = 0;
+      }
+    });
+
+    it('every piece, sent or read, has a name of its own, so Agent37 runs it again only when we mean it to and returns the first answer to a repeat of the same ask', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      holding(w, list);
+      await p.prepack('m1');
+      w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(LISTPUT) ? { stdout: `listput=1 size=${asPut(command)}\n` } : 'finished=1 files=0 packages=0 outside=applied\n'));
+      await p.restoreInto('m1', { ...source, outside: list as never });
+      const named = w.execs.filter((entry) => /list-(piece|put)/.test(entry.command));
+      expect(named.length).toBeGreaterThan(12);
+      const names = named.map((entry) => (entry.options as { name?: string }).name);
+      expect(names.every((name) => typeof name === 'string' && /^cold-(read|put):[0-9a-f]{8}:\d+/.test(name))).toBe(true);
+      expect(new Set(names).size).toBe(names.length);
+      // The same list sent twice does not reuse a name (a name that is remembered would return the first answer for the second send)
+      const again = w.execs.length;
+      await p.restoreInto('m1', { ...source, outside: list as never });
+      const second = w.execs.slice(again).filter((entry) => entry.command.includes(LISTPUT)).map((entry) => (entry.options as { name?: string }).name);
+      expect(second.some((name) => names.includes(name))).toBe(false);
+    });
+
+    /** The size a put command would leave on the computer (its offset plus the piece it carries). */
+    const asPut = (command: string) => {
+      const found = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command)!;
+      return Number(found[1]) + found[3].length;
+    };
+
+    it('one piece that fails once does not fail the restore: the whole send starts again from the first piece, which makes the file new', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      for (const failure of ['refused', 'thrown', 'cut'] as const) {
+        w.execs.length = 0;
+        let failed = false;
+        w.setExec((command) => {
+          if (command.startsWith(`${COLD_RUN} restore`)) return 'restored=1\n';
+          if (!command.includes(LISTPUT)) return 'finished=1 files=0 packages=0 outside=applied\n';
+          if (!failed && command.startsWith(`${LISTPUT} 49152 `)) {
+            failed = true;
+            if (failure === 'thrown') throw new Agent37Unreached('lost');
+            return failure === 'refused' ? 'listput=0 reason=not_written\n' : { stdout: 'listput=1 size=1\n', truncated: true };
+          }
+          return `listput=1 size=${asPut(command)}\n`;
+        });
+        await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
+        const offsets = w.execs.filter((entry) => entry.command.includes(LISTPUT)).map((entry) => Number(/list-put (\d+)/.exec(entry.command)![1]));
+        // 0, 49152 (failed), then again from 0 and all the way through
+        expect(offsets.slice(0, 2)).toEqual([0, 49152]);
+        expect(offsets.slice(2, 4)).toEqual([0, 49152]);
+        expect(offsets.at(-1)).toBeGreaterThan(400_000);
+        const finishes = w.execs.filter((entry) => entry.command.includes(FINISH));
+        expect(finishes).toHaveLength(1);
+      }
+    });
+
+    it('a send that fails on every try is a failed restore (a refusal) or the error itself (Agent37 not reached), after three tries, and finish never runs', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : 'listput=0 reason=not_written\n'));
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
+      expect(w.execs.filter((entry) => entry.command.startsWith(`${LISTPUT} 0 `))).toHaveLength(3);
+      w.execs.length = 0;
+      w.setExec((command) => {
+        if (command.startsWith(`${COLD_RUN} restore`)) return 'restored=1\n';
+        throw new Agent37Unreached('down');
+      });
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).rejects.toThrow('down');
+      expect(w.execs.filter((entry) => entry.command.startsWith(`${LISTPUT} 0 `))).toHaveLength(3);
+      expect(w.execs.some((entry) => entry.command.includes(FINISH))).toBe(false);
+    });
+
+    it('a piece read that fails once (thrown, short, cut, no exit 0) is asked again and the list is still read whole; three failures in a row are an error', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      const text = JSON.stringify(list);
+      for (const failure of ['thrown', 'short', 'cut', 'exit'] as const) {
+        for (const at of [0, 200_000]) {
+          let failed = 0;
+          w.setExec((command) => {
+            if (command === COLD_PREPACK) return line(list);
+            const asked = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+            const from = Number(asked[1]);
+            const piece = text.slice(from, from + Number(asked[2]));
+            if (from === at && failed < 1) {
+              failed++;
+              if (failure === 'thrown') throw new Agent37Unreached('lost');
+              if (failure === 'short') return `listpiece=${piece.slice(0, -1)}|end|\n`;
+              if (failure === 'cut') return { stdout: `listpiece=${piece}|end|\n`, truncated: true };
+              return { stdout: '', exitCode: 1 };
+            }
+            return `listpiece=${piece}|end|\n`;
+          });
+          await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+          expect(failed).toBe(1);
+        }
+      }
+      let failures = 0;
+      w.setExec((command) => {
+        if (command === COLD_PREPACK) return line(list);
+        if (/ 200000 \d+$/.test(command)) {
+          failures++;
+          throw new Agent37Unreached('lost');
+        }
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        return `listpiece=${text.slice(Number(asked[1]), Number(asked[1]) + Number(asked[2]))}|end|\n`;
+      });
+      await expect(p.prepack('m1')).rejects.toThrow('lost');
+      expect(failures).toBe(3);
+    });
+
+    it('a piece that ends in a space is read whole even when the end of the answer is trimmed on the way (the computer prints an end marker after it)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // A path with a space as the very last character of the first piece (a piece is 200,000 characters)
+      const original = JSON.stringify(crowd(3000));
+      expect(original[199_999]).toBe('x');
+      const padded = JSON.parse(`${original.slice(0, 199_999)} ${original.slice(200_000)}`) as ReturnType<typeof crowd>;
+      const whole = JSON.stringify(padded);
+      expect(whole[199_999]).toBe(' ');
+      w.setExec((command) => {
+        if (command === COLD_PREPACK) return line(padded);
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        const from = Number(asked[1]);
+        // What the script prints, after a transport that strips white space from the end of an answer
+        return { stdout: `listpiece=${whole.slice(from, from + Number(asked[2]))}|end|\n`.trimEnd() };
+      });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: padded });
+    });
+
+    it('a list that fits one command is still sent as it always was (no pieces)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=applied\n' : 'ok'));
+      await p.restoreInto('m1', { ...source, outside: crowd(100) as never });
+      const run = w.execs.map((entry) => entry.command).filter((command) => command.startsWith(`${COLD_RUN} restore`) || command.includes(FINISH) || command.includes(LISTPUT));
+      expect(run.map((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restore' : 'finish'))).toEqual(['restore', 'finish']);
+      expect(run[1]).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside: crowd(100) })}\nFINISH_JSON`);
+    });
+  });
+
+  describe('a pack-away never moves the computer to another image, and runs the script Orbit sends', () => {
+    const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+    const printsList = (w: ReturnType<typeof world>) => w.setExec((command) => (command === COLD_PREPACK ? `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: [], blocked: null, manifest })}\n` : 'ok'));
+    /** What the machine would have written: the base64 of every install command, decoded and joined. */
+    const written = (w: ReturnType<typeof world>) => Buffer.concat(w.execs.map((entry) => /^umask 077 && .*printf %s '([A-Za-z0-9+/=]*)' \| base64 -d >>? /.exec(entry.command)?.[1]).filter((piece): piece is string => piece !== undefined).map((piece) => Buffer.from(piece, 'base64'))).toString('utf8');
+
+    it('a machine on an older image is NOT updated: its rule and budget are set, the current script is sent and checked, then run from where it was put', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      // What create did is not evidence of what prepack does: the log starts empty, and the machine is one whose network rule is another and whose monthly cap is not zero
+      w.calls.length = 0;
+      w.instances.get('m1')!.network = 'block-all' as never;
+      w.budgets.set('m1', { cap: 5_000_000, credit: 0 });
+      printsList(w);
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: manifest });
+      // The image update would replace the disk outside the home folder (or move the build marker): it is never asked for here
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.instances.get('m1')!.template_revision).toBe(1);
+      // Both are put right by prepack itself, before the first command runs on the machine
+      const firstExec = w.calls.findIndex((call) => call.startsWith('exec:m1:'));
+      expect(firstExec).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('network:m1')).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('network:m1')).toBeLessThan(firstExec);
+      expect(w.calls.indexOf('cap:m1:0')).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('cap:m1:0')).toBeLessThan(firstExec);
+      expect(w.instances.get('m1')!.network).toBe('allow-all');
+      expect(w.budgets.get('m1')!.cap).toBe(0);
+      // The first thing asked is whether the current script is already in place (it is not here); the rest is as before
+      expect(w.execs[0].command).toBe(`sha256sum ${COLD_PATH}`);
+      const commands = w.execs.map((entry) => entry.command).filter((command) => command !== `sha256sum ${COLD_PATH}`);
+      // First the script goes over (a root-only folder, a file made new), then the machine's own sha256sum, then the move, then prepack from the installed path, then the list
+      expect(commands[0]).toMatch(/^umask 077 && mkdir -p \/usr\/local\/share\/universe\/cold-bin && chown root:root \/usr\/local\/share\/universe\/cold-bin && chmod 755 \/usr\/local\/share\/universe\/cold-bin && printf %s '[A-Za-z0-9+/=]+' \| base64 -d > \/usr\/local\/share\/universe\/cold-bin\/universe-cold\.new$/);
+      expect(commands.slice(-3)).toEqual([`sha256sum ${COLD_PATH}.new`, COLD_MOVE, COLD_PREPACK]);
+      expect(commands.indexOf(`sha256sum ${COLD_PATH}.new`)).toBeLessThan(commands.indexOf(COLD_MOVE));
+      expect(commands.indexOf(COLD_MOVE)).toBeLessThan(commands.indexOf(COLD_PREPACK));
+      expect(commands.some((command) => command.startsWith('universe-cold '))).toBe(false);
+      for (const entry of w.execs) expect(entry.options).toMatchObject({ user: 'root' });
+      // Every command stays far under what one argument may be (about 128 KiB)
+      for (const command of commands) expect(Buffer.byteLength(command)).toBeLessThan(100 * 1024);
+      // What went over is the current script, byte for byte
+      expect(written(w)).toBe(UNIVERSE_COLD);
+    });
+
+    it('a machine already on the current image is sent the script too (there is no revision to branch on), and is not updated either', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 2;
+      printsList(w);
+      await p.prepack('m1');
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(written(w)).toBe(UNIVERSE_COLD);
+      // A machine that does not say its revision is sent it as well
+      const w2 = world();
+      const q = provider(w2, { image: async () => state({ revision: 2 }) });
+      await q.create('bot-1');
+      delete (w2.instances.get('m1') as { template_revision?: number }).template_revision;
+      printsList(w2);
+      await q.prepack('m1');
+      expect(written(w2)).toBe(UNIVERSE_COLD);
+    });
+
+    it('a script that did not arrive whole (the machine\'s sha256sum is not Orbit\'s) is an error after three tries, it is never moved into place, and prepack is never run', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      printsList(w);
+      w.setColdSum('0'.repeat(64));
+      await expect(p.prepack('m1')).rejects.toThrow('did not arrive whole');
+      const commands = w.execs.map((entry) => entry.command).filter((command) => command !== `sha256sum ${COLD_PATH}`);
+      expect(commands.filter((command) => command.startsWith('sha256sum'))).toHaveLength(3);
+      expect(commands.some((command) => command.startsWith('chmod 644'))).toBe(false);
+      expect(commands).not.toContain(COLD_PREPACK);
+      // No answer, or one that is not a hash, is the same
+      for (const answer of ['', 'not a hash\n', `${COLD_SHA.toUpperCase()}  x\n`]) {
+        w.execs.length = 0;
+        w.setColdSum(null);
+        w.setExec((command) => (command.startsWith('sha256sum') ? answer : 'ok'));
+        await expect(p.prepack('m1')).rejects.toThrow('did not arrive whole');
+        expect(w.execs.some((entry) => entry.command.startsWith('chmod 644') || entry.command === COLD_PREPACK)).toBe(false);
+      }
+    });
+
+    it('a command that is lost or fails once starts the install again from the first piece, each command under a name of its own, and the pack-away goes on', async () => {
+      for (const failure of ['thrown', 'exit', 'cut'] as const) {
+        const w = world();
+        const p = provider(w);
+        await p.create('bot-1');
+        printsList(w);
+        const execute = w.client.exec.bind(w.client);
+        let failed = false;
+        // Every command that is asked, the one that fails too (the machine's own log only holds the ones that ran)
+        const asked: Array<{ command: string; name?: string }> = [];
+        (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
+          asked.push({ command, name: (options as { name?: string } | undefined)?.name });
+          if (!failed && command.startsWith('umask 077')) {
+            failed = true;
+            if (failure === 'thrown') throw new Agent37Unreached('lost');
+            return { exitCode: failure === 'exit' ? 1 : 0, stdout: '', stderr: '', truncated: failure === 'cut' };
+          }
+          return execute(id, command, options);
+        };
+        await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+        expect(failed).toBe(true);
+        const names = w.execs.filter((entry) => !entry.command.startsWith('python3') && entry.command !== `sha256sum ${COLD_PATH}`).map((entry) => (entry.options as { name?: string }).name);
+        expect(names.every((name) => typeof name === 'string' && name.startsWith('cold-install:'))).toBe(true);
+        expect(new Set(names).size).toBe(names.length);
+        // One command for each piece of the script (the script is a few pieces of at most 48 KiB: each its own command, the first makes the file new)
+        expect(w.execs.filter((entry) => entry.command.startsWith('umask 077'))).toHaveLength(Math.ceil(Buffer.byteLength(UNIVERSE_COLD) / LIST_SEND_PIECE));
+        // The failed first piece and the piece the new try starts with are the same first piece (offset zero: the file is made new), under two different names
+        const firsts = asked.filter((entry) => entry.command.startsWith('umask 077 && mkdir -p'));
+        expect(firsts).toHaveLength(2);
+        expect(firsts[0].command).toBe(firsts[1].command);
+        expect(firsts[0].name).not.toBe(firsts[1].name);
+        const allNames = asked.filter((entry) => !entry.command.startsWith('python3')).map((entry) => entry.name);
+        expect(new Set(allNames).size).toBe(allNames.length);
+      }
+      // Lost on every try: the error itself, and prepack never runs
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      (w.client as unknown as { exec: () => Promise<unknown> }).exec = async () => {
+        throw new Agent37Unreached('down');
+      };
+      await expect(p.prepack('m1')).rejects.toThrow('down');
+    });
   });
 
   it('makes a throwaway computer with the same network rule and a closed budget, named so it is never mistaken for a Brick’s', async () => {
@@ -752,29 +1787,119 @@ describe('cold storage operations on a computer', () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command === 'universe-cold finish' ? 'finished=1\n' : 'ok'));
-    const result = await p.restoreInto('m1', source);
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1 files=12\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=applied\n' : 'ok'));
+    const result = await p.restoreInto('m1', { ...source, outside: manifest as never });
     expect(result).toMatchObject({ ok: true, reason: null });
+    expect(result.outside).toBeUndefined();
     const commands = w.execs.map((entry) => entry.command);
-    expect(commands[0]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
-    expect(commands[0]).toContain(source.url);
-    expect(commands[0]).toContain(source.sha256);
-    expect(commands[1]).toBe('universe-cold finish');
-    expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    const at = commands.findIndex((command) => command.startsWith(`${COLD_RUN} restore`));
+    expect(commands[at]).toMatch(/^python3 \/usr\/local\/share\/universe\/cold-bin\/universe-cold restore <<'RESTORE_JSON'/);
+    expect(commands[at]).toContain(source.url);
+    expect(commands[at]).toContain(source.sha256);
+    // The current script is put on the machine and checked before anything is restored, and `finish` runs from that fresh copy, as root, never the installed one
+    expect(commands.slice(0, at)).toContain(`sha256sum ${COLD_PATH}.new`);
+    expect(commands.slice(0, at)).toContain(COLD_MOVE);
+    expect(commands.slice(0, at).some((command) => command.startsWith(`${COLD_RUN} finish`))).toBe(false);
+    // Nothing runs from the image's own script: every cold command is the current one, run from where it was put
+    expect(commands.some((command) => command.startsWith('universe-cold '))).toBe(false);
+    // The finish gets the list Orbit kept for the copy, on standard input (never read from the home folder)
+    expect(commands[at + 1]).toBe(`${FINISH} <<'FINISH_JSON'\n${JSON.stringify({ outside: manifest })}\nFINISH_JSON`);
+    expect(w.execs[at + 1].options).toMatchObject({ user: 'root' });
     // Its budget was read before anything was put on it
     expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
     expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf(`exec:m1:${commands[0]}`));
+  });
+
+  it('a machine that does not say its image revision (an old image) is sent the current script first, and restore, every list piece and finish all run from it, never from the image\'s own universe-cold (Opus verdict on #1035)', async () => {
+    const w = world();
+    const p = provider(w, { image: async () => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null }) });
+    await p.create('bot-1');
+    delete (w.instances.get('m1') as { template_revision?: number }).template_revision;
+    w.execs.length = 0;
+    const list = { files: Array.from({ length: 2500 }, (_, i) => ['f', `/opt/many/file-${i}-${'x'.repeat(40)}`, 1, 0o644, 'a'.repeat(64)]), packages: [] };
+    w.setExec((command) => {
+      if (command.startsWith(`${COLD_RUN} restore`)) return 'restored=1\n';
+      if (command.includes(LISTPUT)) return `listput=1 size=${asPutSize(command)}\n`;
+      return command.includes(FINISH) ? 'finished=1 files=2500 packages=0 outside=applied\n' : 'ok';
+    });
+    await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true });
+    const commands = w.execs.map((entry) => entry.command);
+    const restore = commands.findIndex((command) => command.startsWith(`${COLD_RUN} restore`));
+    // The pieces of the script, the machine's own sum and the move all come before the restore
+    expect(commands.slice(0, restore).some((command) => command.startsWith('umask 077 && '))).toBe(true);
+    expect(commands.slice(0, restore)).toContain(`sha256sum ${COLD_PATH}.new`);
+    expect(commands.slice(0, restore)).toContain(COLD_MOVE);
+    // Every cold command that follows is the current script, from where it was put
+    const cold = commands.slice(restore).filter((command) => /universe-cold/.test(command));
+    expect(cold.length).toBeGreaterThan(3);
+    for (const command of cold) expect(command.startsWith(`python3 ${COLD_PATH} `)).toBe(true);
+    expect(commands.some((command) => command.startsWith('universe-cold '))).toBe(false);
+    // The restore runs as the computer's own user (no user given), the list pieces and finish as root
+    const asked = w.execs.find((entry) => entry.command.startsWith(`${COLD_RUN} restore`))!;
+    expect((asked.options as { user?: string } | undefined)?.user).toBeUndefined();
+  });
+
+  it('a script that could not be put on the computer is thrown (never a copy that did not check out), and neither restore nor finish was run', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.execs.length = 0;
+    w.setColdInstall(false);
+    w.setColdSum(null);
+    w.setExec((command) => (command.startsWith('sha256sum') ? { stdout: '', exitCode: 1 } : 'ok'));
+    await expect(p.restoreInto('m1', source)).rejects.toThrow();
+    const commands = w.execs.map((entry) => entry.command);
+    expect(commands.some((command) => command.startsWith(`${COLD_RUN} restore`) || command.includes(FINISH) || command.includes(LISTPUT))).toBe(false);
   });
 
   it('says why a restore did not check out, in a word, and does not go on to the finish', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=0 reason=sha_mismatch\n' : 'ok'));
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=0 reason=sha_mismatch\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'sha_mismatch' });
-    expect(w.execs.map((entry) => entry.command)).not.toContain('universe-cold finish');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command === 'universe-cold finish' ? 'finished=0 reason=packages\n' : 'ok'));
+    expect(w.execs.map((entry) => entry.command).filter((command) => command.includes(FINISH))).toEqual([]);
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=packages\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_packages' });
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=outside_tampered\n' : 'ok'));
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_tampered' });
+  });
+
+  it('keeps the number in a reason (how many files differed), which a reason of letters alone lost', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=0 reason=differs_12\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'differs_12' });
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=0 reason=outside_missing_2\n' : 'ok'));
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_missing_2' });
+  });
+
+  it('is never good on a finish that does not say it put the list back: no marker, or the wrong one for what was sent', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const answer = (finish: string) => w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? finish : 'ok'));
+    // An older script says only finished=1 (no marker), or says unverified for a list that was sent, or applied for none
+    answer('finished=1 files=0 packages=0\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=unverified\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=applied\n');
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_outside_not_confirmed' });
+    answer('finished=1 files=0 packages=0 outside=applied\n');
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: true });
+  });
+
+  it('a copy with no list is restored with a null list, and the result says nothing outside the home folder was put back; a list that is not exactly one is sent as null', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith(`${COLD_RUN} restore`) ? 'restored=1\n' : command.includes(FINISH) ? 'finished=1 files=0 packages=0 outside=unverified\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: true, reason: null, outside: 'unverified' });
+    expect(w.execs.at(-1)!.command).toBe(`${FINISH} <<'FINISH_JSON'\n{"outside":null}\nFINISH_JSON`);
+    await p.restoreInto('m1', { ...source, outside: { files: [['f', '/etc/x', 1, 0, 'nothex']], packages: [] } as never });
+    expect(w.execs.at(-1)!.command).toContain('{"outside":null}');
   });
 
   it('confirms a computer is gone only when the provider no longer lists it, and says it is still there otherwise', async () => {
@@ -823,7 +1948,7 @@ describe('Agent37 managed spending stays shut (monthly cap AND one-time credit)'
     await p.create('bot-1');
     open(w, 'm1', 5_000_000, 0);
     w.setExec(() => 'ready=1 restart=0\n');
-    await expect(p.ready('m1')).resolves.toBeUndefined();
+    await expect(p.ready('m1')).resolves.toMatchObject({ bootId: BOOT });
     expect(w.calls).toContain('cap:m1:0');
     expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 0 });
   });

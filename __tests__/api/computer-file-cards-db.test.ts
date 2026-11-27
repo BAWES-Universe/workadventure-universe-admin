@@ -22,6 +22,7 @@ import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-dele
 import { saveMeterSettings } from '@/lib/meter';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { isFenceCheckCommand } from '@/lib/computer-fence-script';
 import { proposeRule } from '@/lib/spend-rules';
 import { finishJob, giveComputer, setHandOverClaimWaitForTests, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
@@ -79,7 +80,7 @@ function machine(command: string) {
     return { stdout: `${lines.join('\n')}\n` };
   }
   const named = /\nf='\.\/((?:[^']|'\\'')*)'\n/.exec(command);
-  if (!named) return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
+  if (!named) return isFenceCheckCommand(command) ? { stdout: 'remaining=0\n' } : {};
   const file = machineFiles.get(named[1].replace(/'\\''/g, "'"));
   if (!file) return { exitCode: 4 };
   const signature = `1 ${file.at} ${file.at}`;

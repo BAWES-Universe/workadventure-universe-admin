@@ -5,6 +5,7 @@
  * Resolves scope + entitlement via the avatar catalog engine.
  * Falls back to static config/woka.json when no active catalog sets exist
  * (zero-downtime migration path).
+ * With context=bot (a bot's picker) the Bricks group, the Brick colours' map sprites, comes first.
  *
  * Auth: Requires ADMIN_API_TOKEN in Authorization header (sent by the play server).
  */
@@ -18,6 +19,7 @@ import {
   buildWokaListPayload,
 } from '@/lib/avatar-catalog'
 import { getWokaList } from '@/lib/wokas'
+import { withBrickSprites } from '@/lib/brick-sprites'
 import { findUserByIdentifier } from '@/lib/user-identifier'
 
 export async function GET(request: NextRequest) {
@@ -103,10 +105,13 @@ export async function GET(request: NextRequest) {
     // Fallback to static woka.json during initial catalog migration
     if (sets.length === 0) {
       const staticData = getWokaList(playServiceUrl)
-      return NextResponse.json(staticData)
+      return NextResponse.json(context === 'bot' ? withBrickSprites(staticData, playServiceUrl) : staticData)
     }
 
-    return NextResponse.json(buildWokaListPayload(sets, playServiceUrl))
+    const payload = buildWokaListPayload(sets, playServiceUrl)
+    // A bot's picker also has the Brick colours (their map sprites): first, as the "Bricks" group. A person's own Woka
+    // picker never does.
+    return NextResponse.json(context === 'bot' ? withBrickSprites(payload, playServiceUrl) : payload)
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json(

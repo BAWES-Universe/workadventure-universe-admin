@@ -42,6 +42,8 @@ import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { pauseJob } from '@/lib/computer-job-controls';
+import { controlInternals } from '@/lib/computer';
+import { setPowerTimingForTests } from '@/lib/computer-power';
 import {
   computerView,
   continueWindDown,
@@ -769,15 +771,16 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!a.ok) throw new Error('no');
-      let started: Awaited<ReturnType<typeof startJob>> | null = null;
+      let starting: ReturnType<typeof startJob> | null = null;
       const rest = provider.rest.bind(provider);
       provider.rest = async (ref: string) => {
-        // The next job starts at the very moment the rest is being done
-        if (!started) started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
+        // The next job starts at the very moment the rest is being done. It runs beside the rest, as a second request does: since post-0.5.0 B it waits for the sleep to return before it wakes the
+        // machine, so awaiting it from inside the sleep call would wait on itself
+        if (!starting) starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
         return rest(ref);
       };
       await finishJob(a.job.id, 'done', minutes(1));
-      expect(started).toMatchObject({ ok: true });
+      expect(await starting).toMatchObject({ ok: true });
       const view = await computerView(sara.brickId, sara.id, minutes(3));
       expect(view?.job).not.toBeNull();
       expect(view?.machine).toBe('working');
@@ -1151,10 +1154,24 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!a.ok) throw new Error('no');
-      provider.failNext.rest = true;
-      await finishJob(a.job.id, 'done', minutes(1));
-      // The rest failed: the machine is still awake, so it is not marked as resting (the sweep only looks at ones that work)
-      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      // A rest that threw can still land for the provider's margin (shortened here): the row stays `resting`, claimed, and the stuck-rest sweep lets it go only once nothing of ours can land
+      setPowerTimingForTests({ marginMs: 100 });
+      try {
+        provider.failNext.rest = true;
+        await finishJob(a.job.id, 'done', minutes(1));
+        const resting = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+        expect(resting.machine).toBe('resting');
+        // The rest's own operation closes by itself once the margin is past: waited for on the operation's `done_at` (a bounded poll), not guessed from a delay, so a slow database cannot make the sweep find it still open
+        const closeBy = Date.now() + 10_000;
+        for (;;) {
+          const open = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM computer_power_ops WHERE provider_ref = ${resting.providerRef} AND done_at IS NULL`;
+          if (Number(open[0].n) === 0) break;
+          if (Date.now() > closeBy) throw new Error('The rest that threw never closed its operation');
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      } finally {
+        setPowerTimingForTests(null);
+      }
       await backdate([sara.brickId]);
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
@@ -1390,14 +1407,12 @@ run('a Brick’s computer, in a real database', () => {
       await requestHandover(jobId, 'details', minutes(1));
       // The reader's start is admitted (the machine is Brick's) and stands at its claim of the machine, where it waits for the Brick's line lock that a fixture transaction holds: the take over then runs from start to end, looks for
       // running jobs and finds none, and only then does the claim go on and the reader run
-      let pid = 0;
       let locked: () => void = () => undefined;
       const gotLock = new Promise<void>((resolve) => (locked = resolve));
       let release: () => void = () => undefined;
       const hold = new Promise<void>((resolve) => (release = resolve));
       const holder = prisma.$transaction(
         async (tx) => {
-          pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`)[0].pid;
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${sara.brickId}`}, 0))`;
           locked();
           await hold;
@@ -1419,20 +1434,26 @@ run('a Brick’s computer, in a real database', () => {
       try {
         // A holder that fails before it takes the lock ends the wait with its own error
         await Promise.race([gotLock, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
+        let reached = false;
+        const met = new Promise<void>((resolve) => {
+          controlInternals.onLineBusy = (botId) => {
+            if (botId === sara.brickId) {
+              reached = true;
+              resolve();
+            }
+          };
+        });
         reading = startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
-        // The reader is at the claim: a backend the holder blocks
-        let blocked = false;
-        for (let tries = 0; tries < 200 && !blocked; tries++) {
-          blocked = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1;
-          if (!blocked) await Promise.race([new Promise((resolve) => setTimeout(resolve, 20)), reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
-        }
-        expect(blocked).toBe(true);
+        // The reader is at the claim: the seam says it found the line lock held (it keeps trying for it, a try-lock), and it has neither been refused nor started
+        await Promise.race([met, reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
+        expect(reached).toBe(true);
         await takeOver(sara.brickId, sara.id, minutes(2));
         // The take over looked for running jobs, found none (the reader is not running yet), and the waiting job is the person's
         expect(lookedAt.length).toBeGreaterThan(0);
         expect(lookedAt.every((found) => found === 0)).toBe(true);
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'waiting', control: 'person' });
       } finally {
+        controlInternals.onLineBusy = () => undefined;
         spy.mockRestore();
         release();
         await Promise.allSettled([holder, reading]);
@@ -2379,7 +2400,8 @@ run('a Brick’s computer, in a real database', () => {
       provider.failNext.wake = true;
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
       expect(second).toEqual({ ok: false, reason: 'broken_start' });
-      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'waking' });
+      // The wake that failed may have started the machine, so it is stopped under the start's own ticket (Opus on #1040); the first job is not ended by the second start's failure
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'stopped' });
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.job.id } })).toMatchObject({ status: 'running' });
     });
 
@@ -2689,6 +2711,25 @@ run('a Brick’s computer, in a real database', () => {
       await continueWindDown(minutes(2));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
       expect((await windDownStatus()).machinesLeft).toBe(0);
+    });
+
+    it('a look that cannot say whether the machine runs (an undocumented status) does not stop the wind-down: the machine is still stopped', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ref = `fake-${sara.brickId}`;
+      const look = provider.awake.bind(provider);
+      provider.awake = async () => {
+        throw new Error('status hibernating');
+      };
+      try {
+        provider.calls.length = 0;
+        await startWindDown('team@example.test', minutes(1));
+        expect(provider.calls.filter((call) => call.name === 'stop' && call.ref === ref).length).toBeGreaterThan(0);
+      } finally {
+        provider.awake = look;
+      }
     });
 
     it('a Brick whose return from cold storage holds the claim is left to the return: its machine is not saved or stopped under it', async () => {

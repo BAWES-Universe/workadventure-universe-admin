@@ -29,10 +29,12 @@ import {
   isJustYou,
   isOneOf,
   isOwner,
+  isOpenByLink,
   mediaKeyFor,
   mediaOf,
   mergeMedia,
   newFileKey,
+  seesPublishedOnly,
   shownInItsChatTo,
   type ArtifactEdit,
   type ArtifactKind,
@@ -141,24 +143,72 @@ export interface ArtifactView {
   updatedAt: string;
   /** Set for a guest's artifact: when it goes. */
   expiresAt: string | null;
+  /** What its owner published (game #2115), or null when nothing was published. `available` only where the answer checked. */
+  published: { version: number; at: string; available?: boolean } | null;
 }
 
-function viewOf(artifact: ArtifactRow): ArtifactView {
+/**
+ * What one person is shown of an artifact (game #2115): the version, and the title it goes by. Its owner and the people in
+ * its chat see the latest version under the title it has now; someone who opens it only by its link sees what the owner
+ * published, under the title it had then, and nothing else, not even that a newer version is there.
+ */
+interface Shown {
+  number: number;
+  title: string;
+  /** The owner's published version is what is shown, so only that version may be opened, listed, copied or read. */
+  pinned: boolean;
+}
+
+function shownTo(artifact: ArtifactRow, asker: Asker, requested?: number | null): Shown {
+  const latest = { number: requested ?? artifact.latestVersion, title: artifact.title, pinned: false };
+  if (!seesPublishedOnly(artifact, asker)) return latest;
+  if (artifact.publishedVersion === null) {
+    // Public with nothing published is not available to anyone outside; a link that was never published shows the latest
+    // version, as every link did before Publish
+    if (artifact.openScope === 'public') throw new ArtifactError('not_found', 404, 'No such artifact.');
+    return latest;
+  }
+  if (requested != null && requested !== artifact.publishedVersion) throw new ArtifactError('version_not_found', 404, 'No such version.');
+  return { number: artifact.publishedVersion, title: artifact.publishedTitle ?? artifact.title, pinned: true };
+}
+
+/** The version a person is shown. A published version that is gone is not available, never the latest in its place. */
+async function findShown(artifact: ArtifactRow, shown: Shown) {
+  try {
+    return await findVersion(artifact, shown.number);
+  } catch (error) {
+    if (shown.pinned && error instanceof ArtifactError && error.code === 'version_not_found') throw new ArtifactError('not_found', 404, 'No such artifact.');
+    throw error;
+  }
+}
+
+/**
+ * When what a person is shown last changed: the publish time for someone shown the published version (a draft's edits are not theirs to
+ * see, not even when they happened), and the artifact's own change time for everyone who sees the latest.
+ */
+function changedAsShown(artifact: Pick<ArtifactRow, 'updatedAt' | 'publishedAt' | 'createdAt'>, pinned: boolean): Date {
+  return pinned ? (artifact.publishedAt ?? artifact.createdAt) : artifact.updatedAt;
+}
+
+function viewOf(artifact: ArtifactRow, shown?: Shown): ArtifactView {
   return {
     id: artifact.id,
-    title: artifact.title,
+    title: shown?.title ?? artifact.title,
     kind: artifact.kind,
     makerBotId: artifact.makerBotId,
     makerName: artifact.makerName,
     owner: artifact.ownerId ? { name: artifact.owner?.name ?? null } : null,
-    version: artifact.latestVersion,
+    // The latest for everyone but a visitor who is shown the published version: that visitor never learns of a newer one
+    version: shown?.pinned ? shown.number : artifact.latestVersion,
     openScope: artifact.openScope,
     changeScope: artifact.changeScope,
     chatKind: artifact.chatKind,
     copiedFromId: artifact.copiedFromId,
     createdAt: artifact.createdAt.toISOString(),
-    updatedAt: artifact.updatedAt.toISOString(),
+    // A visitor shown the published version is told when it was published, never when the latest (a draft they cannot see) changed
+    updatedAt: (shown?.pinned ? changedAsShown(artifact, true) : artifact.updatedAt).toISOString(),
     expiresAt: artifact.expiresAt?.toISOString() ?? null,
+    published: artifact.publishedVersion !== null && artifact.publishedAt ? { version: artifact.publishedVersion, at: artifact.publishedAt.toISOString() } : null,
   };
 }
 
@@ -638,9 +688,12 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const artifact = await loadArtifact(input.artifactId, now);
   const reader = readerOf(who, input);
   if (!inBotsReach(artifact, reader, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
-  requireOpen(artifact, { ...reader, inChat: inThisChat(artifact, input.chat) }, now);
-  const row = await findVersion(artifact, input.version);
-  return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
+  const asker = { ...reader, inChat: inThisChat(artifact, input.chat) };
+  requireOpen(artifact, asker, now);
+  // A bot reading what a link pointed it at reads what the owner published, like the person who sent it (game #2115)
+  const shown = shownTo(artifact, asker, input.version);
+  const row = await findShown(artifact, shown);
+  return { artifact: viewOf(artifact, shown), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
 
 /**
@@ -672,7 +725,7 @@ export async function listArtifactsInChat(input: BotCall & ForEveryoneHere, ctx:
   const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, makerBotId: input.botId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
-  return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map(viewOf), hidden };
+  return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map((row) => viewOf(row)), hidden };
 }
 
 async function findVersion(artifact: ArtifactRow, number?: number | null) {
@@ -715,16 +768,30 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
   const artifact = await loadArtifact(id, now);
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
-  const row = await findVersion(artifact, version);
+  const shown = shownTo(artifact, who, version);
+  const row = await findShown(artifact, shown);
   // Only its owner gets this far with a private one: the address is theirs, for this opening
   const pass = isJustYou(artifact) && who.userId ? await issuePass(artifact, who.userId, now) : null;
-  return { artifact: viewOf(artifact), version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
+  const view = viewOf(artifact, shown);
+  // Its owner is told whether the published version is still there, so Share can offer to publish again if it is not
+  if (view.published && isOwner(artifact, who)) view.published.available = !!(await prisma.artifactVersion.findUnique({ where: { artifactId_number: { artifactId: artifact.id, number: view.published.version } }, select: { id: true } }));
+  return { artifact: view, version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
 }
 
-/** Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made. */
-export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<void> {
+/**
+ * Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made.
+ * Says whether the viewer is shown the latest version (its owner, the people in its chat, or a link never published) rather than what the
+ * owner published, so a checkout is made only with terms on the version they see.
+ */
+export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ seesLatest: boolean }> {
   const artifact = await loadArtifact(id, ctx.now);
-  requireOpen(artifact, await whoIsLooking(artifact, viewer), ctx.now);
+  const who = await whoIsLooking(artifact, viewer);
+  requireOpen(artifact, who, ctx.now);
+  // Public with nothing published is not there for a visitor (game #2115), so nothing that asks "may they open it" says yes.
+  // A published version that is gone is not there either, so it fails here too, before any checkout is made.
+  const shown = shownTo(artifact, who);
+  if (shown.pinned) await findShown(artifact, shown);
+  return { seesLatest: !shown.pinned };
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
@@ -732,7 +799,10 @@ export async function listVersions(id: string, viewer: Viewer, ctx: Context = de
   const artifact = await loadArtifact(id, now);
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
-  const rows = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id }, orderBy: { number: 'desc' } });
+  // Someone who sees what was published sees that version in the list and no other (game #2115)
+  const shown = shownTo(artifact, who);
+  const rows = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id, ...(shown.pinned ? { number: shown.number } : {}) }, orderBy: { number: 'desc' } });
+  if (shown.pinned && rows.length === 0) throw new ArtifactError('not_found', 404, 'No such artifact.');
   return { versions: rows.map((row) => versionView(row, addressOf(artifact, row, files))) };
 }
 
@@ -742,7 +812,7 @@ export async function readVersionCode(id: string, number: number, viewer: Viewer
   const artifact = await loadArtifact(id, now);
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
-  const row = await findVersion(artifact, number);
+  const row = await findShown(artifact, shownTo(artifact, who, number));
   return { version: versionView(row, addressOf(artifact, row, files)), content: await files.get(row.fileKey) };
 }
 
@@ -760,7 +830,7 @@ export async function setSharing(id: string, viewer: Viewer, input: SharingInput
     requireOwner(artifact, who);
     const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
     if (input.openScope !== undefined) {
-      if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is me, chat or link.');
+      if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is me, chat, link or public.');
       data.openScope = input.openScope;
     }
     if (input.changeScope !== undefined) {
@@ -780,6 +850,40 @@ export async function setSharing(id: string, viewer: Viewer, input: SharingInput
     if (count !== 1) continue;
     // "Just you" asked for again: it is not called done while the bucket still holds a file from before (see makeJustYou)
     if (data.openScope === 'me') await closeOldAddresses(artifact.id, ctx);
+    return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
+  }
+  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+}
+
+export interface PublishInput {
+  /** The version to publish: the one the owner was looking at when they pressed Publish. The latest when left out. */
+  version?: number | null;
+}
+
+/**
+ * The owner publishes a version (game #2115): from then on people who open the artifact only by its link see that version,
+ * under the title it has now, until the owner publishes another. Its owner and the people in its chat still see the latest.
+ * Only for an artifact shared by link or Public. It may be asked for again and again: the same version is a no-op that
+ * only moves the time.
+ */
+export async function publishArtifact(id: string, viewer: Viewer, input: PublishInput = {}, ctx: Context = defaultContext()): Promise<{ artifact: ArtifactView }> {
+  const { now } = ctx;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const artifact = await loadArtifact(id, now);
+    const who = await whoIsLooking(artifact, viewer);
+    requireOpen(artifact, who, now);
+    // Public with nothing published is not there for someone outside, so it does not say it is there to them either
+    shownTo(artifact, who);
+    requireOwner(artifact, who);
+    if (!isOpenByLink(artifact)) throw new ArtifactError('not_shared', 409, 'Share it with anyone with the link, or make it Public, before publishing.');
+    const row = await findVersion(artifact, input.version ?? artifact.latestVersion);
+    // Only while it is still shared the way it was read: its owner may have made it "Just you" from another window in this
+    // moment, and a published version must never be written onto an artifact that just went private
+    const { count } = await prisma.artifact.updateMany({
+      where: { id: artifact.id, openScope: artifact.openScope },
+      data: { publishedVersion: row.number, publishedTitle: artifact.title, publishedAt: now },
+    });
+    if (count !== 1) continue;
     return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
   }
   throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
@@ -1011,7 +1115,9 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
   const source = await loadArtifact(id, now);
   const who = await whoIsLooking(source, viewer);
   requireOpen(source, who, now);
-  const row = await findVersion(source, version);
+  // A copy of what the owner published is what a visitor may copy, under the title it had then (game #2115)
+  const shown = shownTo(source, who, version);
+  const row = await findShown(source, shown);
   const kind = source.kind as ArtifactKind;
   const content = await files.get(row.fileKey);
   const { maxBytes, maxMediaBytes } = await limitsOf(ctx);
@@ -1027,7 +1133,7 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
         ownerId: who.userId,
         makerBotId: source.makerBotId,
         makerName: source.makerName,
-        title: source.title,
+        title: shown.title,
         kind,
         copiedFromId: source.id,
         // A copy of a "Just you" artifact starts as "Just you": copying never shows it to anyone else
@@ -1052,7 +1158,7 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
 
 // ---- The public link page ---------------------------------------------------------------------------------------
 
-/** What the page for "anyone with the link" shows: the latest version, nothing about who may do what. */
+/** What the page for "anyone with the link" shows: the published version, or the latest of a link never published; nothing about who may do what. */
 export interface PublicView {
   title: string;
   kind: ArtifactKind;
@@ -1066,15 +1172,17 @@ export interface PublicView {
 
 /**
  * Opens an artifact for anyone who has its address, without an account: only when the owner shared it by link, and
- * only the latest version. One answer for every other case (not there, run out, shared only with its chat), so the page
- * tells nobody which of them it is.
+ * only the version the owner published (game #2115), or the latest while nothing was ever published for a link. Public
+ * with nothing published is not available. One answer for every other case (not there, run out, shared only with its
+ * chat, a published version that is gone), so the page tells nobody which of them it is.
  */
 export async function openByLink(id: string, ctx: Context = defaultContext()): Promise<PublicView> {
   const { files, now } = ctx;
   pruneSometimes(ctx);
   const artifact = await loadArtifact(id, now);
-  if (artifact.openScope !== 'link') throw new ArtifactError('not_found', 404, 'No such artifact.');
-  return latestView(artifact, files);
+  if (!isOpenByLink(artifact)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  const shown = shownTo(artifact, { userId: null, inChat: false });
+  return viewOfVersion(artifact, shown, await findShown(artifact, shown), files);
 }
 
 /**
@@ -1085,14 +1193,14 @@ export async function openOwned(id: string, userId: string, ctx: Context = defau
   const { files, now } = ctx;
   const artifact = await loadArtifact(id, now);
   if (artifact.ownerId !== userId) throw new ArtifactError('not_found', 404, 'No such artifact.');
-  return latestView(artifact, files, isJustYou(artifact) ? await issuePass(artifact, userId, now) : null);
+  const shown = shownTo(artifact, { userId, inChat: false });
+  return viewOfVersion(artifact, shown, await findShown(artifact, shown), files, isJustYou(artifact) ? await issuePass(artifact, userId, now) : null);
 }
 
-async function latestView(artifact: ArtifactRow, files: Context['files'], pass: Pass | null = null): Promise<PublicView> {
-  const row = await findVersion(artifact, artifact.latestVersion);
+async function viewOfVersion(artifact: ArtifactRow, shown: Shown, row: VersionRow, files: Context['files'], pass: Pass | null = null): Promise<PublicView> {
   const kind = artifact.kind as ArtifactKind;
   return {
-    title: artifact.title,
+    title: shown.title,
     kind,
     makerName: artifact.makerName,
     version: row.number,
@@ -1290,7 +1398,7 @@ export async function listMine(person: Person): Promise<{ artifacts: ArtifactVie
   const who = await resolvePerson(person, false);
   if (!who.userId) return { artifacts: [] };
   const rows = await prisma.artifact.findMany({ where: { ownerId: who.userId }, include: ARTIFACT_INCLUDE, orderBy: { updatedAt: 'desc' }, take: 200 });
-  return { artifacts: rows.map(viewOf) };
+  return { artifacts: rows.map((row) => viewOf(row)) };
 }
 
 // ---- Lists for people (#1474): a chat's artifacts in the game, and all yours on You in Orbit ----------------------
@@ -1314,7 +1422,7 @@ const PAGE_ORDER = [{ updatedAt: 'desc' }, { id: 'desc' }] as const;
 async function pageOf<View = ArtifactView>(
   where: Prisma.ArtifactWhereInput,
   offset: number,
-  view: (artifact: ArtifactRow) => View = viewOf as (artifact: ArtifactRow) => View,
+  view: (artifact: ArtifactRow) => View = (artifact) => viewOf(artifact) as View,
 ): Promise<ArtifactPage<View>> {
   const [total, rows] = await Promise.all([
     prisma.artifact.count({ where }),
@@ -1330,8 +1438,12 @@ const notExpiredAt = (now: Date): Prisma.ArtifactWhereInput => ({ OR: [{ expires
  * The artifacts made in one chat that this person may open, for the chat's profile or details in the game: the same
  * rule as opening one. Someone the game vouches is in a nearby chat sees what was made in it, as its cards open for
  * them; anyone else sees only their own and those shared by link. Nothing they could not open is ever listed.
+ *
+ * A direct chat with a bot (`botId`) also lists what that bot made for this person in any other chat, such as a page
+ * asked for in nearby chat and sent again here: the same set the bot itself finds and can send (listArtifactsInChat).
+ * Only their own and only this bot's, so another bot's work never shows up.
  */
-export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context = defaultContext()): Promise<ArtifactPage<ChatArtifactView>> {
+export async function listChatArtifacts(viewer: Viewer, offset = 0, botId?: string, ctx: Context = defaultContext()): Promise<ArtifactPage<ChatArtifactView>> {
   const { now } = ctx;
   const chat = viewer.chat;
   if (!chat) return { artifacts: [], total: 0, next: null };
@@ -1341,11 +1453,55 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
   const own: Prisma.ArtifactWhereInput[] = who.userId ? [{ ownerId: who.userId }] : [];
   // In the chat: everything made in it, but someone else's "Just you" is not theirs to open (game #1994). Outside it: only
   // their own and those shared by link.
-  const opens: Prisma.ArtifactWhereInput = who.inChat ? shownInItsChatTo(who.userId) : { OR: [...own, { openScope: 'link' }] };
-  return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] }, offset, (artifact) => ({
-    ...viewOf(artifact),
+  // Public with nothing published is not there for someone outside the chat (game #2115)
+  const opens: Prisma.ArtifactWhereInput = who.inChat ? shownInItsChatTo(who.userId) : { OR: [...own, { openScope: 'link' }, { openScope: 'public', publishedVersion: { not: null } }] };
+  const here: Prisma.ArtifactWhereInput = { chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] };
+  // Copies are in no chat (chatRef null) and stay out, as they do for the bot. These are the person's own, so they see the latest.
+  const madeByThisBot: Prisma.ArtifactWhereInput[] =
+    chat.kind === 'dm' && botId && who.userId ? [{ ownerId: who.userId, makerBotId: botId, chatRef: { not: null }, AND: [notExpiredAt(now)] }] : [];
+  const where: Prisma.ArtifactWhereInput = madeByThisBot.length ? { OR: [here, ...madeByThisBot] } : here;
+  const row = (artifact: ArtifactRow): ChatArtifactView => ({
+    // Someone outside the chat reads a shared one by what was published: its title and its version, never the latest
+    ...viewOf(artifact, who.inChat || isOwner(artifact, who) ? undefined : shownTo(artifact, who)),
     yours: who.userId !== null && artifact.ownerId === who.userId,
-  }));
+  });
+  // Outside the chat, some are shown as published: they are listed by when they were published, so where one sits never tells that its draft changed
+  return who.inChat ? pageOf(where, offset, row) : pageOfAsShown(where, offset, who, row);
+}
+
+/**
+ * One page of a list for someone outside the chat, most recently changed first by what THEY are shown: an artifact shown as published goes
+ * by its publish time, and one they see the latest of (their own, or a link never published) by its own change time. Each of the two kinds
+ * is ordered and cut by the database on its own column (with the id after it, as in `pageOf`), and only the first `offset + page` keys of
+ * each are read and merged here, so a list never reads every match; then only that page is read whole.
+ */
+async function pageOfAsShown<View>(where: Prisma.ArtifactWhereInput, offset: number, who: Asker, view: (artifact: ArtifactRow) => View): Promise<ArtifactPage<View>> {
+  const take = offset + ARTIFACT_PAGE_SIZE;
+  const key = { id: true, publishedAt: true, createdAt: true, updatedAt: true } as const;
+  // Outside the chat, every artifact that is not theirs is open by its link (see `opens`), so it is shown as published once it was published
+  const notTheirs: Prisma.ArtifactWhereInput = who.userId ? { OR: [{ ownerId: null }, { ownerId: { not: who.userId } }] } : {};
+  const seesLatest: Prisma.ArtifactWhereInput = { OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { publishedVersion: null }] };
+  const [total, pinned, latest] = await Promise.all([
+    prisma.artifact.count({ where }),
+    prisma.artifact.findMany({ where: { AND: [where, notTheirs, { publishedVersion: { not: null } }] }, select: key, orderBy: [{ publishedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }], take }),
+    prisma.artifact.findMany({ where: { AND: [where, seesLatest] }, select: key, orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take }),
+  ]);
+  // The two orders merged: each list keeps the database's own order, and the newer head goes first
+  const ids: string[] = [];
+  let p = 0;
+  let l = 0;
+  while (ids.length < take && (p < pinned.length || l < latest.length)) {
+    const a = pinned[p];
+    const b = latest[l];
+    const pinnedFirst = b === undefined || (a !== undefined && (changedAsShown(a, true).getTime() > changedAsShown(b, false).getTime() || (changedAsShown(a, true).getTime() === changedAsShown(b, false).getTime() && a.id > b.id)));
+    ids.push(pinnedFirst ? pinned[p++].id : latest[l++].id);
+  }
+  const wanted = ids.slice(offset);
+  const rows = wanted.length ? await prisma.artifact.findMany({ where: { AND: [where, { id: { in: wanted } }] }, include: ARTIFACT_INCLUDE }) : [];
+  const byId = new Map(rows.map((one) => [one.id, one]));
+  const page = wanted.flatMap((id) => (byId.has(id) ? [byId.get(id) as ArtifactRow] : []));
+  const end = offset + wanted.length;
+  return { artifacts: page.map(view), total, next: end < total && wanted.length > 0 ? end : null };
 }
 
 /** Every artifact this account owns, from every chat and bot, copies too, a page at a time (Your artifacts in Orbit). */

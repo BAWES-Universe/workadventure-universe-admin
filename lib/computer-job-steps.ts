@@ -103,7 +103,8 @@ export async function jobActivity(botId: string, ownerId: string, jobId: string)
   const lines: Omit<ActivityItem, 'seq'>[] = [
     ...steps.map((step) => ({ key: `step:${step.seq}`, kind: 'step' as const, label: step.label, detail: null, at: step.at })),
     ...notes.map((note) => ({ key: `note:${note.seq}`, kind: 'note' as const, label: note.text, detail: null, at: note.createdAt })),
-    ...pauses.map((pause) => ({ key: `pause:${pause.n}`, kind: 'pause' as const, label: pausedWords(pause.why), detail: null, at: pause.at })),
+    // A job sent back in line because its machine was found asleep under it (post-0.5.0 B) shows no pause line: nobody paused it, it carries on by itself, and that has no words of its own yet
+    ...pauses.filter((pause) => pause.why !== 'machine').map((pause) => ({ key: `pause:${pause.n}`, kind: 'pause' as const, label: pausedWords(pause.why), detail: null, at: pause.at })),
   ];
   // A job paused while it was only in line has no pause row (nothing ran): its pause is the job's own mark, while it lasts
   if (now?.queuedFor === 'paused' && now.pausedAt && !pauses.some((pause) => pause.at.getTime() === now.pausedAt!.getTime())) {

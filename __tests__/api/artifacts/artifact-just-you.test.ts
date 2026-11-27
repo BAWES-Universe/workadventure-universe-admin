@@ -173,7 +173,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const res = await shareAs(person('owner'), id, { openScope: 'everyone' });
       expect(res.status).toBe(422);
-      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat or link.' });
+      expect(res.body).toMatchObject({ error: 'invalid_open_scope', message: 'Who can open it is me, chat, link or public.' });
     });
 
     it('does nothing when it is "Just you" already: the files stay where they are', async () => {
@@ -729,7 +729,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(first.headers.get('cache-control')).toBe('private, no-store');
       expect(first.headers.get('x-content-type-options')).toBe('nosniff');
       const policy = first.headers.get('content-security-policy')!;
-      expect(policy).toContain('sandbox allow-scripts;');
+      expect(policy).toContain('sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox;');
       expect(policy).not.toContain('allow-same-origin');
       expect(policy).toContain("connect-src 'none'");
       expect(policy).toContain("form-action 'none'");
@@ -970,7 +970,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       // An older browser does not say what it wants the page for: the lock is the same
       const older = await fetchPrivate(await ownerAddress(id));
       expect(older.status).toBe(200);
-      expect(older.headers.get('content-security-policy')).toContain('sandbox allow-scripts;');
+      expect(older.headers.get('content-security-policy')).toContain('sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox;');
     });
 
     it('serves the media beside the page once the page has been, whole or in the parts a player asks for', async () => {

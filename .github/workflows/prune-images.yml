@@ -19,11 +19,13 @@ name: Prune old images
 on:
   schedule:
     - cron: '17 3 * * 0'
-  # pull_request_target, not pull_request: GitHub does not start a pull_request workflow for a PR that conflicts with its base,
-  # so a conflicted PR closed unmerged would never clear its images. This job runs only the base branch's own scripts (the
-  # checkout below is the base branch) and never checks out or runs the PR's code; the PR's branch name and number are
-  # passed as plain values.
-  pull_request_target:
+  # pull_request, not pull_request_target: since 8 Dec 2025 GitHub runs a pull_request_target workflow from the default
+  # branch (`main`), which has no copy of this file until the next release, and from 2 Dec 2026 it blocks
+  # pull_request_target on public repositories by default. A pull_request workflow runs the copy in the PR's merge ref, so
+  # it is live as soon as this file is on `develop`. Two limits: a PR that conflicts with its base and closes unmerged gets
+  # no run (the weekly sweep clears its images), and no script from the PR runs: the checkout below is the base branch,
+  # and the PR's branch name and number are passed as plain values.
+  pull_request:
     types: [closed]
   workflow_dispatch:
     inputs:
@@ -47,7 +49,7 @@ jobs:
     # A PR from a fork never built images here, and Dependabot (whose runs get no secrets, and whose branches build no
     # images) has nothing to clear.
     if: >-
-      github.event_name != 'pull_request_target' || (
+      github.event_name != 'pull_request' || (
       github.event.pull_request.head.repo.full_name == github.repository
       && github.actor != 'dependabot[bot]'
       && github.event.pull_request.user.login != 'dependabot[bot]')
@@ -60,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # A closed PR has no merge ref when it conflicts, so take the script from the branch the PR targeted (the code already merged there).
+          # Take the script from the branch the PR targeted (the code already merged there), never from the PR's own merge ref.
           ref: ${{ github.event.pull_request.base.ref || github.ref }}
           sparse-checkout: scripts
       - uses: actions/setup-node@v6

@@ -1,10 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_PIECE_END, LIST_READ_PIECE, LIST_SEND_PIECE, LIST_TRIES, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
+import * as Sentry from '@sentry/nextjs';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
+import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
+import { COLD_CTIME_MARGIN_S, UNIVERSE_COLD } from '@/lib/agent37/image-files';
 
 /**
  * A Brick's computer on Agent37 (game #2000): the real provider behind the interface Universe already uses.
@@ -41,6 +46,10 @@ export const WATCH_LINK_SECONDS = 60;
 
 /** A resting machine wakes in 5 to 15 seconds, a cold one in about two minutes, and its health answers 502 for a few seconds more. */
 const READY_WITHIN_MS = 4 * 60_000;
+/** Where the current `universe-cold` is put on a machine before a pack-away (a root-only folder the file scan skips, next to the list). */
+const COLD_SCRIPT = '/usr/local/share/universe/cold-bin/universe-cold';
+/** Prints the seconds left of the margin after the unpack of the image (the change time of the image's two marker files, the earlier of the two); nothing at all when it cannot tell. */
+const UNPACK_WAIT_COMMAND = `python3 -c 'import os,time;t=min(os.stat(p).st_ctime for p in ("/usr/local/share/universe/built","/usr/local/share/universe/manual-packages.txt"));print("unpack_wait=%d"%max(0,int(t+${COLD_CTIME_MARGIN_S + 1}-time.time())+1))' 2>/dev/null; true`;
 const POLL_MS = 3_000;
 /** A copy saved this long before the machine went to sleep, or later, is the machine as it was left. */
 const FRESH_COPY_MS = 5 * 60_000;
@@ -78,7 +87,17 @@ const creationId = (botId: string) => `brick:${botId}`;
 /** A throwaway computer made to prove a restore carries this in its metadata, so the daily check knows it and a sweep can remove one that was left behind. */
 export const SCRATCH_PREFIX = 'scratch:';
 
+/** The statuses that say the machine is running, or on its way to running (billed as awake). Anything outside this list and `ASLEEP_STATUSES` and `gone` is not known. */
+const AWAKE_STATUSES = ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'];
+/**
+ * The statuses that say the machine is resting or going down. `stopping` counts: this look is also the proof of a stop, and a start on a machine that is still going down waits it out
+ * (`wake`), where a throw would end the person's job. A machine that is not there (404, `deleting`, `deleted`, `failed`) is not running either.
+ */
+const ASLEEP_STATUSES = ['stopped', 'sleeping', 'stopping'];
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
+
+/** What reads the boot id (as the normal user; the mark reads the same file). */
+const BOOT_ID_COMMAND = 'cat /proc/sys/kernel/random/boot_id';
 
 export class Agent37ComputerProvider implements ComputerProvider {
   readonly kind = 'real' as const;
@@ -91,6 +110,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   private readonly copies: NonNullable<ProviderOptions['copies']>;
   /** Which machine belongs to which Brick, learned from the metadata we wrote: `save` needs the Brick of a machine. */
   private readonly brickOf = new Map<string, string>();
+  /** Computers (with the image revision) whose skipped update was already told to Sentry. */
+  private readonly skippedUpdate = new Set<string>();
 
   constructor(options: ProviderOptions) {
     this.client = options.client;
@@ -312,8 +333,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * not), it is moved to the image's current revision when it was made from an older one (its files are kept), and its Agent37 managed budget is read
    * back and must be zero in both parts (`budgetClosed`). A rule or a budget that cannot be put right means the machine is not handed to anything.
    */
-  private async settle(ref: string): Promise<Instance> {
-    const state = this.image ? await this.image() : null;
+  /**
+   * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
+   * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
+   */
+  private async settle(ref: string, options: { update?: boolean | 'unless_outside'; /** Asked right before the image update (it restarts the machine, and can come after minutes of waiting): a start that lost its wake sends nothing (Opus on #1040) */ beforeUpdate?: () => Promise<void>; /** Asked right after the image update returned (the second look, CodeRabbit on #1040) */ afterUpdate?: () => Promise<void> } = {}): Promise<Instance> {
+    // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
+    const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
     // Only a rule Agent37 says is already ours is left alone: one it does not say, or another one, is set again (asking again is safe)
     if (instance.network !== BRICK_NETWORK) {
@@ -324,12 +350,62 @@ export class Agent37ComputerProvider implements ComputerProvider {
       }
     }
     const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
-    if (behind) {
-      await this.client.updateInstance(ref);
-      instance = await this.untilHealthy(ref, instance.url);
+    if (behind && options.update !== false) {
+      // A computer that has worked for a Brick may hold files outside its home folder (a tool in /opt, software it installed): the image update replaces the disk outside the home folder and would wipe them. So a computer
+      // moved for a job (`unless_outside`) is moved only when it is shown to hold nothing of the kind; one that holds something, or cannot say, stays on its image (told to Sentry) and is
+      // moved when it is next made from a copy, which is when its files outside the home folder are put back on a computer of the current image
+      if (options.update === 'unless_outside' && !(await this.holdsNothingOutside(ref))) {
+        console.error('[Computer] A computer behind the image was not updated: it holds files outside its home folder (or could not say)', { ref, revision: instance.template_revision, image: state.revision });
+        // Told to Sentry once for each computer and image revision in this process (every job on the computer asks again, and would say it again)
+        const once = `${ref}:${state.revision}`;
+        if (!this.skippedUpdate.has(once)) {
+          this.skippedUpdate.add(once);
+          Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
+        }
+      } else {
+        await options.beforeUpdate?.();
+        const wasOn = instance.template_revision;
+        // The request may have been received and applied even when it throws (a timeout, a lost answer): the wake is looked at once either way, and the original error is the one that stops the start (CodeRabbit on #1040)
+        let updateError: unknown = null;
+        let updateThrew = false;
+        try {
+          await this.client.updateInstance(ref);
+        } catch (error) {
+          updateThrew = true;
+          updateError = error;
+        }
+        try {
+          await options.afterUpdate?.();
+        } catch (error) {
+          // The update was sent and the wake that sent it is gone: a replacement may own the machine, which the update just restarted, and the files it holds outside its home folder may have been replaced. Nothing can recall a request that
+          // is sent, and Agent37's update has no condition to make it atomic with the check, so this is told to Sentry (once for each such update) for us to learn whether it ever happens (Opus on #1040)
+          if (error instanceof WakeReplaced) {
+            // Also when the update itself threw: the replaced path is the only one the caller treats as "look again" (a replaced start never fails its job), so WakeReplaced is what is thrown, and the update's own error is kept in the warning (Opus on #1040)
+            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision, updateFailed: updateThrew, ...(updateThrew ? { updateError: updateError instanceof Error ? updateError.message : String(updateError) } : {}) } });
+            throw error;
+          }
+          throw updateThrew ? updateError : error;
+        }
+        if (updateThrew) throw updateError;
+        instance = await this.untilHealthy(ref, instance.url);
+      }
     }
     await this.budgetClosed(ref);
     return instance;
+  }
+
+  /**
+   * True only when the computer itself says it holds nothing outside its home folder that an image update would wipe: no file the image did not have and no added software (`universe-cold outside-check`,
+   * the current script sent first, as for a pack-away). Anything else (it holds something, the check could not run, the script could not be sent) is false: nothing is deleted on a guess.
+   */
+  private async holdsNothingOutside(ref: string): Promise<boolean> {
+    try {
+      await this.installCold(ref);
+      const done = await this.client.exec(ref, `python3 ${COLD_SCRIPT} outside-check`, { user: 'root', timeoutMs: 5 * 60_000 });
+      return done.exitCode === 0 && /(^|\n)outside_check=1 any=0\b/.test(done.stdout);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -337,8 +413,31 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string): Promise<void> {
-    let instance = await this.settle(ref);
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null> {
+    // Before EVERY stop or start of the machine in here (each restart waits for the machine to be down between the two, and a start that lost its wake must never send one after the stop that replaced it was proved): the wake is
+    // renewed (a fenced beat) and must still be this start's, else nothing is sent (Opus on #1040)
+    const owned = async () => {
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
+    };
+    let instance = await this.settle(ref, { update: 'unless_outside', beforeUpdate: owned, afterUpdate: owned });
+    // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
+    // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
+    // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
+    // the mark on the boot the earlier jobs ran on, with a clock reading after what they left running, and the fence would keep it as the computer's own). `null`: not asked for.
+    let was: string | null | undefined;
+    if (options?.freshBoot) {
+      const read = await this.client.exec(ref, BOOT_ID_COMMAND, { timeoutMs: 15_000 }).catch(() => null);
+      const seen = read && read.exitCode === 0 ? read.stdout.trim() : '';
+      was = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seen) ? seen : null;
+      await owned();
+      await this.client.stopInstance(ref);
+      await this.untilDown(ref, true);
+      await owned();
+      await this.client.startInstance(ref);
+      // A start that lost its wake while its request was on the way (its sender was paused after the check above) finds out as soon as the request returns: the machine it started is stopped by the caller's cleanup, never left running (CodeRabbit on #1040)
+      await owned();
+      instance = await this.untilHealthy(ref, instance.url);
+    }
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
@@ -348,18 +447,53 @@ export class Agent37ComputerProvider implements ComputerProvider {
     };
     let up = await again(await this.up(ref));
     if (up.restart) {
+      await owned();
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
+      await owned();
       await this.client.startInstance(ref);
+      await owned();
       await this.untilHealthy(ref, instance.url);
       up = await again(await this.up(ref));
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
-    // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
-    // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
-    // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
-    const marked = await this.client.exec(ref, 'universe-mark', { user: 'root', timeoutMs: 30_000 });
-    if (!/(^|\n)marked=1\b/.test(marked.stdout)) throw new Error(`The computer could not be marked${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1] ? ` (${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1]})` : ''}`);
+    // Last, once the computer is as it should be and before any job has used it: the mark the take-over fence tells the agent's processes by (everything already
+    // running is the computer's own, everything started after is the agent's), read here and kept by Orbit, never by the computer: the agent has admin rights there and could
+    // rewrite a note. Read as the normal user (root cannot read what the agent's processes are). A computer that cannot be marked cannot be fenced, so it is not ready.
+    // A computer is handed over only once the margin after the unpack of its image has passed (a file the agent copies with its old modification time kept is told from the image's own files by its
+    // change time, and that cannot be told inside the margin): a brand-new computer waits the few seconds that are left, any other none
+    await this.untilUnpackMargin(ref);
+    const done = await this.client.exec(ref, markCommand(), { timeoutMs: 30_000 });
+    const mark = done.exitCode === 0 ? parseMark(done.stdout) : null;
+    if (!mark) {
+      const reason = /marked=0 reason=([a-z_]+)/.exec(done.stdout)?.[1];
+      throw new Error(`The computer could not be marked${reason ? ` (${reason})` : ''}`);
+    }
+    // A fresh boot that is not proved (the old boot could not be read, or the mark is of the same one): the computer is ready for its job, but this mark is not to be trusted, because the boot it names
+    // may be the one earlier jobs ran on, with a clock reading taken after what they left running. So NO mark is answered (Orbit saves none and the row stays unmarked): a take-over on this computer finds
+    // no mark, cannot prove the fence, and stops the machine; the next wake asks for the fresh boot again. The job is never refused for it. Told to Sentry, with both boot ids and the machine, so it is seen.
+    if (was !== undefined && (was === null || mark.bootId === was)) {
+      const message = was === null ? 'A computer could not be proved to have started afresh: its boot before the restart was not read' : 'A computer could not be proved to have started afresh: its boot did not change';
+      console.error('[Computer]', message, { ref, before: was, after: mark.bootId });
+      Sentry.captureMessage(message, { level: 'error', tags: { area: 'computer', step: 'fresh-boot' }, extra: { ref, before: was, after: mark.bootId } });
+      return null;
+    }
+    return mark;
+  }
+
+  /**
+   * Waits until `COLD_CTIME_MARGIN_S` (and a second) after the end of the image's unpack on this computer: the change time of the two marker files the image marks itself with, the earlier of the two,
+   * read on the computer itself. The computer says how many seconds are left (0 for any computer that is not new); a computer that cannot say is not waited for (the pack-away then cannot tell the
+   * agent's first copies, which is all it costs).
+   */
+  private async untilUnpackMargin(ref: string): Promise<void> {
+    try {
+      const done = await this.client.exec(ref, UNPACK_WAIT_COMMAND, { user: 'root', timeoutMs: 30_000 });
+      const seconds = Number(/(^|\n)unpack_wait=(\d+)\b/.exec(done.stdout)?.[2] ?? 0);
+      if (seconds > 0 && seconds <= COLD_CTIME_MARGIN_S + 5) await this.pause(seconds * 1000);
+    } catch (error) {
+      console.error('[Computer] Could not tell how long ago the image was unpacked:', error instanceof Error ? error.message : error);
+    }
   }
 
   /** Runs `universe-up` and reads what it says. */
@@ -385,7 +519,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
   }
 
-  async wake(ref: string): Promise<void> {
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     let instance = await this.client.getInstance(ref);
     // A machine that is still going down cannot be started yet: wait for it to be down (or asleep), then wake it as any other
     if (instance.status === 'stopping') instance = await this.untilDown(ref);
@@ -393,7 +527,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (gone(status)) throw new Error(`The computer is ${status}`);
     if (status === 'sleeping' || status === 'stopped') {
       await this.checkFunds();
+      // After the waits above (a machine going down, the billing call): a start that lost its wake in the meantime sends nothing (Opus on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       await this.client.startInstance(ref);
+      // Asked again as soon as the request returns: a start whose sender was paused after the check above, and whose wake was given up on meanwhile, is told so now and its caller stops the machine it started (CodeRabbit on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     }
     // Running, starting, waking or provisioning: it is on its way, and asking again would only queue a second wake
     await this.untilHealthy(ref, instance.url);
@@ -421,7 +559,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (status === 'sleeping' || status === 'stopped' || status === 'stopping') return;
     if (gone(status)) return;
     try {
-      await this.client.sleepInstance(ref);
+      await this.client.sleepInstance(ref, 'refused');
     } catch (error) {
       // A 400 means it was not running after all: if it is resting now, that is what was asked for
       if (error instanceof Agent37Error && error.status === 400) {
@@ -435,7 +573,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async stop(ref: string): Promise<void> {
     const instance = await this.client.getInstance(ref);
     if (instance.status === 'stopped' || instance.status === 'stopping' || gone(String(instance.status))) return;
-    await this.client.stopInstance(ref);
+    // A power operation of ours: not repeated after a gateway answer that may have reached the machine (the readiness restarts above keep the retry: they run under a wake's own ticket)
+    await this.client.stopInstance(ref, 'refused');
   }
 
   async remove(ref: string): Promise<void> {
@@ -459,9 +598,39 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   async awake(ref: string): Promise<boolean> {
+    return this.awakeFrom(() => this.client.getInstance(ref));
+  }
+
+  async awakeOnce(ref: string, timeoutMs: number): Promise<boolean> {
+    return this.awakeFrom(() => this.client.getInstanceOnce(ref, timeoutMs));
+  }
+
+  /** Every machine of the account from ONE request (see the interface): a status that is not documented is `null`, said to Sentry, and never taken for awake or asleep. */
+  async awakeMachinesOnce(timeoutMs: number): Promise<Map<string, boolean | null>> {
+    const listed = await this.client.listInstancesOnce(timeoutMs);
+    const said = new Map<string, boolean | null>();
+    for (const instance of listed) {
+      if (!instance || typeof instance.id !== 'string' || typeof instance.status !== 'string') continue;
+      const status = String(instance.status);
+      if (AWAKE_STATUSES.includes(status)) said.set(instance.id, true);
+      else if (ASLEEP_STATUSES.includes(status) || gone(status)) said.set(instance.id, false);
+      else {
+        said.set(instance.id, null);
+        Sentry.captureMessage('Agent37 said a machine status that is not in the list', { level: 'warning', tags: { area: 'computer', step: 'awake-status' }, extra: { status: status.slice(0, 40) } });
+      }
+    }
+    return said;
+  }
+
+  private async awakeFrom(look: () => Promise<Instance>): Promise<boolean> {
     try {
-      const status = String((await this.client.getInstance(ref)).status);
-      return ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'].includes(status);
+      const status = String((await look()).status);
+      if (AWAKE_STATUSES.includes(status)) return true;
+      if (ASLEEP_STATUSES.includes(status) || gone(status)) return false;
+      // Every status Agent37 documents is classified above, so a word here is one it never documented: it says nothing about whether the machine runs. It is "not known", which
+      // never pauses a billed job, never moves a proof of awake and never proves a stop (the callers treat a throw so). Said out loud, so the list is looked at
+      Sentry.captureMessage('Agent37 said a machine status that is not in the list', { level: 'warning', tags: { area: 'computer', step: 'awake-status' }, extra: { status: status.slice(0, 40) } });
+      throw new Agent37Unreached(`status ${status.slice(0, 40)}`);
     } catch (error) {
       // A machine that is not there is not running; any other answer is not known, and "not known" is never taken for "stopped"
       if (error instanceof Agent37Error && error.status === 404) return false;
@@ -507,16 +676,27 @@ export class Agent37ComputerProvider implements ComputerProvider {
   /**
    * Runs `universe-cold prepack` as root: what the computer holds outside its home folder (changed files, added software) is copied into the home
    * folder so one copy carries it, and the home folder is counted. A computer that holds more outside than can be carried says so (`blocked`) and is
-   * not packed away: nothing is thrown away to make a copy fit.
+   * not packed away: nothing is thrown away to make a copy fit. The machine is settled for its network rule and budget only and NEVER moved to another image (an update may replace the disk
+   * outside the home folder, or move the build marker so that what was added before it is left out of the list). A computer made from an older image has an older `universe-cold` that prints no list,
+   * so Orbit sends the current script to it (`installCold`) and runs that one.
    */
   async prepack(ref: string): Promise<PackInventory> {
-    const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
+    const unpacked = (blocked: string): PackInventory => ({ homeFiles: 0, homeBytes: 0, outsideFiles: 0, outsideBytes: 0, packages: [], blocked, outside: null });
+    await this.settle(ref, { update: false });
+    await this.installCold(ref);
+    const done = await this.client.exec(ref, `python3 ${COLD_SCRIPT} prepack`, { user: 'root', timeoutMs: 10 * 60_000 });
+    // Agent37 cuts the middle out of what a command prints over 512 KB: what is left of it is never read as an inventory. The script prints one short line (the list itself is
+    // read back below, in pieces), so this is a computer that says far more than it should, and it is said so (`blocked`), never guessed from what is left
     const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
-    if (!line) throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    if (!line) {
+      if (done.truncated) return unpacked('inventory_output_too_long');
+      throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    }
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(line);
     } catch {
+      if (done.truncated) return unpacked('inventory_output_too_long');
       throw new Error('The computer\'s inventory could not be read');
     }
     const count = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null);
@@ -526,8 +706,110 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const outsideBytes = count(data.outside_bytes);
     if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
     const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
-    const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
-    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked };
+    const blocked = typeof data.blocked === 'string' && /^[a-z0-9_]{1,40}$/.test(data.blocked) ? data.blocked : null;
+    const counted = { homeFiles, homeBytes, outsideFiles, outsideBytes, packages };
+    if (blocked !== null) return { ...counted, blocked, outside: null };
+    // The list of what was copied: required whenever the computer can be packed (a copy with no list would put nothing back), and read to the last field
+    let list: unknown = data.manifest;
+    if (list === undefined || list === null) {
+      const bytes = count(data.manifest_bytes);
+      const sha = typeof data.manifest_sha256 === 'string' && /^[0-9a-f]{64}$/.test(data.manifest_sha256) ? data.manifest_sha256 : null;
+      if (bytes === null || bytes < 2 || sha === null) throw new Error('The computer\'s list of what is outside its home folder was not whole');
+      if (bytes > LIST_MAX_BYTES) return { ...counted, blocked: 'outside_list_too_big', outside: null };
+      list = await this.readList(ref, bytes, sha);
+    }
+    const checked = checkOutsideManifest(list);
+    // A computer that holds more than a list can carry, or a name a list cannot keep, is one that cannot be packed away yet: a result, not a failure
+    if (!checked.ok && checked.reason !== 'invalid') return { ...counted, blocked: checked.reason, outside: null };
+    if (!checked.ok) throw new Error('The computer\'s list of what is outside its home folder was not whole');
+    return { ...counted, blocked: null, outside: checked.manifest };
+  }
+
+  /**
+   * Puts the current `universe-cold` on the machine, at `COLD_SCRIPT` (a root-only folder the scan skips, so it never lands in a copy), whatever image the machine was made from. It is sent as
+   * base64 (no piece can gain a line break) in pieces of at most `LIST_SEND_PIECE` bytes, each its own named command; the first makes the file new, the others append. Then the machine's own
+   * `sha256sum` of it is compared with Orbit's, and only on a match is it moved into place. A try that fails in any step starts again from the first piece, up to `LIST_TRIES` times, then it is an
+   * error (the pack-away is tried again later). Nothing runs from a file that was not checked.
+   */
+  private async installCold(ref: string): Promise<void> {
+    const text = Buffer.from(UNIVERSE_COLD, 'utf8');
+    const sha = createHash('sha256').update(text).digest('hex');
+    const dir = COLD_SCRIPT.slice(0, COLD_SCRIPT.lastIndexOf('/'));
+    // Already there, whole: nothing is sent again (a computer that stays behind the image is asked more than once). The file and its folder are root's and closed to the agent, so what is read here is what runs;
+    // a computer that cannot say, or says another sum, is sent the script as before
+    try {
+      const there = await this.client.exec(ref, `sha256sum ${COLD_SCRIPT}`, { user: 'root', timeoutMs: 30_000 });
+      if (there.exitCode === 0 && !there.truncated && /^([0-9a-f]{64})\s/.exec(there.stdout)?.[1] === sha) return;
+    } catch {
+      // asked again below, by sending it
+    }
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      const transfer = randomUUID().slice(0, 8);
+      const run = (command: string, name: string) => this.client.exec(ref, command, { user: 'root', timeoutMs: 60_000, name: `cold-install:${transfer}:${name}` });
+      try {
+        for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
+          const piece = text.subarray(at, at + LIST_SEND_PIECE).toString('base64');
+          const write = at === 0
+            ? `umask 077 && mkdir -p ${dir} && chown root:root ${dir} && chmod 755 ${dir} && printf %s '${piece}' | base64 -d > ${COLD_SCRIPT}.new`
+            : `umask 077 && printf %s '${piece}' | base64 -d >> ${COLD_SCRIPT}.new`;
+          const put = await run(write, String(at));
+          if (put.exitCode !== 0 || put.truncated) throw new Error('The computer could not take the current script');
+        }
+        const summed = await run(`sha256sum ${COLD_SCRIPT}.new`, 'sum');
+        if (summed.exitCode !== 0 || summed.truncated || /^([0-9a-f]{64})\s/.exec(summed.stdout)?.[1] !== sha) throw new Error('The current script did not arrive whole on the computer');
+        const moved = await run(`chmod 644 ${COLD_SCRIPT}.new && mv -f ${COLD_SCRIPT}.new ${COLD_SCRIPT}`, 'move');
+        if (moved.exitCode !== 0 || moved.truncated) throw new Error('The computer could not put the current script in place');
+        return;
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last;
+  }
+
+  /**
+   * The list `prepack` wrote on the computer (a root-only file), read back in pieces of at most `LIST_READ_PIECE` characters, each its own answer well under Agent37's cap.
+   * Every piece must be exactly as long as asked and the whole must have the length and SHA-256 the computer printed: a piece that is short, cut or changed is an error (the pack-away
+   * is tried again), never a shorter list.
+   */
+  private async readList(ref: string, bytes: number, sha256: string): Promise<unknown> {
+    const whole = () => new Error('The computer\'s list of what is outside its home folder could not be read');
+    const transfer = randomUUID().slice(0, 8);
+    let text = '';
+    while (text.length < bytes) {
+      const want = Math.min(LIST_READ_PIECE, bytes - text.length);
+      text += await this.readPiece(ref, transfer, text.length, want);
+    }
+    if (createHash('sha256').update(text, 'latin1').digest('hex') !== sha256) throw whole();
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw whole();
+    }
+  }
+
+  /**
+   * One piece of the list. Reading changes nothing, so a piece that failed is asked again, up to `LIST_TRIES` times, each ask under a name of its own (so Agent37 runs it again). The client itself
+   * repeats a command under the same name only for an answer that says "try again" (429, 502, 503, 504), and Agent37 then returns the first answer instead of running it twice. A timeout, a lost
+   * answer (Agent37 not reached), or a short, cut or failed answer is handled here, by the ask under a new name.
+   */
+  private async readPiece(ref: string, transfer: string, at: number, want: number): Promise<string> {
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      try {
+        const got = await this.client.exec(ref, `python3 ${COLD_SCRIPT} list-piece ${at} ${want}`, { user: 'root', timeoutMs: 60_000, name: `cold-read:${transfer}:${at}:${attempt}` });
+        const marked = got.exitCode === 0 && !got.truncated ? new RegExp(`(?:^|\\n)listpiece=([^\\n]*)${LIST_PIECE_END.replace(/[|]/g, '\\|')}(?:\\n|$)`).exec(got.stdout)?.[1] : undefined;
+        // Exactly as long as asked AND plain printable ASCII (the list is ASCII): the hash is taken over the characters as bytes, so a different character of the same length must not pass
+        if (marked !== undefined && marked.length === want && /^[\x20-\x7e]*$/.test(marked)) return marked;
+        last = new Error('The computer\'s list of what is outside its home folder could not be read');
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last;
   }
 
   /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
@@ -560,24 +842,81 @@ export class Agent37ComputerProvider implements ComputerProvider {
 
   /**
    * Puts a copy onto a computer and checks it: the machine is put in order first (its rule and its budget), then
-   * `universe-cold restore` fetches the copy straight from Orbit, compares its SHA-256, unpacks it and compares every file with the copy, and `universe-cold finish`
+   * `universe-cold restore` fetches the copy straight from Orbit, compares its SHA-256, unpacks it and compares every file with the copy, and the CURRENT script's `finish` (sent first, as for a pack-away)
    * puts back what was outside the home folder and installs the added software again. Never throws for a copy that does not check out: that is a result.
    */
   async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
     const started = this.now();
     await this.settle(ref);
+    // Every command of a restore runs from the CURRENT script, sent here and checked as for a pack-away, never from the one the machine was made with (an older `finish` ignores the list and copies what the agent
+    // left in the home folder, an older `restore` leaves the old proxy lines, an older script has no `list-put`). The folder it is put in can be read by the computer's own user, which `restore` runs as.
+    // A script that could not be put there says nothing about the copy: that is thrown, not a copy that did not check out
+    await this.installCold(ref);
     const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
-    const restored = await this.client.exec(ref, `universe-cold restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
+    const restored = await this.client.exec(ref, `python3 ${COLD_SCRIPT} restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
     if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
-      const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
+      const reason = /restored=0 reason=([a-z0-9_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
       return { ok: false, reason, ms: this.now() - started };
     }
-    const finished = await this.client.exec(ref, 'universe-cold finish', { user: 'root', timeoutMs: 15 * 60_000 });
+    // The list of what prepack copied goes to finish from here, never from the home folder (null for a copy that has none: finish then puts nothing back outside the home folder)
+    const outside = readOutsideManifest(source.outside);
+    let finishInput = JSON.stringify({ outside });
+    // A list that does not fit one command (Linux caps one argument near 128 KiB, and a list of thousands of files is hundreds of KB) is written to a root-only file on the computer
+    // in pieces, each its own command, and `finish` reads that file (checking its length and SHA-256); a short list goes as it always did
+    if (outside !== null && Buffer.byteLength(finishInput) > LIST_INLINE_BYTES) {
+      const sent = await this.sendList(ref, outside);
+      if (!sent) return { ok: false, reason: 'finish_outside_transfer', ms: this.now() - started };
+      finishInput = JSON.stringify({ outside_file: sent });
+    }
+    const finished = await this.client.exec(ref, `python3 ${COLD_SCRIPT} finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
     if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
-      const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
+      const reason = /finished=0 reason=([a-z0-9_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
       return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
     }
+    // The script says which it did: put the list back (applied) or, for a copy with no list, nothing outside the home folder (unverified). Neither word, or the wrong one for what was sent,
+    // is a script that did not do what was sent to it, and a restore is never called good on that
+    const done = /(^|\n)finished=1\b[^\n]*\boutside=(applied|unverified)\b/.exec(finished.stdout)?.[2];
+    if (done !== (outside === null ? 'unverified' : 'applied')) return { ok: false, reason: 'finish_outside_not_confirmed', ms: this.now() - started };
+    if (done === 'unverified') {
+      console.error('[Computer] A copy with no list of what was outside its home folder was restored: nothing outside the home folder was put back');
+      return { ok: true, reason: null, ms: this.now() - started, outside: 'unverified' };
+    }
     return { ok: true, reason: null, ms: this.now() - started };
+  }
+
+  /**
+   * Sends a list to the computer in pieces of at most `LIST_SEND_PIECE` characters (plain ASCII, so the cut is never inside a character). Null when a piece was not taken exactly as sent, after
+   * the whole send was started again from the first piece up to `LIST_TRIES` times, each try under a new transfer id. Every piece has a name of its own, so the client's repeat of a command after
+   * an answer of "try again" (429, 502, 503, 504) returns the first answer instead of running it twice; a timeout or a lost answer (Agent37 not reached) is not repeated by the client and ends the
+   * try, and the next try starts from offset 0. A late piece of an earlier try can still arrive after a new try began: it is refused when it is not at the end of the file (`out_of_order`), and
+   * whatever lands, `finish` checks the file's length and SHA-256 and refuses it otherwise. A failure that is not a refusal on every try is thrown, as for any other command on the computer.
+   */
+  private async sendList(ref: string, outside: OutsideManifest): Promise<{ bytes: number; sha256: string } | null> {
+    const text = asciiJson(outside);
+    if (text.length > LIST_MAX_BYTES) return null;
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      try {
+        if (await this.sendListOnce(ref, text, randomUUID().slice(0, 8))) return { bytes: text.length, sha256: createHash('sha256').update(text, 'latin1').digest('hex') };
+        last = null;
+      } catch (error) {
+        last = error;
+      }
+    }
+    if (last !== null) throw last;
+    return null;
+  }
+
+  private async sendListOnce(ref: string, text: string, transfer: string): Promise<boolean> {
+    // A line of its own that no piece can contain (a piece is one line cut from a list, and this has a random part)
+    const end = `LIST_${randomBytes(12).toString('hex')}`;
+    for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
+      const piece = text.slice(at, at + LIST_SEND_PIECE);
+      const put = await this.client.exec(ref, `python3 ${COLD_SCRIPT} list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000, name: `cold-put:${transfer}:${at}` });
+      if (put.exitCode !== 0 || put.truncated || !new RegExp(`(^|\\n)listput=1 size=${at + piece.length}(\\n|$)`).test(put.stdout)) return false;
+    }
+    return true;
   }
 
   /** Asks again until the provider says the machine is gone and no longer in its list (so no longer billed), for up to two minutes. */

@@ -307,3 +307,32 @@ describe('a reply row written under the voice lock', () => {
     }
   });
 });
+
+describe('a look Universe AI’s vision took at an image (the describe call)', () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('is stored as a look at an image and not as a greeting, outside the voice lock, and the books are told so', async () => {
+    (prisma.$transaction as jest.Mock).mockClear();
+    (recordModelCall as jest.Mock).mockClear();
+    usage.create.mockReset().mockResolvedValue({ id: 5, imageRead: true, greeting: false });
+    // The bot server marks it a greeting too, so an Orbit from before this keeps it out of the reply counts
+    await track({ imageRead: true, greeting: true, channel: 'dm' });
+    await settle();
+    expect(saved()).toMatchObject({ imageRead: true, greeting: false, error: false });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect((recordModelCall as jest.Mock).mock.calls[0][0]).toMatchObject({ imageRead: true, greeting: false });
+  });
+
+  it('is never set by a bot server from before it, nor by anything but a plain yes', async () => {
+    usage.create.mockReset().mockResolvedValue({});
+    await track({});
+    await track({ greeting: true });
+    await track({ imageRead: 'yes' });
+    await settle();
+    expect(usage.create.mock.calls.map((call) => [call[0].data.imageRead, call[0].data.greeting])).toEqual([
+      [false, false],
+      [false, true],
+      [false, false],
+    ]);
+  });
+});

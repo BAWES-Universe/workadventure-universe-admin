@@ -328,6 +328,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
     expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
     expect(await givenBack(started.job.id)).toBe(true);
+    // The test's clock is ahead of the database's: the hold the ending wrote is dated in the test's future, and a hold lifts only on a stop proved after its date (Opus on #1040), so it is dated as the real clock would have
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId, NOT: { turnUnprovenSince: null } }, data: { turnUnprovenSince: new Date(Date.now() - 1000) } });
     // And it used none of the bound (1): the next runner give-back is refused only because of the first one
     const next = await job(sara, ours);
     expect(next).toMatchObject({ status: 'failed', endedBy: null });
@@ -627,7 +629,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
 
     describe('a refusal for our capacity that capacity recovered from (Opus: the refused turn is still ours, with the relay’s own row, on time or late)', () => {
       /** A job whose first call (turn 1) was refused with the pool full, whose later call was authorized (capacity back), and which then failed naming turn 1. `relayRow`: the relay's own fault row for the refused call. */
-      const refusedThenRecovered = async (relayRow: 'before' | 'after' | 'never') => {
+      const refusedThenRecovered = async (relayRow: 'before' | 'after' | 'never', recovery: 'funded' | 'own_key' = 'funded') => {
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
         const sara = await person('sara');
         // The bound is spent: only a confirmed fault of ours can give this job back (so goodwill can never be what gives it)
@@ -639,9 +641,10 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 60_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
           expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
           if (relayRow === 'before') await recordFaults(sara.brickId, id, [fault(1, 'pool_busy', { callId: 'c1' })]);
-          // Capacity is back: a later call is authorized, and Orbit's own turnless refusal row is retired
+          // Capacity is back: a later call is authorized, and Orbit's own turnless refusal row is retired. The call may be a funded one or one on the person's own key (CodeRabbit on #1025, 14c4e407 pass, N1): both show the job carried on
           await setUp();
-          expect((await authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW)).ok).toBe(true);
+          if (recovery === 'own_key') expect(await authorizeOwnKeyCall(id, NOW)).toBe(true);
+          else expect((await authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW)).ok).toBe(true);
           expect(await prisma.computerJobFault.findMany({ where: { jobId: id, callId: { startsWith: 'orbit:pool:' } }, select: { kind: true, reason: true } })).toEqual([{ kind: 'answered', reason: 'pool_recovered' }]);
         });
         if (relayRow === 'after') {
@@ -670,6 +673,46 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const ended = await refusedThenRecovered('never');
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
         expect(await givenBack(ended.id)).toBe(false);
+      });
+
+      it('CodeRabbit on #1025 (14c4e407 pass, N1): a call admitted on the person’s OWN key retires the earlier pool refusal too, so a later unrelated agent failure is never given back as ours from it', async () => {
+        const ended = await refusedThenRecovered('never', 'own_key');
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        expect(await givenBack(ended.id)).toBe(false);
+      });
+
+      it('N1 CONTROL: with no admission at all after the refusal, the row stays a fault and the finish reads it (given back as ours)', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        await job(sara, ours);
+        const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          const { token } = (await mintJobToken(id, 'model', NOW)) as { token: string };
+          await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 60_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+          expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
+          await recordFaults(sara.brickId, id, [fault(1, 'pool_busy', { callId: 'c1' })]);
+        });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'pool_busy' });
+      });
+
+      it('N1: a retirement that cannot be written refuses the own-key call: no own-key marker and no turn admission are kept', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, NOW);
+        if (!started.ok) throw new Error('the job did not start');
+        const id = started.job.id;
+        const { token } = (await mintJobToken(id, 'model', NOW)) as { token: string };
+        await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 60_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
+        await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION n1_fail_retire() RETURNS trigger AS $$ BEGIN IF NEW."reason" = 'pool_recovered' THEN RAISE EXCEPTION 'cannot retire'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+        await prisma.$executeRawUnsafe('CREATE TRIGGER n1_fail_retire BEFORE UPDATE ON "computer_job_faults" FOR EACH ROW EXECUTE FUNCTION n1_fail_retire()');
+        try {
+          await expect(authorizeOwnKeyCall(id, NOW, undefined, { turn: 1, run: 'r1' })).rejects.toThrow();
+        } finally {
+          await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS n1_fail_retire ON "computer_job_faults"');
+          await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS n1_fail_retire()');
+        }
+        expect(await hasOwnKeyCall(prisma, id)).toBe(false);
+        expect(await prisma.computerJobFault.count({ where: { jobId: id, callId: { startsWith: 'orbit:pool:' }, kind: 'fault' } })).toBe(1);
       });
     });
 
@@ -2649,6 +2692,65 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       }
     });
 
+    it.each(['through a pending look first', 'straight to the refusal'] as const)('CodeRabbit on #1025 (14c4e407 pass, N2): a no-turn agent finish that is held, then judged on a numbered row of its run once that row arrives, keeps that turn (%s): the decision stores it, and an incident on that route reverses the refusal', async (path) => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-n2';
+      const base = new Date();
+      const window = { route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) };
+      const held = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runn2' }, async (id) => {
+        // A row of its run that names no turn (so nothing numbered to judge yet), unresolved: the decision is held for the effect
+        await recordFaults(sara.brickId, id, [fault(null, 'provider_5xx', { route, run: 'runn2', at: base })]);
+        await planEffect(id, { key: 'n2-mail', kind: 'send' });
+      });
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved', judgedTurns: [] });
+      // The numbered row of the judged run arrives while the effect is still unresolved: the pending decision stores the turn it is now judged on
+      await recordFaults(sara.brickId, held.id, [fault(2, 'provider_5xx', { route, run: 'runn2', at: base })]);
+      if (path === 'through a pending look first') {
+        expect(await resolveDecision(held.id, minutes(30))).toBe('pending');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedTurns: [2] });
+      } else {
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedTurns: [] });
+      }
+      // The effect is delivered: the decision is refused as delivered, and it keeps that turn
+      expect(await settleEffect(held.id, 'n2-mail', 'done', 'ali@example.test')).toBe(true);
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered', judgedTurns: [2] });
+      expect(await givenBack(held.id)).toBe(false);
+      // An incident on that route and time reverses it (its evidence is the judged turn's own row)
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1 });
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      expect(await givenBack(held.id)).toBe(true);
+    });
+
+    it('GPT eighth note, 2b: a refusal whose turn list was filled only when its pending refund resolved is corrected by the incident and refunded EXACTLY ONCE (a second correction, a retry of the resolver and the sweep change nothing)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-2b';
+      const base = new Date();
+      const window = { route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) };
+      const held = await job(sara, { outcome: 'failed', cause: 'agent', run: 'run2b' }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(null, 'provider_5xx', { route, run: 'run2b', at: base })]);
+        await planEffect(id, { key: '2b-mail', kind: 'send' });
+      });
+      await recordFaults(sara.brickId, held.id, [fault(3, 'provider_5xx', { route, run: 'run2b', at: base })]);
+      expect(await settleEffect(held.id, '2b-mail', 'done', 'ali@example.test')).toBe(true);
+      // Refused as delivered, with the turn it was judged on kept: that turn is what lets the incident find it
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered', judgedTurns: [3] });
+      expect(await givenBack(held.id)).toBe(false);
+      const eventsOf = () => prisma.meterEvent.count({ where: { eventId: { startsWith: `computer:${held.id}:` } } });
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1 });
+      expect(await givenBack(held.id)).toBe(true);
+      const once = await timeOf(held.id);
+      const events = await eventsOf();
+      // Again: nothing is corrected a second time, the decision and the posted give-back stay as they were
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 0 });
+      expect(await resolveDecision(held.id, minutes(30))).not.toBe('pending');
+      await sweepGiveBackDecisions(minutes(60));
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident', judgedTurns: [3] });
+      expect(await timeOf(held.id)).toEqual(once);
+      expect(await eventsOf()).toBe(events);
+    });
+
     it('an incident corrects a decision only by its OWN evidence: a fault of an earlier run of the same job, or of a turn that was not judged, never reverses it', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
@@ -3215,6 +3317,33 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await retry).toBe('none');
         barrier.restore();
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      });
+
+      it('CodeRabbit on #1032 (00abcd25 pass): a retry judges from the decision row it reads UNDER the person’s lock, so a retry that read before the lock never writes its older turn list over the one another retry committed first', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const route = 'universe-ai/model-lock';
+        const base = new Date();
+        const held = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runlk' }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(null, 'provider_5xx', { route, run: 'runlk', at: base })]);
+          await planEffect(id, { key: 'lk-mail', kind: 'send' });
+        });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved', judgedTurns: [] });
+        // Two numbered rows of the run arrive: a retry that judges from an empty list would take the later one
+        await recordFaults(sara.brickId, held.id, [fault(2, 'provider_5xx', { route, run: 'runlk', at: base }), fault(3, 'provider_5xx', { route, run: 'runlk', at: base })]);
+        let retry: Promise<string> = Promise.resolve('none');
+        const barrier = retryHasRead(held.id);
+        await prisma.$transaction(async (tx) => {
+          await lockPerson(tx, sara.id);
+          retry = resolveDecision(held.id, minutes(30));
+          // The retry has read the decision with its empty turn list; only then does the other retry commit the turn it judged on
+          await barrier.read;
+          await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { judgedTurns: [2], attempts: { increment: 1 } } });
+        }, HOLDER);
+        expect(await retry).toBe('pending');
+        barrier.restore();
+        // The committed selection stands: the stale retry does not replace [2] with what it would have judged from its own read
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedTurns: [2], attempts: 2 });
       });
 
       it('a decision that throws when it is tried again is rescheduled, so the oldest rows cannot keep every slot from the ones behind them', async () => {

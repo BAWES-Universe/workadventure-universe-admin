@@ -79,11 +79,11 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('a fresh deploy has every Instant limit set', missingInstantLimits(await getInstantLimits()).length === 0, await getInstantLimits());
     const first = await issue.ensureIssued('sara', now);
     const byCategory = Object.fromEntries(first.issued.map((lot) => [lot.programId, lot.amountMicros]));
-    check('a new member is given $0.10 of Instant Apps and $0.25 of computers by the default grants', first.issued.length === 2 && byCategory['seed-default-instant_apps'] === 100_000 && byCategory['seed-default-computers'] === 250_000 && first.skipped.length === 0, first);
+    check('a new member is given $2.00 of Instant Apps this month and $0.25 of computers by the default grants', first.issued.length === 2 && byCategory['seed-default-instant_apps'] === 2_000_000 && first.issued.some((lot) => lot.programId === 'seed-default-instant_apps' && lot.periodKey === now.toISOString().slice(0, 7)) && byCategory['seed-default-computers'] === 250_000 && first.skipped.length === 0, first);
     check('issuing again gives nothing more', (await issue.ensureIssued('sara', now)).issued.length === 0);
     const search = await spend.holdCredit({ holdKey: 'k-seed-search', personId: 'sara', category: 'instant_apps', amountMicros: 8_000, chargeClass: 'instant_run' }, now);
     check('an Instant search fits in the starting credit', search.ok === true, search);
-    const tooMuch = await spend.holdCredit({ holdKey: 'k-seed-too-much', personId: 'sara', category: 'instant_apps', amountMicros: 100_000, chargeClass: 'instant_run' }, now);
+    const tooMuch = await spend.holdCredit({ holdKey: 'k-seed-too-much', personId: 'sara', category: 'instant_apps', amountMicros: 2_000_000, chargeClass: 'instant_run' }, now);
     check('a hold bigger than what is left is refused as used up, not as not set', !tooMuch.ok && tooMuch.reason !== 'not_set', tooMuch);
     const job = await spend.holdCredit({ holdKey: 'k-seed-job', personId: 'sara', category: 'computers', amountMicros: 40_000, chargeClass: 'computer_job' }, now);
     check('a computer job fits in the starting credit', job.ok === true, job);

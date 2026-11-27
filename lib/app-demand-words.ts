@@ -29,6 +29,28 @@ export function costLine(app: Pick<AppRow, 'costMicros' | 'unpriced' | 'ended' |
 
 export const runsOnWords = (route: AppRow['route']): string => (route === 'universe' ? 'Runs on Universe' : 'Runs on Composio');
 
+/** The App key GitHub has on this page (the same key the ready-made list uses). */
+export const GITHUB_APP_KEY = 'github';
+
+/** Universe's own GitHub App on the Apps page (game #2041): the words of GitHub's row and its sheet, written once. */
+export const githubAppWords = {
+  /** Under the GitHub row until the App is made, and after. The row itself still says what it runs on: people who connected GitHub before still use that connection. */
+  rowHintBefore: 'Tap to set up Universe’s GitHub App',
+  rowHintAfter: 'New connections use Universe’s GitHub App',
+  title: 'Universe’s GitHub App',
+  button: 'Set up Universe’s GitHub App',
+  /** Before it is made. */
+  notMade: 'GitHub runs on the current App connection today. Set up Universe’s GitHub App so people connect GitHub through Universe. You press Create once on GitHub’s page, and GitHub connections people already made keep running as they do now.',
+  /** Once it is made. */
+  madeStatus: 'Set up',
+  made: 'People connect GitHub through it, and their Bricks work on GitHub as them.',
+  openOnGitHub: 'Open on GitHub',
+  /** Under "Runs on" once it is made: the choice below is for the older connections only. */
+  runsOnOnly: 'Only for GitHub connections people made before.',
+  /** The Universe choice's line once it is made, instead of "no version of our own yet". */
+  universeLine: 'New connections use Universe’s GitHub App above.',
+} as const;
+
 /** The detail line of an App's sheet: "412 uses · 96 people · 4% failed, all refunded". */
 export function sheetLine(app: AppRow): string {
   const failed = failedWords(app);

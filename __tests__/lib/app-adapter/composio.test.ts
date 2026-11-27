@@ -137,6 +137,24 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect(await adapter.appLink({ person: 'p', toolkits: ['gmail'] })).toEqual({ url: 'https://mcp.example/y' });
   });
 
+  it('reads an App’s actions on every page, and fails rather than take a list whose pages point back to one already read', async () => {
+    const item = (slug: string) => ({ slug, description: slug, tags: [] });
+    const whole = make([answer({ items: [item('GMAIL_A')], next_cursor: 'p2' }), answer({ items: [item('GMAIL_B')], next_cursor: null })]);
+    expect((await whole.actions!('gmail')).map((action) => action.slug)).toEqual(['GMAIL_A', 'GMAIL_B']);
+    expect(calls[1].url).toContain('cursor=p2');
+    // Every page asks for each action's newest version, so none is sorted or described from an older one
+    expect(calls.map((call) => new URL(call.url).searchParams.get('toolkit_versions'))).toEqual(['latest', 'latest']);
+    // Page two names itself as the next page: the list read so far is only part of the App's
+    const stuck = make([answer({ items: [item('GMAIL_A')], next_cursor: 'p2' }), answer({ items: [item('GMAIL_B')], next_cursor: 'p2' })]);
+    await expect(stuck.actions!('gmail')).rejects.toThrow('points back');
+    const looping = make([
+      answer({ items: [item('GMAIL_A')], next_cursor: 'p2' }),
+      answer({ items: [item('GMAIL_B')], next_cursor: 'p3' }),
+      answer({ items: [item('GMAIL_C')], next_cursor: 'p2' }),
+    ]);
+    await expect(looping.actions!('gmail')).rejects.toThrow('points back');
+  });
+
   describe('the app link', () => {
     const linkAnswer = (status: number, body: string, headers: Record<string, string> = {}) =>
       ({ ok: status < 400, status, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null }, text: async () => body }) as unknown as Response;

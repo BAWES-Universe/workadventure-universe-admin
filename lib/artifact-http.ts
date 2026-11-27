@@ -203,6 +203,9 @@ export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();
 
 export const shareSchema = z.object({ viewer: viewerSchema, openScope: z.string().optional(), changeScope: z.string().optional() }).strict();
 
+/** `version`: the one the owner was looking at when they pressed Publish; the latest when left out. */
+export const publishSchema = z.object({ viewer: viewerSchema, version: versionNumber.nullish() }).strict();
+
 export const deleteSchema = z.object({ viewer: viewerSchema }).strict();
 
 export const restoreSchema = z.object({ viewer: viewerSchema, number: versionNumber }).strict();
@@ -214,7 +217,12 @@ export const listOffset = z.number().int().min(0).max(1_000_000);
 
 export const ownedListSchema = z.object({ person: personSchema, offset: listOffset.optional() }).strict();
 
-export const chatListSchema = z.object({ viewer: viewerSchema.refine((viewer) => viewer.chat !== undefined, { message: 'Name the chat', path: ['chat'] }), offset: listOffset.optional() }).strict();
+/** `botId`: a direct chat with a bot also lists what that bot made for this person in other chats (nearby chat, say). */
+export const chatListSchema = z.object({
+  viewer: viewerSchema.refine((viewer) => viewer.chat !== undefined, { message: 'Name the chat', path: ['chat'] }),
+  offset: listOffset.optional(),
+  botId: z.string().min(1).max(255).optional(),
+}).strict();
 
 /** A version number from the address, or a 404: there is no version "abc". */
 export function versionParam(value: string | undefined): number {

@@ -78,6 +78,15 @@ describe('POST /api/bots/:id/bricks: "make me a bot that keeps my mum’s recipe
     expect(await response.json()).toMatchObject({ made: false, brick: { id: 'made-1' } });
   });
 
+  it('answers 429 with the kind line and retryAt when they have made too many new Bricks this hour, for the Brick to say as it is', async () => {
+    const line = "You've made a lot of Bricks this hour. Try again at 3:40 PM.";
+    make.mockResolvedValue({ ok: false, status: 429, error: line, code: 'new_bricks_limit', retryAt: '2026-11-21T12:40:00.000Z', retryAfterSeconds: 1500 });
+    const response = await makeFromChat(request(`/api/bots/${BRICK_ID}/bricks`, { method: 'POST', body: { userId: 'uuid-sara', name: 'Recipe Brick' } }), params);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('1500');
+    expect(await response.json()).toEqual({ error: line, code: 'new_bricks_limit', retryAt: '2026-11-21T12:40:00.000Z' });
+  });
+
   it('is not there for anyone who does not own the Brick that asks', async () => {
     make.mockResolvedValue(NOT_THERE);
     const response = await makeFromChat(request(`/api/bots/${BRICK_ID}/bricks`, { method: 'POST', body: { userId: 'uuid-omar', name: 'Mine' } }), params);

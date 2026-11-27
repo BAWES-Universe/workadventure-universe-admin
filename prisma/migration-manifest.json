@@ -174,8 +174,8 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261124000000_computer_round9_columns",
-    "count": 201,
+    "lastMigration": "20261126170000_usage_image_read",
+    "count": 213,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -363,6 +363,8 @@
       "20261120130000_computer_refund_obligations",
       "20261120140000_computer_fault_run",
       "20261120140000_page_order_long_wait_index",
+      "20261121010000_brick_create_request_key",
+      "20261121100000_artifact_publish",
       "20261121150000_computer_start_key",
       "20261121200000_computer_late_told",
       "20261122120000_computer_finish_intent",
@@ -377,7 +379,17 @@
       "20261123060000_computer_round8_fences",
       "20261123070000_computer_round8_stretch_check",
       "20261123080000_computer_round8_stretch_check_validate",
-      "20261124000000_computer_round9_columns"
+      "20261124000000_computer_round9_columns",
+      "20261124100000_computer_power_ops",
+      "20261125000000_computer_mark_in_orbit",
+      "20261125100000_computer_take_over_check",
+      "20261126000000_app_actions",
+      "20261126100000_research_on_by_default",
+      "20261126120000_tool_person_heading",
+      "20261126130000_app_action_choice_by_person",
+      "20261126140000_app_action_choice_by_person_scope",
+      "20261126150000_brick_reports",
+      "20261126170000_usage_image_read"
     ]
   }
 }

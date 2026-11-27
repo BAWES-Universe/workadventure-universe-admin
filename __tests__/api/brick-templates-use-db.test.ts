@@ -270,6 +270,28 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
     });
   });
 
+  describe('New Bricks per hour', () => {
+    afterEach(async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    });
+
+    it('counts Create Brick with the person’s other new Bricks, and over the limit makes nothing and answers 429 with the kind line', async () => {
+      const id = await share();
+      await saveServerLimits({ bricks: { newPerHour: 2 } }, sara.id);
+      as(omar);
+      await keepZone(omar);
+      await remember(await makeFrom(id));
+      await remember(await makeFrom(id));
+      const refused = await makeFrom(id);
+      expect(refused.status).toBe(429);
+      const body = await json(refused);
+      expect(body).toMatchObject({ code: 'new_bricks_limit' });
+      expect(body.error).toMatch(/^You've made a lot of Bricks this hour\. Try again at \d{1,2}:\d{2} (AM|PM)\.$/);
+      expect(await prisma.bot.count({ where: { ownerId: omar.id, roomId: null } })).toBe(2);
+      expect(await prisma.brickTemplateUse.count({ where: { botId: { in: made } } })).toBe(2);
+    });
+  });
+
   describe('routines that arrive switched off', () => {
     it('come paused by the template with nothing due, and make zero runs until the owner sets them up and turns them on', async () => {
       const item = await routine(brickId, sara.id);

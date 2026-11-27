@@ -230,11 +230,17 @@ model Artifact {
   // The chat it was made in: nearby | dm, and the id the bot server and the game both use for that chat. A copy has none.
   chatKind      String?   @map("chat_kind") @db.VarChar(20)
   chatRef       String?   @map("chat_ref") @db.VarChar(255)
-  // Who can open it: me (just its owner, game #1994) | chat (people in that chat) | link (anyone with the link)
+  // Who can open it: me (just its owner, game #1994) | chat (people in that chat) | link (anyone with the link) | public
+  // (anyone with the link, and only a published version: game #2115)
   openScope     String    @default("chat") @map("open_scope") @db.VarChar(20)
   // Who can ask for changes: owner (only the owner) | openers (everyone who can open it, in its chat)
   changeScope   String    @default("owner") @map("change_scope") @db.VarChar(20)
   latestVersion Int       @default(1) @map("latest_version")
+  // What the owner published (game #2115): the version people who open it by its link see instead of the latest, the title
+  // it had then, and when. All three are null until the owner publishes; a link that was never published shows the latest.
+  publishedVersion Int?      @map("published_version")
+  publishedTitle   String?   @map("published_title") @db.VarChar(120)
+  publishedAt      DateTime? @map("published_at")
   copiedFromId  String?   @map("copied_from_id")
   expiresAt     DateTime? @map("expires_at")
   createdAt     DateTime  @default(now()) @map("created_at")
@@ -916,6 +922,11 @@ model Bot {
   // when the Brick is made for a job ("Send me the first recipe"); null = the game's own fixed hello. Never sent as a
   // message and never read by the AI. Always null for a room bot.
   hello               String?   @db.VarChar(300)
+  // The key the game sent with New Brick (POST /api/bricks { requestKey }): the same key from the same person is the same
+  // request, so a tap tried again after a dropped connection gives back the first Brick. Null for every other Brick.
+  createRequestKey    String?   @map("create_request_key") @db.VarChar(200)
+  // The name that request asked for: a retry is checked against it, not against the Brick's name now (the owner may have renamed it since).
+  createRequestName   String?   @map("create_request_name") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -947,7 +958,9 @@ model Bot {
   brickItems      BrickItem[]
   template        BrickTemplate?
   madeFrom        BrickTemplateUse?
+  reportNotes     BrickReportNote[]
 
+  @@unique([ownerId, createRequestKey])
   @@index([roomId])
   @@index([ownerId])
   @@index([goneAt])
@@ -1411,6 +1424,9 @@ model BotMcpServer {
   // lost fields above are then read from the connection and never copied, and what is kept here is the Brick's own: its
   // four headings, its tools and their confirmations, its switch. Null for every app set up on a bot as before.
   connectionId       String?   @map("connection_id")
+  // A ready-made App's grant whose rows are the App's actions (lib/app-actions): the version of the App's list they were made from. Null
+  // until a reader that knows App actions (GET .../tools?actions=1) first reads it: until then its rows stay as the bot server saved them.
+  appActionsVersion  Int?      @map("app_actions_version")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1756,6 +1772,86 @@ model AppUseOutcome {
   @@map("app_use_outcomes")
 }
 
+// Brick reports (mock "Brick reports inbox"): a problem many Bricks hit, counted. Notes that read alike (same kind and area, close
+// titles) join one problem; nothing here says who sent them. `state` is the inbox tab it is on.
+model BrickReportProblem {
+  id          String            @id @default(uuid())
+  // problem | cant_do | friction | idea
+  kind        String            @db.VarChar(20)
+  // apps | computer | pages | chat | voice | map | memory | files | credit | other
+  area        String            @db.VarChar(20)
+  // The Brick's own tool, `app:<catalog key>`, `app` or `none`: what was running (see lib/brick-reports.ts). 64: `app:` and a catalog key
+  // of up to 60
+  operation   String            @db.VarChar(64)
+  // failed | signed_out | timed_out | not_allowed | no_result | missing_ability | corrected | idea
+  failure     String            @db.VarChar(20)
+  // Built from the fixed words above, never from a chat
+  title       String            @db.VarChar(80)
+  // new | working | fixed
+  state       String            @default("new") @db.VarChar(20)
+  // A note came in after it was marked fixed: it went back to New, ranked higher
+  cameBack    Boolean           @default(false) @map("came_back")
+  // New because a note came in after the fix, and nobody has moved it by hand since: taking back every note from after the fix puts it
+  // back to Fixed. Set and read only under the problem's lock, so it never depends on clocks or on which note goes last
+  reopenedByNote Boolean        @default(false) @map("reopened_by_note")
+  stateAt     DateTime?         @map("state_at")
+  firstSeenAt DateTime          @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime          @default(now()) @map("last_seen_at")
+  notes       BrickReportNote[]
+
+  @@unique([kind, area, operation, failure])
+  @@index([state])
+  @@map("brick_report_problems")
+}
+
+// One note a Brick sent to the Universe team: product-only (kind, area, what ran, how it failed, tried again), from fixed lists. `words` holds
+// a person's own words only when they pressed Send on the exact cleaned words the chat showed them. `ref` is the bot server's reference
+// (the chat's message and what the note is about): the same note sent again answers this row's receipt. `botId` is kept only so the Brick
+// can later tell its owner a fix shipped; no screen shows it, and it goes when the Brick is deleted (the note stays, counted). `personKey`
+// is a one-way hash (marked g: for a guest, p: otherwise), only to count different people. A note taken back is emptied: no words, context
+// or person are left, only the row for the day's count. `takeBackHash` checks the key the chat holds; `takeBackSealed` is that key sealed,
+// to hand the same receipt back when the note is sent again.
+model BrickReportNote {
+  id           String              @id @default(uuid())
+  // Empty once its problem goes (every note of it taken back): the emptied row stays only for the Brick's count of the day
+  problemId    String?             @map("problem_id")
+  problem      BrickReportProblem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+  botId        String?             @map("bot_id")
+  bot          Bot?                @relation(fields: [botId], references: [id], onDelete: SetNull)
+  ref          String              @db.VarChar(64)
+  personKey    String?             @map("person_key") @db.VarChar(64)
+  kind         String              @db.VarChar(20)
+  area         String              @db.VarChar(20)
+  operation    String              @db.VarChar(64)
+  failure      String              @db.VarChar(20)
+  retried      Boolean             @default(false)
+  // The person's own words, cleaned, only when they pressed Send on them
+  words        String              @default("") @db.VarChar(280)
+  wordsAt      DateTime?           @map("words_at")
+  // stopped | slowed | idea
+  effect       String              @db.VarChar(20)
+  // What the bot server already knew, with no words in it: the model, own key or not, the game version, the tools it had
+  context      Json?
+  // Sent after the latest fix: it took a problem marked fixed back to New, or joined it while it stood reopened by a note. Set under the
+  // problem's lock, cleared when a person marks it fixed again. Once no such note is left (and nobody moved the problem by hand), the
+  // problem goes back to Fixed
+  reopened     Boolean             @default(false)
+  takeBackHash   String            @map("take_back_hash") @db.VarChar(64)
+  takeBackSealed String            @map("take_back_sealed")
+  takenBackAt    DateTime?         @map("taken_back_at")
+  // When the bot server said the chat message carrying its receipt went out; never set within 15 minutes, the note is withdrawn
+  deliveredAt    DateTime?         @map("delivered_at")
+  // The day (UTC) it was sent: a Brick sends at most so many a day
+  day          DateTime            @db.Date
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  @@unique([botId, ref])
+  @@index([problemId, createdAt])
+  @@index([botId, day])
+  @@index([deliveredAt, createdAt])
+  @@map("brick_report_notes")
+}
+
 // "Asked for, not available yet": an App name a Brick looked for and did not find, counted per day and per person. ONLY the name
 // is kept (short, and cleaned of anything that reads like a sentence), never what a person wrote. `personKey` is a one-way hash,
 // kept only so "by 41 people" can count different people; nothing per person is ever shown.
@@ -1877,9 +1973,18 @@ model BotMcpTool {
   suggestionSource String?  @map("suggestion_source") @db.VarChar(20)
   // The heading a person chose (or accepted from the suggestion), set when confirmed or moved.
   heading         String?   @db.VarChar(20)
+  // The heading a person moved the tool to, as they chose it. On their own App a tool that changed sits under the stricter of this and
+  // what Universe knows of the new version (lib/app-own-tools.ts), so their choice comes back once Universe knows more.
+  personHeading   String?   @map("person_heading") @db.VarChar(20)
   movedById       String?   @map("moved_by_id")
   confirmedById   String?   @map("confirmed_by_id")
   confirmedAt     DateTime? @map("confirmed_at")
+  // An App action's own choice over its heading's (rightAway | asksFirst | off). Null follows the heading. Only on a ready-made App's
+  // grant, whose rows are the App's actions (lib/app-actions): a bot's own server never has one.
+  setting         String?   @db.VarChar(20)
+  // Whether `setting` is a person's choice (setToolSetting), or the one Universe started the action on (lib/github/actions.ts: Run a
+  // workflow asks first), which follows the heading as the person changes it. A person's choice never moves.
+  settingByPerson Boolean   @default(false) @map("setting_by_person")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
@@ -1889,6 +1994,53 @@ model BotMcpTool {
 
   @@unique([serverId, name])
   @@map("bot_mcp_tools")
+}
+
+// What a ready-made App can do (lib/app-actions): its actions as the provider lists them, each sorted by Universe once under one of the four
+// headings, shared by every person and Brick. A Brick's grant of the App holds one tool row per action (BotMcpTool), made from this list.
+model AppAction {
+  id          String   @id @default(uuid())
+  toolkit     String   @db.VarChar(60)
+  slug        String   @db.VarChar(255)
+  // Plain words for people, made from the slug ("Fetch emails"), and the provider's own description with its name taken out
+  title       String   @db.VarChar(255)
+  description String?  @db.Text
+  // looksUp | makesNew | changesThings | deletesOrSends
+  heading     String   @db.VarChar(20)
+  // What decided the heading: name (a send, delete, pay... in the slug) | tag (the provider's own tag) | sorter (the small model) |
+  // fallback (nothing yet: the strictest heading until the sorter answers)
+  source      String   @db.VarChar(20)
+  // The provider's version of the action when it was last read
+  catalogVersion String? @map("catalog_version") @db.VarChar(60)
+  // Where it is in the provider's list: a grant keeps the first 500 by this order
+  position    Int
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([toolkit, slug])
+  @@index([toolkit, position])
+  @@index([source])
+  @@map("app_actions")
+}
+
+// When each App's list of actions was last read from the provider, and who is reading it now (one reader at a time, across Orbit's processes)
+model AppActionCatalog {
+  toolkit      String    @id @db.VarChar(60)
+  refreshedAt  DateTime? @map("refreshed_at")
+  // A refresh in progress holds this until it ends or the time passes
+  claimedUntil DateTime? @map("claimed_until")
+  // After a read that failed (or a list not believed yet): the provider is not asked again before this
+  retryAfter   DateTime? @map("retry_after")
+  actionCount  Int       @default(0) @map("action_count")
+  // Goes up whenever an action of the App is added, removed or sorted differently: a grant made from this version needs no new look
+  version      Int       @default(0)
+  // Since when the provider keeps answering a list much shorter than the one kept: once that lasts, the shorter list is believed
+  shrunkSince  DateTime? @map("shrunk_since")
+  // How many reads in a row since then gave the shorter list
+  shrunkReads  Int       @default(0) @map("shrunk_reads")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("app_action_catalogs")
 }
 
 // AI Providers
@@ -2002,6 +2154,10 @@ model BotsAiUsage {
   // usage, but it is never counted against the person it greeted: not in their Universe AI window, not in a bot's own limit per
   // person and not in the guests' pool.
   greeting        Boolean  @default(false)
+  // A look at an image Universe AI's vision took for this bot (a model that can't see, on Universe AI or on a person's own key, sent or
+  // opened an image). Universe pays for it and it is that person's Universe AI use, but it is not a reply: it is never counted in their
+  // Universe AI window, a bot's own limit per person, the guests' pool or a goal's share, and it never limits anyone's own key.
+  imageRead       Boolean  @default(false) @map("image_read")
   // The run of a goal or task this call was made for (game #2002), when the bot server says. A run with a call here has started using its
   // room, so it no longer holds a place in it. Null for chat and for a bot server that does not send it.
   brickRunId      String?  @map("brick_run_id") @db.VarChar(36)
@@ -2527,6 +2683,22 @@ model CreditLot {
   @@index([fundingAccountId, issuedAt])
   @@index([programId])
   @@map("credit_lots")
+}
+
+// A person who was due a default and was not given it this UTC month because the month's budget would be passed: one row per person,
+// program and month, so the Limits screen can say how many people the rollout budget left out ("N people not given credit this month").
+// Written by issuing, never read by it.
+model CreditIssueSkip {
+  personId  String   @map("person_id")
+  programId String   @map("program_id")
+  // A UTC month, "2026-12"
+  monthKey  String   @map("month_key") @db.VarChar(7)
+  reason    String   @db.VarChar(20)
+  firstAt   DateTime @default(now()) @map("first_at")
+
+  @@id([personId, programId, monthKey])
+  @@index([monthKey])
+  @@map("credit_issue_skips")
 }
 
 // Room kept for a paid step against a person's credit, once per operation + attempt, and the ledger line it becomes. The customer's
@@ -3376,6 +3548,9 @@ model BrickComputer {
   controlEpoch      Int       @default(0) @map("control_epoch")
   controlLeaseUntil DateTime? @map("control_lease_until")
   humanInputUntil   DateTime? @map("human_input_until")
+  /// The honest check before a take over (post 0.5.0, 1B). `blocked`: the fence ran and a program the agent left behind is still running (the person is asked: Restart first, or Take over anyway); `restarting`: the person chose Restart first and the computer is being restarted;
+  /// `running`: the person took over anyway, with such a program still running. Null otherwise. Cleared when control goes back to Brick.
+  takeOverCheck     String?   @map("take_over_check") @db.VarChar(10)
   // Set when a job ended while its first turn (marked as sent, never named) may still run on this machine: no job or turn starts here until the machine is proved asleep, and the sweep keeps trying
   turnUnprovenSince DateTime? @map("turn_unproven_since")
   /// The job whose pause committed and whose browser (its sign-ins) is not put away yet (GPT round 6, finding 7): while it is set no other job starts on this machine, so a job never gets another's sign-ins. The
@@ -3383,6 +3558,11 @@ model BrickComputer {
   parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
   /// The wake ticket (round 8, B1): every write that sets the machine waking or restoring takes the next number, and an external stop or a late success counts only while its own number is still the Brick's.
   wakeEpoch         Int       @default(0) @map("wake_epoch")
+  /// The take-over fence's starting mark, held here and not on the computer (root-agent item 3A): this boot's id, the kernel's clock reading when the computer was made ready (ticks since boot), the computer's own parts (pid, start tick, kind) and the fingerprints of Agent37's command runner. Taken once per boot; the parts are saved again after each restart Orbit does itself.
+  markBootId        String?   @map("mark_boot_id") @db.VarChar(36)
+  markTicks         BigInt?   @map("mark_ticks")
+  markParts         Json?     @map("mark_parts")
+  markRunners       Json?     @map("mark_runners")
   /// Set when a second pause lands while one still waits for its browser to be put away: the browser is then emptied, never put away under either job's name (CodeRabbit on #1025). Cleared with the pointer.
   parkPendingWipe   Boolean   @default(false) @map("park_pending_wipe")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
@@ -3565,6 +3745,10 @@ model ComputerJob {
   // Seconds the machine was held for this job, and when the current stretch began, so cost is worked out from what ran
   secondsRun     Int       @default(0) @map("seconds_run")
   stretchStarted DateTime? @map("stretch_started")
+  /// Post-0.5.0 B: the last moment this job's machine was proved awake under its billed stretch (null = only the readiness that began it). A machine found asleep ends the stretch here.
+  awakeProvedAt  DateTime? @map("awake_proved_at")
+  /// Only the seconds a machine was proved awake were priced (found asleep at an ending): the moment of that proof. The time is priced over a window that ends here, not where it was found; null = priced to `ended_at`.
+  pricedUntil    DateTime? @map("priced_until")
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   endedAt        DateTime? @map("ended_at")
@@ -3609,6 +3793,13 @@ model ComputerJob {
   ownerRun          String? @map("owner_run") @db.VarChar(40)
   /// Moves up on every claim, every renewal, every change of control and every start or end of a wait: a sweep that picked a job from a list compares it again under the job's lock, so a job that moved since is never ended on the strength of an older look.
   leaseVersion      Int     @default(0) @map("lease_version")
+  /// The honest check before a take over (post 0.5.0, 1B): how many times this job's computer was restarted at the person's choice, when the restart of the ask that is open now was done (null once the person has handed back, so the
+  /// next ask can offer a restart again: one per ask), and the ask that was open then (what Brick waited for, what it was ready to put in and where), so Brick asks again with the SAME words once its page is ready again.
+  restarts          Int       @default(0)
+  restartedAt       DateTime? @map("restarted_at")
+  restartKind       String?   @map("restart_kind") @db.VarChar(10)
+  restartWhat       String?   @map("restart_what") @db.VarChar(150)
+  restartWhere      String?   @map("restart_where") @db.VarChar(150)
 
   // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
@@ -3731,6 +3922,8 @@ model ComputerJobPause {
   seconds   Int       @default(0)
   startedAt DateTime? @map("started_at")
   at        DateTime
+  /// A `machine` pause priced only the seconds the machine was proved awake: the moment of that proof. The room and the books price the time over a window that ends here, not at `at`; null = priced to `at`.
+  pricedUntil DateTime? @map("priced_until")
   bookedAt  DateTime? @map("booked_at")
   /// When the job ran again after this pause (its next start on the machine, however it was resumed); null while it has not.
   resumedAt DateTime? @map("resumed_at")
@@ -4103,6 +4296,7 @@ model InstantRun {
   @@index([providerState, createdAt])
   @@index([personId, createdAt])
   @@index([personId, argsHash, state])
+  @@index([personId, taskKey])
   @@map("instant_runs")
 }
 
@@ -4191,6 +4385,20 @@ model ComputerJobCommand {
   @@index([jobId])
   @@index([botId, createdAt])
   @@map("computer_job_commands")
+}
+
+/// Post-0.5.0 B: a stop or sleep Orbit sent to a Brick's machine, written before the call. Open (no `done_at`, a recent beat) = it can still land; no wake of the same machine is admitted meanwhile.
+model ComputerPowerOp {
+  id          String    @id @default(uuid())
+  botId       String    @map("bot_id")
+  providerRef String    @map("provider_ref") @db.VarChar(255)
+  kind        String    @db.VarChar(10)
+  sentAt      DateTime  @map("sent_at")
+  beatAt      DateTime  @map("beat_at")
+  doneAt      DateTime? @map("done_at")
+
+  @@index([sentAt], map: "computer_power_ops_sent_idx")
+  @@map("computer_power_ops")
 }
 
 model ComputerStartAttempt {

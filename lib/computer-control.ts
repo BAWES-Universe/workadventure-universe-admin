@@ -27,7 +27,12 @@ export type Transition = 'fencing' | 'returning';
 
 /** Tunable only so tests need not wait in real time. */
 export const CONTROL_TIMING = {
-  /** How long a leader holds a transition before another request may finish it. Longer than the slowest fence (3 tries of two 30 s commands, then a stop). */
+  /**
+   * How long a leader holds a transition before another request may finish it. A leader pushes its lease on (`renewTransition`, through the fence's `stillLeader`) before each try of the fence
+   * and about every 30 seconds while it waits for the clean or files claim (those waits may last about 3 and 4 minutes, longer than this lease together). The longest gap between two renewals is
+   * one try of the fence: two commands of 30 s each, about 60 s, or the stop after the last try; the lease only has to outlast that. A leader that is slower than that, or whose server stopped, is
+   * taken over by the next request, and one that learns it lost the transition sends nothing more (the fence answers `lost`).
+   */
   leaseMs: 5 * 60 * 1000,
   /** How long a request that joins a transition waits for it before it says it is still going. */
   joinMs: 45_000,
@@ -51,6 +56,15 @@ const asState = (value: string): ControlState => (value === 'fencing' || value =
 export async function readControl(botId: string): Promise<Control | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { controlState: true, controlEpoch: true, controlLeaseUntil: true, humanInputUntil: true } });
   return row ? { state: asState(row.controlState), epoch: row.controlEpoch, leaseUntil: row.controlLeaseUntil, humanInputUntil: row.humanInputUntil } : null;
+}
+
+/**
+ * The control and the take-over check as ONE read: a request that reads them in two steps can see the control from before another request's step and the check from after it, and so
+ * answer a second tap "not offered" while the first is starting the restart (CodeRabbit on #1034, finding 3).
+ */
+export async function readControlAndCheck(botId: string): Promise<(Control & { check: string | null }) | null> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { controlState: true, controlEpoch: true, controlLeaseUntil: true, humanInputUntil: true, takeOverCheck: true } });
+  return row ? { state: asState(row.controlState), epoch: row.controlEpoch, leaseUntil: row.controlLeaseUntil, humanInputUntil: row.humanInputUntil, check: row.takeOverCheck ?? null } : null;
 }
 
 /** A transition with no lease, or a lease that ran out, is one whose leader is gone (or gave up): anyone may finish it. */
@@ -91,9 +105,16 @@ export async function renewTransition(botId: string, state: Transition, epoch: n
   return count === 1;
 }
 
-/** The transition ends in its next state. Only the epoch it began with can end it, so a leader that was taken over cannot undo a later one. */
-export async function finishTransition(botId: string, state: Transition, epoch: number, to: 'agent' | 'human_ready'): Promise<boolean> {
-  const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: state, controlEpoch: epoch }, data: { controlState: to, controlLeaseUntil: null } });
+/**
+ * The transition ends in its next state. Only the epoch it began with can end it, so a leader that was taken over cannot undo a later one.
+ * `check` (when given) is the take-over check the row has from now on, written in the SAME update: a leader that dies cannot leave the new state with the old check
+ * (a stale `anyway` or `running` that a later fence would read as a choice nobody made).
+ */
+export async function finishTransition(botId: string, state: Transition, epoch: number, to: 'agent' | 'human_ready', check?: string | null): Promise<boolean> {
+  const { count } = await prisma.brickComputer.updateMany({
+    where: { botId, controlState: state, controlEpoch: epoch },
+    data: { controlState: to, controlLeaseUntil: null, ...(check === undefined ? {} : { takeOverCheck: check }) },
+  });
   return count === 1;
 }
 
@@ -187,7 +208,7 @@ export async function releaseIfUnheld(botId: string): Promise<boolean> {
   }
   // No jobs to hand back: only a hand back whose lease has run out (nobody is finishing it) is ended here
   if (control.state === 'returning' && leaseLapsed(control)) {
-    const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: 'returning', controlEpoch: control.epoch, controlLeaseUntil: control.leaseUntil }, data: { controlState: 'agent', controlLeaseUntil: null } });
+    const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: 'returning', controlEpoch: control.epoch, controlLeaseUntil: control.leaseUntil }, data: { controlState: 'agent', controlLeaseUntil: null, takeOverCheck: null } });
     if (count === 1) return true;
   }
   return (await readControl(botId))?.state === 'agent';

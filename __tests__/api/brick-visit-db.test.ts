@@ -21,7 +21,7 @@ import { checkBotAccess } from '@/lib/bot-access';
 import { checkKeyForOthers } from '@/lib/ai-key-pay';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
-import { endStaleVisits, keepVisitAlive, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
+import { brickIsHereFor, endStaleVisits, keepVisitAlive, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
 import { mayReadRoomBots, whoMayReadRoomBots } from '@/lib/bot-room-access';
 import { GET as getVisit, POST as postVisit, DELETE as deleteVisit } from '@/app/api/bricks/[id]/visit/route';
 import { POST as roomFeed } from '@/app/api/brick-visits/room/route';
@@ -885,6 +885,52 @@ run('bringing a Brick along, in a real database', () => {
       expect(await alive.json()).toEqual({ alive: true });
       await prisma.brickVisit.deleteMany({ where: { userId: sara.id } });
       expect(await (await seenFeed(call('POST', '/api/brick-visits/seen', body, service))).json()).toEqual({ alive: false });
+    });
+  });
+
+  describe('coming into the room it visits as one of its bots (a visiting Brick joining the map)', () => {
+    const lets = (roomUrl = universes.open.roomUrl) => brickIsHereFor(brickId, roomUrl);
+
+    it('is let in to the room it is seen in, and to no other', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await lets()).toBe(true);
+      expect(await lets(universes.second.roomUrl)).toBe(false);
+    });
+
+    it('is refused once the visit has run out, though the row is still there', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 11 * MIN) } });
+      expect(await lets()).toBe(false);
+    });
+
+    it('is refused when the universe stops taking visiting Bricks', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: false } });
+      expect(await lets()).toBe(false);
+    });
+
+    it('is refused when its owner may not open the room (a members-only place they are not a member of)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await lets()).toBe(true);
+      await prisma.universe.update({ where: { id: universes.open.id }, data: { isPublic: false } });
+      try {
+        expect(await lets()).toBe(false);
+      } finally {
+        await prisma.universe.update({ where: { id: universes.open.id }, data: { isPublic: true } });
+      }
+    });
+
+    it('is refused when its owner is a guest, and when it is off or waits deleted', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.user.update({ where: { id: sara.id }, data: { isGuest: true } });
+      try {
+        expect(await lets()).toBe(false);
+      } finally {
+        await prisma.user.update({ where: { id: sara.id }, data: { isGuest: false } });
+      }
+      expect(await lets()).toBe(true);
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: false } });
+      expect(await lets()).toBe(false);
     });
   });
 

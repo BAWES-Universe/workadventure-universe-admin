@@ -19,7 +19,9 @@ import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable, type OwnerNote } from '@/lib/app-share';
 import { revokeGitHub } from '@/lib/github/connection';
+import { ensureAppActions } from '@/lib/app-actions/catalog';
 import { appCallIsPaused } from '@/lib/capability-pause';
+import { ownCopyOf, ownGrantsOf } from '@/lib/app-same';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -178,6 +180,9 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
 
   if (!connection.ownerId || !ownsBrick(row.bot, connection.ownerId)) return refuse('gone');
   if (!row.enabled) return refuse('off');
+  // The person's own copy of this App works and is on for this Brick (lib/app-same.ts): it comes first, so the ready-made copy is as good as
+  // off here and nothing is sent to it or paid for, whatever a bot server that does not read `ownCopyServerId` asks
+  if (connection.source === 'ready_made' && ownCopyOf(await ownGrantsOf(botId, (own) => connectedState(own).connected), { key: connection.providerToolkit, name: connection.name })) return refuse('off');
   const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' || connection.source === 'github' ? { readyMade: true } : {}) };
   if (input.forOwner === true) return allowed;
   const asker = input.requesterKey ? await findUserByIdentifier(input.requesterKey) : null;
@@ -420,8 +425,9 @@ export async function grantToBrick(ownerId: string, connectionId: string, botId:
   // A key app's grant carries no way in at all (effectiveServer): this is also how a Brick taken off it gets it back
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   if (!bot || !ownsBrick(bot, ownerId)) return null;
+  let grant: BotMcpServer;
   try {
-    return await prisma.botMcpServer.create({
+    grant = await prisma.botMcpServer.create({
       // The link is the connection's and is never copied: the column is not null, so it stays empty here and is read through effectiveServer
       data: {
         botId,
@@ -440,6 +446,10 @@ export async function grantToBrick(ownerId: string, connectionId: string, botId:
     }
     throw error;
   }
+  // A ready-made App's list of actions is read now (in the background, never a reason the grant fails), so the grant's first read as
+  // actions (the bot server's or the Brick's screen, `?actions=1`) finds it there
+  if (connection.source === 'ready_made' && connection.providerToolkit) void ensureAppActions(connection.providerToolkit);
+  return grant;
 }
 
 /**

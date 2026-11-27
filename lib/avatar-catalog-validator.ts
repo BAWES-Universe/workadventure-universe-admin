@@ -8,6 +8,7 @@
 
 import { PrismaClient } from '@prisma/client'
 import { getWokaList, getCompanions } from '@/lib/wokas'
+import { brickSpriteTexture } from '@/lib/brick-sprites'
 import type { WokaList, WokaDetail, CompanionDetail } from '@/types/workadventure'
 
 export interface TextureValidationResult {
@@ -45,7 +46,7 @@ export async function resolveTextureUrls(
   // Fallback to static JSON if no catalog sets exist
   if (catalogSetCount === 0) {
     const wokaList = getWokaList(playServiceUrl)
-    return validateTexturesFromStatic(textureIds, wokaList)
+    return validateTexturesFromStatic(textureIds, wokaList, playServiceUrl)
   }
 
   // Build scope filter
@@ -111,7 +112,7 @@ export async function resolveTextureUrls(
     if (!match) {
       // Texture not found in any active catalog set — check fallback
       const wokaList = getWokaList(playServiceUrl)
-      const fallbackResult = validateTexturesFromStatic([textureId], wokaList)
+      const fallbackResult = validateTexturesFromStatic([textureId], wokaList, playServiceUrl)
       if (fallbackResult.valid && fallbackResult.textures.length > 0) {
         resolvedTextures.push(fallbackResult.textures[0])
       } else {
@@ -200,11 +201,14 @@ export async function resolveCompanionTexture(
 
 /**
  * Validates texture IDs against the static WokaList (from config/woka.json).
- * Used as fallback when no catalog sets exist.
+ * Used as fallback when no catalog sets exist, and for what the catalog tables do not hold: the twelve Brick looks (a
+ * Brick's map sprite, lib/brick-sprites.ts). Whether a person may wear a texture is a different check (woka-wearable.ts)
+ * that knows nothing of the Brick looks, so they are never a person's Woka.
  */
 function validateTexturesFromStatic(
   textureIds: string[],
-  wokaList: WokaList
+  wokaList: WokaList,
+  playServiceUrl: string
 ): TextureValidationResult {
   const textureMap = new Map<string, WokaDetail>()
 
@@ -220,8 +224,13 @@ function validateTexturesFromStatic(
   const resolved: WokaDetail[] = []
   for (const id of textureIds) {
     const match = textureMap.get(id)
-    if (!match) return { valid: false, textures: [] }
-    resolved.push(match)
+    if (match) {
+      resolved.push(match)
+      continue
+    }
+    const brick = brickSpriteTexture(id, playServiceUrl)
+    if (!brick) return { valid: false, textures: [] }
+    resolved.push({ id: brick.id, name: brick.name, url: brick.url, layer: [] })
   }
 
   return { valid: true, textures: resolved }

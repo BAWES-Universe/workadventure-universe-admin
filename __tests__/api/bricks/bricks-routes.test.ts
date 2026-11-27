@@ -17,7 +17,8 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { ensureDefaultBrick, isDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
-import { makeBrick } from '@/lib/brick-make';
+import { makeBrickOnce } from '@/lib/brick-make';
+import { BrickRequestKeyUsed, NewBricksLimit } from '@/lib/brick-new-limit';
 import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
@@ -27,6 +28,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
+    userPreference: { findUnique: jest.fn() },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   },
@@ -45,14 +47,14 @@ jest.mock('@/lib/brick-default', () => ({
 jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn(), recentlyRemovedBricks: jest.fn(async () => []) }));
 jest.mock('@/lib/brick-visit', () => ({ endStaleVisits: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-home', () => ({ dropHomesWithoutAccess: jest.fn(async () => 0) }));
-jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrick: jest.fn() }));
+jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrickOnce: jest.fn() }));
 jest.mock('@/lib/bot-limits', () => ({ ...jest.requireActual('@/lib/bot-limits'), getBrickLimits: jest.fn(async () => ({ undoDays: 7, offerAfter: 3 })) }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/ai-provider-ref', () => ({ checkAiProviderRef: jest.fn(async () => null), checkBotModel: jest.fn(async () => null) }));
 jest.mock('@/lib/bot-vision', () => ({ ...jest.requireActual('@/lib/bot-vision'), checkConfigVision: jest.fn(async () => null), dropOthersVisionKey: jest.fn(async () => null) }));
 jest.mock('@/lib/notices', () => ({ ...jest.requireActual('@/lib/notices'), clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 
-const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock>; $queryRaw: jest.Mock; $transaction: jest.Mock };
+const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock>; userPreference: Record<'findUnique', jest.Mock>; $queryRaw: jest.Mock; $transaction: jest.Mock };
 const session = getSessionUser as jest.Mock;
 const ensure = ensureDefaultBrick as jest.Mock;
 const list = listBricks as jest.Mock;
@@ -61,7 +63,7 @@ const isDefault = isDefaultBrick as jest.Mock;
 const remove = deleteBrick as jest.Mock;
 const undo = undoBrickDelete as jest.Mock;
 const removeGone = removeGoneBricks as jest.Mock;
-const make = makeBrick as jest.Mock;
+const make = makeBrickOnce as jest.Mock;
 
 const ADMIN_TOKEN = 'admin-secret';
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -235,7 +237,7 @@ describe('GET /api/bricks: a person’s own Bricks', () => {
 });
 
 describe('POST /api/bricks: New Brick (game #1996)', () => {
-  beforeEach(() => make.mockResolvedValue(madeCard));
+  beforeEach(() => make.mockResolvedValue({ brick: madeCard, created: true }));
 
   it('makes a Brick for the person who asks and answers with its card', async () => {
     const response = await makeMine(
@@ -244,12 +246,48 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toEqual({ brick: madeCard });
     expect(make).toHaveBeenCalledTimes(1);
-    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Recipe Brick', characterTextureId: 'brick-red', description: 'Keeps your mum’s recipes', hello: 'Send me the first recipe.' });
+    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Recipe Brick', characterTextureId: 'brick-red', description: 'Keeps your mum’s recipes', hello: 'Send me the first recipe.' }, undefined, undefined);
   });
 
   it('needs only a name', async () => {
     expect((await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick' } }))).status).toBe(201);
-    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Teal Brick' });
+    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Teal Brick' }, undefined, undefined);
+  });
+
+  it('passes the request key on, and answers 200 with the first Brick when the same request comes again', async () => {
+    make.mockResolvedValue({ brick: madeCard, created: false });
+    const response = await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick', requestKey: ' key-1 ' } }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ brick: madeCard });
+    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Teal Brick' }, undefined, 'key-1');
+  });
+
+  it('refuses an empty or too long request key, and a key that came back for another Brick', async () => {
+    for (const requestKey of ['  ', 'x'.repeat(201)]) {
+      expect((await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick', requestKey } }))).status).toBe(400);
+    }
+    expect(make).not.toHaveBeenCalled();
+    make.mockRejectedValue(new BrickRequestKeyUsed());
+    expect((await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick', requestKey: 'key-1' } }))).status).toBe(409);
+  });
+
+  it('turns the person away kindly over the hour’s limit: 429, the real time in their own clock, retryAt and Retry-After', async () => {
+    const retryAt = new Date(Date.now() + 25 * 60 * 1000);
+    make.mockRejectedValue(new NewBricksLimit(retryAt, 30));
+    (db.userPreference.findUnique as jest.Mock).mockResolvedValue({ value: 'Asia/Kuwait' });
+    const response = await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick' } }));
+    expect(response.status).toBe(429);
+    const body = await response.json();
+    const clock = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kuwait' }).format(new Date(Math.ceil(retryAt.getTime() / 60_000) * 60_000)).replace(/[\u202f\u00a0]/g, ' ');
+    expect(body).toEqual({ error: `You've made a lot of Bricks this hour. Try again at ${clock}.`, code: 'new_bricks_limit', retryAt: retryAt.toISOString(), limit: 30 });
+    expect(Number(response.headers.get('Retry-After'))).toBeGreaterThan(24 * 60);
+  });
+
+  it('says the minutes when no time zone is kept for the person', async () => {
+    make.mockRejectedValue(new NewBricksLimit(new Date(Date.now() + 25 * 60 * 1000 - 500), 30));
+    (db.userPreference.findUnique as jest.Mock).mockResolvedValue(null);
+    const body = await (await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick' } }))).json();
+    expect(body.error).toBe("You've made a lot of Bricks this hour. Try again in 25 minutes.");
   });
 
   it('saves its look, the way it is checked when a Brick is made: a Brick look or a WOKA id, never empty or too long', async () => {

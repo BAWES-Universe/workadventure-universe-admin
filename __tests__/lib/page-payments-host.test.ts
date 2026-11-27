@@ -10,7 +10,7 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r', indexedDB?: Pick<IDBFactory, 'open'> | null, tabStorage?: Map<string, string>) {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r', indexedDB?: Pick<IDBFactory, 'open'> | null, tabStorage?: Map<string, string>, version?: number) {
   jest.useFakeTimers();
   // A browser with Web Locks (one tab at a time per name) unless the test is about one without
   if (withLocks && !(globalThis as { navigator?: { locks?: unknown } }).navigator?.locks) {
@@ -42,6 +42,7 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     pageUrl: PAGE,
     indexedDB,
     tabStorage: tabStorage ? { getItem: (key) => tabStorage.get(key) ?? null, setItem: (key, value) => void tabStorage.set(key, value) } : undefined,
+    version,
   });
   const lines: PayLine[] = [];
   host.subscribe((line) => lines.push(line));
@@ -904,6 +905,39 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(unsure.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
     unsure.host.destroy();
+    // The owner changed the payment on a version this link does not show yet (O2): definite, the line says why, the page hears only unavailable
+    const unpublished = setup(() => ({ status: 409, body: { code: 'not_published' } }));
+    unpublished.tap({ request: 'a' });
+    await flush();
+    expect(unpublished.lines.at(-1)).toMatchObject({ problem: 'not_published', canCheck: false });
+    expect(unpublished.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' }]);
+    unpublished.host.destroy();
+    // The page open here is older than the published one the payment was set on: the line says to reload, the page hears only unavailable
+    const changed = setup(() => ({ status: 409, body: { code: 'page_changed' } }));
+    changed.tap({ request: 'a' });
+    await flush();
+    expect(changed.lines.at(-1)).toMatchObject({ problem: 'page_changed', canCheck: false });
+    expect(changed.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' }]);
+    changed.host.destroy();
+    // An unsure refusal stays a payment that may exist, whatever its code
+    const unsureCode = setup(() => ({ status: 409, body: { code: 'not_published', unsure: true } }));
+    unsureCode.tap({ request: 'a' });
+    await flush();
+    expect(unsureCode.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    unsureCode.host.destroy();
+  });
+
+  it('sends the version the page shows with a start, and only with a start', async () => {
+    const shown = setup(() => ({ body: { orderId: 'o1', checkoutUrl: 'https://checkout.example/pay' } }), true, undefined, true, 'r', undefined, undefined, 3);
+    shown.tap({ request: 'a' });
+    await flush();
+    expect(shown.calls[0].body).toMatchObject({ shownVersion: 3 });
+    shown.host.destroy();
+    const old = setup(() => ({ body: { orderId: 'o1', checkoutUrl: 'https://checkout.example/pay' } }));
+    old.tap({ request: 'a' });
+    await flush();
+    expect(old.calls[0].body).not.toHaveProperty('shownVersion');
+    old.host.destroy();
   });
 
   it('keeps asking Restore, not the order, while the buyer’s own unfinished start cannot be carried on yet, and takes its link when it comes', async () => {

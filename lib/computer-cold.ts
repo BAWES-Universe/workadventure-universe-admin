@@ -6,8 +6,10 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
+import { recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
+import { readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import {
   archiveById,
   archiveBytes,
@@ -194,6 +196,12 @@ async function settleColdLevels(now: Date): Promise<number> {
 
 // ---------- Proof on a throwaway computer ----------
 
+/** The list of what was outside the home folder when the copy was made, as its row kept it (null for a copy made before it was kept, or a row that does not hold exactly one). */
+function outsideOf(archive: ArchiveRow): OutsideManifest | null {
+  const kept = archive.manifest;
+  return readOutsideManifest(typeof kept === 'object' && kept !== null ? (kept as { outside?: unknown }).outside : null);
+}
+
 /** Restores one copy on a throwaway computer, checks it, and removes the computer (and says so when it could not). Never leaves the computer behind knowingly. */
 async function proveOnScratch(provider: Cold, archive: ArchiveRow, kind: 'pack' | 'drill', botId: string): Promise<RestoreResult> {
   const url = downloadUrl(archive.id);
@@ -208,7 +216,7 @@ async function proveOnScratch(provider: Cold, archive: ArchiveRow, kind: 'pack' 
       provider,
       async () => {
         scratch = await provider.makeScratch();
-        const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string });
+        const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string, outside: outsideOf(archive) });
         return result;
       },
       (result) => (result.ok ? null : `the restore did not check out (${result.reason ?? 'unknown'})`),
@@ -241,23 +249,41 @@ async function advance(botId: string, claimId: string, from: string, to: string,
   return moved.count === 1;
 }
 
+/**
+ * Records the pack-away's stop with the computer's row locked, and only while the row still says this run holds the pack-away of this machine (`packing`, this provider ref, this claim). A run whose claim was taken over, or whose
+ * machine was given up or replaced, between its last write and this one records nothing (null), so it sends nothing: the run that holds the claim now decides what happens to the machine.
+ */
+async function recordStopWhilePacking(botId: string, ref: string, claimId: string): Promise<string | null> {
+  return prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ one: number }>>`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} AND "machine" = 'packing' AND "provider_ref" = ${ref} AND "pack_claim_id" = ${claimId} FOR UPDATE`;
+    return held.length === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
+  }, rowLockWait());
+}
+
 /** Gives the computer back as it was. `awake` leaves it as it is (a job is arriving for it); otherwise it is put to sleep and proved so. */
 async function giveUp(botId: string, row: PackRow, why: string, options: { awake: boolean; count: boolean; provider?: Cold; stage?: string; claimId: string }): Promise<'failed' | 'busy'> {
   const previous = row.packPrevious === 'stopped' ? 'stopped' : 'resting';
-  const given = await prisma.brickComputer.updateMany({
-    // Only the run that holds the claim (a run that was taken over changes nothing of the one that took over), and `stage`: a run that only holds
-    // an earlier step gives up only while the row is still at that step (another run may be past it)
-    where: { botId, machine: 'packing', packClaimId: options.claimId, ...(options.stage ? { packStage: options.stage } : {}) },
-    data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
-  });
+  const stopRef = !options.awake && row.providerRef && options.provider ? row.providerRef : null;
+  // The stop it sends is recorded in the same commit as the give-up (post-0.5.0 B): a job that wakes the machine after this sees the stop open and waits for it
+  const given = await prisma.$transaction(async (tx) => {
+    const done = await tx.brickComputer.updateMany({
+      // Only the run that holds the claim (a run that was taken over changes nothing of the one that took over), and `stage`: a run that only holds
+      // an earlier step gives up only while the row is still at that step (another run may be past it)
+      where: { botId, machine: 'packing', packClaimId: options.claimId, ...(options.stage ? { packStage: options.stage } : {}) },
+      data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
+    });
+    return { count: done.count, op: done.count === 1 && stopRef ? await recordPowerOpIn(tx, botId, stopRef, 'stop') : null };
+  }, rowLockWait());
   // Not given up here (the claim is someone else's now): nothing is stopped, nothing is reported, the one that holds it goes on
   if (given.count !== 1) return 'busy';
-  if (!options.awake && row.providerRef && options.provider) {
+  if (stopRef && given.op && options.provider) {
     // Asleep and proved, as everywhere else: a stop that did not take stays `stopping` and every sweep goes on until it does
-    const ref = row.providerRef;
-    await options.provider.stop(ref).catch(() => undefined);
-    const asleep = await options.provider.awake(ref).then((awake) => !awake).catch(() => false);
-    if (asleep) await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'stopping' }, data: { machine: 'stopped' } });
+    const cold = options.provider;
+    const asleep = await underPowerOp(given.op, async (late) => {
+      await cold.stop(stopRef).catch(() => late.mayLand());
+      return cold.awake(stopRef).then((awake) => !awake).catch(() => false);
+    });
+    if (asleep) await prisma.brickComputer.updateMany({ where: { botId, providerRef: stopRef, machine: 'stopping' }, data: { machine: 'stopped' } });
   }
   if (options.count) {
     console.error(`[Computer] A computer was not packed away: ${why}`);
@@ -328,13 +354,17 @@ async function runPack(botId: string, provider: Cold, claimId: string): Promise<
       // Awake, so it can be looked at and its folder read; nothing else is started on it
       await alive(botId, claimId, 'claimed', () => timed('pack', botId, ref, false, provider, async () => {
         await provider.wake(ref);
-        const inventory: PackInventory = await provider.prepack(ref);
+        const { outside, ...inventory }: PackInventory = await provider.prepack(ref);
         if (inventory.blocked) throw new ColdError(inventory.blocked, 'blocked');
         const stream = await provider.streamFiles(ref);
-        const archive = await storeArchive(botId, stream, { manifest: { inventory, from: ref, at: new Date().toISOString() } });
+        // What prepack printed about the files it copied is kept with the copy (`outside`): the restore hands it to finish, which puts back only what matches it
+        const archive = await storeArchive(botId, stream, { manifest: { inventory, outside: outside ?? null, from: ref, at: new Date().toISOString() } });
         if (!(await advance(botId, claimId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
         // The copy is whole: the computer sleeps while it is proved (it only has to exist until the proof passes)
-        await provider.stop(ref).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
+        // Recorded as a power operation like every stop of ours (post-0.5.0 B); a stop that could not be recorded is not sent (the proof does not need the machine asleep)
+        // Only while this run still holds the claim: one that lost it between the move to `stored` and this write must not record or send a stop (CodeRabbit on #1040)
+        const op = await recordStopWhilePacking(botId, ref, claimId).catch(() => null);
+        if (op) await underPowerOp(op, () => provider.stop(ref)).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
       }));
       row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
     }
@@ -538,9 +568,13 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         throw new ColdError('The return was taken over', 'busy');
       }
       let result: RestoreResult;
+      // A throw is the computer's trouble (the current script could not be put on it, it could not be reached), and says nothing about this copy: the return ends here, the computer is removed, and the
+      // Brick goes back to cold to be tried again later with the NEWEST copy. Only a result that says the copy did not check out moves on to the older copy
+      let threw = false;
       try {
-        result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '' });
+        result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '', outside: outsideOf(archive) });
       } catch (error) {
+        threw = true;
         result = { ok: false, reason: words(error), ms: 0 };
       }
       if (result.ok) {
@@ -557,7 +591,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         return { ref: made.ref, from: archive.createdAt, olderCopyUsed: at > 0 };
       }
       lastReason = result.reason ?? 'unknown';
-      console.error(`[Computer] A copy did not restore (${lastReason})${at + 1 < archives.length ? '; the older one is tried' : ''}`);
+      console.error(`[Computer] A copy did not restore (${lastReason})${!threw && at + 1 < archives.length ? '; the older one is tried' : ''}`);
       // A computer with half a restore is never used: it is removed, and the next copy goes on a fresh one. A return that was taken over meanwhile leaves
       // the computer to the one that took over (the provider hands the same machine to the next return for this Brick)
       try {
@@ -569,6 +603,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
         console.error('[Computer] Could not remove a half-restored computer:', words(error));
         throw new ColdError(`The copy did not restore (${lastReason}) and its computer could not be removed yet`, 'restore');
       }
+      if (threw) return giveBack(new ColdError(`The computer could not be made ready for the copy (${lastReason})`, 'restore'));
     }
     return giveBack(new ColdError(`No copy restored (${lastReason})`, 'restore'));
   }, 'restoring');

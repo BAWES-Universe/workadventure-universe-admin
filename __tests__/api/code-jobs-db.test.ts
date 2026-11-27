@@ -17,6 +17,7 @@ jest.mock('@/lib/workbench/state', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { ensureAppActionTools } from '@/lib/app-actions/grant';
 import { saveMeterSettings } from '@/lib/meter';
 import { AdapterError } from '@/lib/app-adapter/types';
 import { readCodeJobsBudget } from '@/lib/workbench/budget';
@@ -178,18 +179,20 @@ run('code jobs for Apps, in a real database', () => {
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
     await saveReadyMadeApps({ apps: { [KEY]: { name: 'Crm', authConfigId: 'ac_1', enabled: true } } }, boss);
     connectionId = (await createConnection(sara, { name: 'Crm', serverUrl: `https://mcp.example/${tag}/mcp`, authType: 'none', authConfig: undefined, source: 'ready_made', providerToolkit: KEY, providerAccountId: `ca_${tag}` })).id;
-    // The Brick's grant on the connection, with its tools as the bot server and a person left them: reads are gated by these
-    const serverRow = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Crm', serverUrl: 'https://mcp.example/unused', enabled: true } });
-    serverId = serverRow.id;
+    // The App's actions as Universe sorted them (lib/app-actions): the Brick's grant takes them as its rows, and reads are gated by these
     const U = KEY.toUpperCase();
-    const confirmed = new Date();
-    await prisma.botMcpTool.createMany({
+    await prisma.appAction.createMany({
       data: [
-        ...['LIST', 'LIST_CONTACTS', 'GET'].map((name) => ({ serverId, name: `${U}_${name}`, fingerprint: `f-${name}`, heading: 'looksUp', confirmedAt: confirmed })),
-        { serverId, name: `${U}_DELETE`, fingerprint: 'f-delete', heading: 'deletesOrSends', confirmedAt: confirmed },
-        { serverId, name: `${U}_NEW`, fingerprint: 'f-new', heading: 'looksUp', confirmedAt: null },
+        ...['LIST', 'LIST_CONTACTS', 'GET'].map((name, position) => ({ toolkit: KEY, slug: `${U}_${name}`, title: name, heading: 'looksUp', source: 'tag', position })),
+        { toolkit: KEY, slug: `${U}_DELETE`, title: 'Delete', heading: 'deletesOrSends', source: 'name', position: 3 },
+        { toolkit: KEY, slug: `${U}_NEW`, title: 'New', heading: 'makesNew', source: 'tag', position: 4 },
       ],
     });
+    await prisma.appActionCatalog.create({ data: { toolkit: KEY, refreshedAt: new Date(), actionCount: 5 } });
+    const serverRow = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Crm', serverUrl: 'https://mcp.example/unused', enabled: true } });
+    serverId = serverRow.id;
+    // Brought over to the App's actions, as the first read of a bot server that knows them does
+    await ensureAppActionTools(serverId);
   });
 
   beforeEach(async () => {
@@ -221,6 +224,8 @@ run('code jobs for Apps, in a real database', () => {
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
+    await prisma.appAction.deleteMany({ where: { toolkit: KEY } });
+    await prisma.appActionCatalog.deleteMany({ where: { toolkit: KEY } });
     await saveCodeJobLimits(CODE_JOB_LIMITS_RECOMMENDED, boss);
     await resumeCodeJobs(boss);
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, boss] } } });
@@ -493,7 +498,7 @@ run('code jobs for Apps, in a real database', () => {
       expect(JSON.parse(Buffer.from(put[0].bytes).toString('utf8'))).toMatchObject({ rows: [1, 2, 3] });
     });
 
-    it('runs only a tool the Brick may run right away: not one that is off, asks first, changes things, was never confirmed or is not on its list', async () => {
+    it('runs only a tool the Brick may run right away: not one that is off, asks first, changes or makes things, or is not on its list', async () => {
       const read: ReadRunner = jest.fn(async () => ({ ok: true, data: {} }));
       const U = KEY.toUpperCase();
       const refused = async (tool: string) => {
@@ -508,9 +513,15 @@ run('code jobs for Apps, in a real database', () => {
         await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: setting } });
         await refused(`${U}_LIST`);
       }
-      await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: 'rightAway', legacyText: true } });
-      await refused(`${U}_LIST`);
-      await prisma.botMcpServer.update({ where: { id: serverId }, data: { legacyText: false, enabled: false } });
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: 'rightAway' } });
+      // An action's own choice decides over its heading's, both ways
+      const list = await prisma.botMcpTool.findFirstOrThrow({ where: { serverId, name: `${U}_LIST` } });
+      for (const setting of ['asksFirst', 'off']) {
+        await prisma.botMcpTool.update({ where: { id: list.id }, data: { setting } });
+        await refused(`${U}_LIST`);
+      }
+      await prisma.botMcpTool.update({ where: { id: list.id }, data: { setting: null } });
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
       await refused(`${U}_LIST`);
       await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: true } });
       // A good one in the same request does not carry a bad one
@@ -522,6 +533,19 @@ run('code jobs for Apps, in a real database', () => {
       jobOf(await start({ code: 'x', reads: [{ tool: `${KEY}_list` }] }, { read }));
       await finishAll();
       expect(read).toHaveBeenCalledTimes(1);
+      // A look-up whose heading asks first runs when its own choice is Right away
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: 'asksFirst' } });
+      const get = await prisma.botMcpTool.findFirstOrThrow({ where: { serverId, name: `${U}_GET` } });
+      await prisma.botMcpTool.update({ where: { id: get.id }, data: { setting: 'rightAway' } });
+      try {
+        await refused(`${U}_LIST`);
+        jobOf(await start({ code: 'x', reads: [{ tool: `${U}_GET` }] }, { read }));
+        await finishAll();
+        expect(read).toHaveBeenCalledTimes(2);
+      } finally {
+        await prisma.botMcpTool.update({ where: { id: get.id }, data: { setting: null } });
+        await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: 'rightAway' } });
+      }
     });
 
     it('stops before any code runs when a read does not work, and when the data is over the Limit', async () => {

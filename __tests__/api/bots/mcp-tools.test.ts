@@ -183,7 +183,8 @@ describe('what each one does', () => {
     const response = await call(GET_TOOLS as Handler, 'GET');
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(TOOLS);
-    expect(lib.readServerTools).toHaveBeenCalledWith('bot-1', 'srv-1');
+    // A reader that does not ask for App actions sees a ready-made grant as it was
+    expect(lib.readServerTools).toHaveBeenCalledWith('bot-1', 'srv-1', { appActions: false });
   });
 
   it('moves a tool as the person who asked', async () => {

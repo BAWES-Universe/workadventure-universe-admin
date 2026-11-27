@@ -172,7 +172,7 @@ run('Connect GitHub for Bricks, in a real database', () => {
       else process.env.SUPER_ADMINS = adminsBefore;
     }
     forgetGitHubApp();
-    expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } });
+    expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: expect.any(Number) } });
   });
 
   it('a second setup page started before the app was made never replaces it; replacing it on purpose does', async () => {
@@ -213,6 +213,8 @@ run('Connect GitHub for Bricks, in a real database', () => {
     await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 123, slug: 'old', clientId: 'Iv1.old', htmlUrl: 'https://github.com/apps/old', secrets: 'cannot-be-decrypted' } } });
     forgetGitHubApp();
     const form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json();
+    // The page is told which app this form replaces: the kept one, though its secrets cannot be read
+    expect(form.replaces).toBe(123);
     const state = new URL(form.action).searchParams.get('state') as string;
     pretendGitHub({ 'POST https://api.github.com/app-manifests/fresh/conversions': { status: 201, body: { id: 124, slug: 'new', client_id: 'Iv1.new', client_secret: 'app-secret', webhook_secret: null, pem: PEM, html_url: 'https://github.com/apps/new' } } });
     const adminsBefore = process.env.SUPER_ADMINS;
@@ -234,7 +236,7 @@ run('Connect GitHub for Bricks, in a real database', () => {
     // The first look finds nothing (nothing was kept yet); another setup then saves its app. A second look would see that app and name it as the one to replace
     const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
     const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as never).mockImplementation(real as never);
-    let form: { action: string };
+    let form: { action: string; replaces: number | null };
     try {
       form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: { again: true } }))).json();
     } finally {
@@ -243,6 +245,8 @@ run('Connect GitHub for Bricks, in a real database', () => {
     const state = JSON.parse(decryptApiKey(new URL(form.action).searchParams.get('state') as string)) as { replaces: number | null };
     // Set out to make the first app: the return then refuses it (another setup finished first) instead of replacing that one
     expect(state.replaces).toBeNull();
+    // And the page is told the same: nothing to wait out but a new app
+    expect(form.replaces).toBeNull();
   });
 
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {

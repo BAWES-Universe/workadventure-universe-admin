@@ -15,6 +15,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
+jest.mock('@/lib/credit-funding', () => ({ rolloutThisMonth: jest.fn(async () => ({ issuedMicros: 18_250_000, notGivenPeople: 3 })) }));
 jest.mock('@/lib/meter', () => ({
   recordMeterEvent: jest.fn(),
   describeBot: jest.fn(),
@@ -184,6 +185,8 @@ describe('the meter’s settings', () => {
     expect(body.settings).toEqual(empty);
     expect(body.missing).toEqual(['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
     expect(body.ranges.renewMinutes).toEqual({ min: 1, max: 1440 });
+    // This month against the rollout budget, for its row: what was issued, and how many people it left out
+    expect(body.rollout).toEqual({ issuedMicros: 18_250_000, notGivenPeople: 3 });
   });
 
   it('save only what a change names, checked, and say what is still missing', async () => {

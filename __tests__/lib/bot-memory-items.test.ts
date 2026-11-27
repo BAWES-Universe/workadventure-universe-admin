@@ -239,3 +239,266 @@ describe('what was forgotten stays gone', () => {
     expect(withoutForgotten(memory, [])).toBe(memory);
   });
 });
+
+describe('taking out what was said plainly (favorites and short words)', () => {
+  const memoryWith = (preference: string, lines: Array<[string, string, number]>) => ({
+    personalInfo: { preferences: [preference], facts: [], heard: {}, drawnFrom: { [`pref:${preference}`]: lines.at(-1)![2] } },
+    conversationHistory: lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp })),
+  });
+  const forget = (data: ReturnType<typeof memoryWith>, preference: string) => {
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, preference)])).data as ReturnType<typeof memoryWith>;
+    return after.conversationHistory.map((line) => line.message);
+  };
+
+  it('forgetting a favorite looks for it as it is said ("pizza"), long or short', () => {
+    expect(
+      forget(
+        memoryWith('pizza (favorite food)', [
+          ['person', 'my favorite food is pizza', 1000],
+          ['bot', 'Pizza is your favorite food, got it!', 1500],
+          ['person', 'I walk a lot', 2000],
+          ['person', 'again, my favorite food is pizza', 3000],
+        ]),
+        'pizza (favorite food)',
+      ),
+    ).toEqual(['I walk a lot']);
+    expect(
+      forget(
+        memoryWith('tea (favorite drink)', [
+          ['person', 'my favorite drink is tea', 1000],
+          ['bot', 'Tea is your favorite drink!', 1500],
+          ['person', 'I walk a lot', 2000],
+          ['person', 'again, my favorite drink is tea', 3000],
+        ]),
+        'tea (favorite drink)',
+      ),
+    ).toEqual(['I walk a lot']);
+  });
+
+  it('forgetting a short like said twice takes the first line and what the bot says back, and keeps what only has the letters', () => {
+    expect(
+      forget(
+        memoryWith('tea', [
+          ['person', 'I like tea', 1000],
+          ['bot', 'Tea, you like it!', 1500],
+          ['person', 'I like steam rooms', 2000],
+          ['bot', 'Steam rooms are great', 2500],
+          ['person', 'I like tea a lot', 3000],
+        ]),
+        'tea',
+      ),
+    ).toEqual(['I like steam rooms', 'Steam rooms are great']);
+  });
+
+  it('forgetting a short dislike takes the lines that say it, as a like does', () => {
+    const data = {
+      personalInfo: { preferences: [], facts: [['dislike_tea_x', 'tea']], heard: {}, drawnFrom: { 'fact:dislike_tea_x': 3000 } },
+      conversationHistory: [
+        { sender: 'person', message: 'I hate tea', timestamp: 1000 },
+        { sender: 'bot', message: 'You hate tea, noted.', timestamp: 1500 },
+        { sender: 'person', message: 'I like steam rooms', timestamp: 2000 },
+        { sender: 'person', message: 'honestly I hate tea', timestamp: 3000 },
+      ],
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('fact', 'dislike_tea_x', 'tea')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I like steam rooms']);
+  });
+});
+
+describe('taking out every line that says a thing, said once or twice', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+  const after = (data: unknown, key: string) => (withoutItems(data, new Set([key])).data as { conversationHistory: Array<{ message: string }> }).conversationHistory.map((line) => line.message);
+
+  it('takes the first line of a long value said twice, for a name, a favorite and a dislike', () => {
+    const name = {
+      personalInfo: { name: 'Sara', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is Sara', 1000], ['bot', 'Hi Sara!', 1500], ['person', 'I walk a lot', 2000], ['person', 'call me Sara', 3000]]),
+    };
+    expect(after(name, memoryItemKey('name', null, 'Sara'))).toEqual(['I walk a lot']);
+    const dislike = {
+      personalInfo: { preferences: [], facts: [['dislike_coffee_x', 'coffee']], heard: {}, drawnFrom: { 'fact:dislike_coffee_x': 3000 } },
+      conversationHistory: chat([['person', 'I hate coffee', 1000], ['person', 'I walk a lot', 2000], ['person', 'honestly I hate coffee', 3000]]),
+    };
+    expect(after(dislike, memoryItemKey('fact', 'dislike_coffee_x', 'coffee'))).toEqual(['I walk a lot']);
+  });
+
+  it('finds a name written with a capital only as written, so "I will travel" stays when "Will" is forgotten', () => {
+    const data = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is Will', 1000], ['person', 'I will travel soon', 2000], ['bot', 'I will remember that', 2500], ['person', 'call me Will', 3000]]),
+    };
+    expect(after(data, memoryItemKey('name', null, 'Will'))).toEqual(['I will travel soon', 'I will remember that']);
+  });
+
+  it('forgetting a short name takes the lines that give it and say it back, and keeps a longer name that starts like it', () => {
+    const data = {
+      personalInfo: { name: 'Ali', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([
+        ['person', 'my name is Ali', 1000],
+        ['bot', 'Nice to meet you, Ali!', 1500],
+        ['person', 'I like Alice in Wonderland', 2000],
+        ['bot', 'Ali, how was your day?', 2500],
+        ['person', "I'm Ali, as I said", 3000],
+      ]),
+    };
+    expect(after(data, memoryItemKey('name', null, 'Ali'))).toEqual(['I like Alice in Wonderland']);
+  });
+
+  it("forgetting another short value takes the bot's reply right after its line", () => {
+    const data = {
+      personalInfo: { facts: [['current_state', 'ill'], ['ill_mentioned_at', '1000']], heard: {}, drawnFrom: { 'fact:current_state': 1000 } },
+      conversationHistory: chat([['person', "I'm ill", 1000], ['bot', 'Sorry you are ill, rest well', 1500], ['person', 'what is the weather', 2000], ['bot', 'Sunny', 2500]]),
+    };
+    expect(after(data, memoryItemKey('fact', 'current_state', 'ill'))).toEqual(['what is the weather', 'Sunny']);
+  });
+
+  it("forgetting a short like said twice takes the bot's reply after the first line, and finds \"I avoid tea\" and \"sick of tea\"", () => {
+    const like = {
+      personalInfo: { preferences: ['tea'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Tea it is!', 1500], ['person', 'I like steam rooms', 2000], ['bot', 'Steam rooms are great', 2500], ['person', 'I like tea a lot', 3000]]),
+    };
+    expect(after(like, memoryItemKey('pref', null, 'tea'))).toEqual(['I like steam rooms', 'Steam rooms are great']);
+    const dislike = {
+      personalInfo: { preferences: [], facts: [['dislike_tea_x', 'tea']], heard: {}, drawnFrom: { 'fact:dislike_tea_x': 3000 } },
+      conversationHistory: chat([['person', 'I avoid tea', 1000], ['person', "I'm sick of tea", 2000], ['bot', 'Noted, no tea', 2200], ['person', 'I hate tea', 3000]]),
+    };
+    expect(after(dislike, memoryItemKey('fact', 'dislike_tea_x', 'tea'))).toEqual([]);
+  });
+});
+
+describe('names in other capitals, and a stale copy, and several things forgotten at once', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it('takes the lines that give a name in other capitals, long or short, and keeps "I will travel" when "Will" is forgotten', () => {
+    const sara = {
+      personalInfo: { name: 'Sara', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'my name is sara', 1000], ['person', 'I walk a lot', 2000], ['person', 'My name is Sara', 3000]]),
+    };
+    const afterSara = withoutItems(sara, new Set([memoryItemKey('name', null, 'Sara')])).data as typeof sara;
+    expect(afterSara.conversationHistory.map((line) => line.message)).toEqual(['I walk a lot']);
+    const will = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 3000 } },
+      conversationHistory: chat([['person', 'call me will', 1000], ['person', 'I will travel soon', 2000], ['person', 'My name is Will', 3000]]),
+    };
+    const afterWill = withoutItems(will, new Set([memoryItemKey('name', null, 'Will')])).data as typeof will;
+    expect(afterWill.conversationHistory.map((line) => line.message)).toEqual(['I will travel soon']);
+  });
+
+  it('takes a bot line that says a forgotten name whenever it was said, and keeps the person saying it again after the Forget', () => {
+    const copy = (drawnAt: number, lines: Array<[string, string, number]>) => ({
+      personalInfo: { name: 'Ali', facts: [], heard: {}, drawnFrom: { name: drawnAt } },
+      conversationHistory: chat(lines),
+    });
+    const key = memoryItemKey('name', null, 'Ali');
+    const forgot = new Map([[key, new Date(3000)]]);
+    const stale = withoutForgotten([copy(1000, [['person', 'my name is Ali', 1000], ['bot', 'Hi Ali', 3500]])][0], [{ itemKey: key, createdAt: new Date(3000) }]) as ReturnType<typeof copy>;
+    expect(stale.personalInfo.name).toBeUndefined();
+    expect(stale.conversationHistory).toEqual([]);
+    const again = withoutItems(copy(5000, [['person', 'my name is Ali', 1000], ['bot', 'Hi Ali', 3500], ['person', 'my name is Ali', 5000]]), new Set([key]), forgot).data as ReturnType<typeof copy>;
+    expect(again.personalInfo.name).toBe('Ali');
+    expect(again.conversationHistory).toHaveLength(3);
+  });
+
+  it("takes the bot's reply after a taken line only for the words of the thing that took it, when several are forgotten at once", () => {
+    const data = {
+      personalInfo: { preferences: ['tea', 'jam'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:jam': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Jam is nice too', 1500], ['person', 'I like jam', 3000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('pref', null, 'jam')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
+  });
+});
+
+describe('the thing said first, and a reply after a line said again (CodeRabbit)', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it('takes "Tea is my favorite drink" and "Tea, I love it" when "tea" is forgotten, and keeps "steam" lines', () => {
+    const data = {
+      // The line the favorite was drawn from is the last one (3000), so the two earlier lines are only found by how they are said
+      personalInfo: { preferences: ['tea (favorite drink)'], facts: [], heard: {}, drawnFrom: { 'pref:tea (favorite drink)': 3000 } },
+      conversationHistory: chat([['person', 'Tea is my favorite drink', 1000], ['person', 'Steam is my favorite room', 1500], ['person', 'Tea, I love it', 2000], ['person', 'I like tea', 3000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea (favorite drink)')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Steam is my favorite room']);
+  });
+
+  it("still takes a bot line that says another forgotten thing, when it comes right after a line said again for one of them", () => {
+    const tea = memoryItemKey('pref', null, 'tea');
+    const pizza = memoryItemKey('pref', null, 'pizza');
+    const data = {
+      personalInfo: { preferences: ['tea', 'pizza'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:pizza': 1000 } },
+      conversationHistory: chat([['person', 'I like tea and pizza', 1000], ['person', 'I like tea', 5000], ['bot', 'Tea it is! And pizza?', 5500], ['person', 'what is the weather', 6000]]),
+    };
+    const forgot = new Map([[tea, new Date(3000)], [pizza, new Date(3000)]]);
+    const after = withoutItems(data, new Set([tea, pizza]), forgot).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I like tea', 'what is the weather']);
+  });
+});
+
+describe('forgetting leans to taking too much (deliberate)', () => {
+  it('a capitalised name that is also a word also takes a line that only starts with it, in that person\'s own chat', () => {
+    const data = {
+      personalInfo: { name: 'Will', facts: [], heard: {}, drawnFrom: { name: 1000 } },
+      conversationHistory: [
+        { sender: 'person', message: 'my name is Will', timestamp: 1000 },
+        { sender: 'person', message: 'Will you help me?', timestamp: 2000 },
+        { sender: 'person', message: 'I will travel soon', timestamp: 3000 },
+      ],
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('name', null, 'Will')])).data as typeof data;
+    // "I will travel soon" stays (the word in lower case); "Will you help me?" goes with the name, on purpose
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I will travel soon']);
+  });
+});
+
+describe('a reply after a taken line, when several things are forgotten together', () => {
+  const chat = (lines: Array<[string, string, number]>) => lines.map(([sender, message, timestamp]) => ({ sender, message, timestamp }));
+
+  it("also takes a reply that says the short value of another forgotten thing already said earlier (a like, and an age)", () => {
+    const jam = {
+      personalInfo: { preferences: ['jam', 'tea'], facts: [], heard: {}, drawnFrom: { 'pref:jam': 1000, 'pref:tea': 2000 } },
+      conversationHistory: chat([['person', 'I like jam', 1000], ['person', 'I like tea', 2000], ['bot', 'Have it with jam!', 2500], ['person', 'I like walking', 3000]]),
+    };
+    const afterJam = withoutItems(jam, new Set([memoryItemKey('pref', null, 'jam'), memoryItemKey('pref', null, 'tea')])).data as typeof jam;
+    expect(afterJam.conversationHistory.map((line) => line.message)).toEqual(['I like walking']);
+    const age = {
+      personalInfo: { preferences: ['tea'], facts: [['age', '30']], heard: {}, drawnFrom: { 'fact:age': 1000, 'pref:tea': 2000 } },
+      conversationHistory: chat([['person', "I'm 30", 1000], ['person', 'I like tea', 2000], ['bot', 'Great choice at 30!', 2500], ['person', 'I like walking', 3000]]),
+    };
+    const afterAge = withoutItems(age, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('fact', 'age', '30')])).data as typeof age;
+    expect(afterAge.conversationHistory.map((line) => line.message)).toEqual(['I like walking']);
+  });
+
+  it('keeps a reply that says a thing which is only said later', () => {
+    const data = {
+      personalInfo: { preferences: ['tea', 'jam'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000, 'pref:jam': 3000 } },
+      conversationHistory: chat([['person', 'I like tea', 1000], ['bot', 'Jam is nice too', 1500], ['person', 'I like jam', 3000]]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea'), memoryItemKey('pref', null, 'jam')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['Jam is nice too']);
+  });
+
+  it('finds a thing written without spaces (Chinese) inside a longer line, and one typed with a combining mark (Sentry)', () => {
+    const data = {
+      personalInfo: { preferences: ['喜欢喝茶加糖', 'café au lait'], facts: [], heard: {}, drawnFrom: {} },
+      conversationHistory: chat([
+        ['person', '我真的喜欢喝茶加糖呢', 1000],
+        ['person', 'I want cafe\u0301 au lait please', 1100],
+        ['person', 'I want a Chrome café', 1200],
+      ]),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, '喜欢喝茶加糖'), memoryItemKey('pref', null, 'café au lait')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['I want a Chrome café']);
+  });
+
+  it('takes every "into" taste line, and keeps only lines where "into" follows a word for moving (Sentry)', () => {
+    const goes = ["I'm into tea", "I'm really into tea", 'I am so into tea', "I'm totally into tea", "I've been into tea lately", "I'm getting into tea", 'I got into tea last year', 'I was into tea once', "I've really gotten into tea", 'I started getting into tea'];
+    const stays = ['I walked into the tea room', 'Did you go into the tea room?', 'I ran into my friend at tea', 'I walked straight into a tea shop', 'We drove into town for tea', 'I looked into tea prices', 'I stepped into the tea room', 'I jumped into the tea bath'];
+    const data = {
+      personalInfo: { preferences: ['tea'], facts: [], heard: {}, drawnFrom: { 'pref:tea': 1000 } },
+      conversationHistory: chat([...goes, ...stays].map((line, i) => ['person', line, 1000 + i] as [string, string, number])),
+    };
+    const after = withoutItems(data, new Set([memoryItemKey('pref', null, 'tea')])).data as typeof data;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(stays);
+  });
+});

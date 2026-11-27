@@ -45,13 +45,16 @@ const bodySchema = z.object({
   receiptCode: z.string().max(200).optional(),
   check: z.boolean().optional(),
   restore: z.boolean().optional(),
+  /** The version the page the buyer has open shows (the link page sends it): terms set on a newer one are never charged on it, and a new order needs it. */
+  shownVersion: z.number().int().positive().optional(),
 });
 
 /**
  * POST /api/pay/:artifactId - start a checkout for the amount the owner set for this page, or get back to a purchase. The body carries no
  * amount on purpose: the amount, the currency and the service are the owner's, never the page's or the visitor's.
- *  - `{}` or `{ intentId, recoveryCode }`: start. The same `intentId` from the same buyer gives the SAME order (even from two tabs at once).
- *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working; with `unsure: true` an order may have been made, so ask with Check payment) · 429 too many.
+ *  - `{ shownVersion }` or `{ intentId, recoveryCode, shownVersion }`: start. The same `intentId` from the same buyer gives the SAME order (even from two tabs at once);
+ *    a new order needs `shownVersion`, an order already made for that wish is carried on without it.
+ *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working; with `unsure: true` an order may have been made, so ask with Check payment) · 409 not_published (the owner set these terms on a version newer than the one the link shows; nothing was made) · 409 page_changed (`shownVersion`, the version the open page shows, is older than the one these terms were set on, or a new order was asked for without it; nothing was made, and a reload gives a page that says it) · 429 too many.
  *  - `{ check: true, intentId, recoveryCode }`: Check payment, where the order that wish made stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer } · 404.
  *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer.
  *    `via` is `own` (found by their account or recovery code) or `receipt` (found only through a `receiptCode`, which finds and never starts).
@@ -92,8 +95,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return view ? respond({ ...view, buyer }) : respond({ error: 'Not found' }, 404);
   }
   if (body.intentId && !buyerKey) return respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
-  const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys: buyerKeys.slice(1) });
+  const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys: buyerKeys.slice(1), shownVersion: body.shownVersion ?? null });
   if (outcome.status === 'ok') return respond({ orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer });
   if (outcome.status === 'limit') return respond({ error: 'Too many tries for now', code: 'limit' }, 429);
+  // The link shows an older published version than the one the owner set these terms on: a definite answer, nothing was made. The words
+  // never say a newer version exists (game #2115): only the owner is told why (their Brick, when they set the terms)
+  if (outcome.status === 'not_published') return respond({ error: 'This page isn’t taking payments right now. Try again later', code: 'not_published' }, 409);
+  // The page open in this browser is older than the published one these terms belong to: nothing was made, and reloading shows the terms
+  if (outcome.status === 'page_changed') return respond({ error: 'This page was updated. Reload it to see the latest version before you pay', code: 'page_changed' }, 409);
   return respond({ error: 'Payments are unavailable', code: 'unavailable', ...(outcome.unsure ? { unsure: true } : {}) }, 409);
 }

@@ -8,6 +8,7 @@ import { GET as view, POST as give, DELETE as turnOff } from '@/app/api/bricks/[
 import { POST as stop } from '@/app/api/bricks/[id]/computer/stop/route';
 import { POST as takeOverRoute } from '@/app/api/bricks/[id]/computer/take-over/route';
 import { POST as handBackRoute } from '@/app/api/bricks/[id]/computer/hand-back/route';
+import { POST as restartRoute } from '@/app/api/bricks/[id]/computer/restart/route';
 import { POST as fillRoute } from '@/app/api/bricks/[id]/computer/fill-details/route';
 import { POST as dismissRoute } from '@/app/api/bricks/[id]/computer/dismiss/route';
 import { GET as stateRoute, POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
@@ -63,6 +64,8 @@ beforeEach(() => {
   session.mockResolvedValue({ id: 'u-sara' });
   db.user.findUnique.mockResolvedValue({ isGuest: false });
   rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
+  // A key is known by itself unless a test says another key came first (GPT eighth note, A2)
+  lib.canonicalStartKey.mockImplementation(async (_brick: string, _person: string, startKey: string) => startKey);
 });
 afterAll(() => {
   if (tokenBefore === undefined) delete process.env.BOT_SERVICE_TOKEN;
@@ -237,9 +240,37 @@ describe('the owner’s calls', () => {
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_secured' });
     const unsecured = await takeOverRoute(call('/x'), params);
     expect(unsecured.status).toBe(409);
-    expect(await unsecured.json()).toMatchObject({ notSecured: true });
+    expect(await unsecured.json()).toMatchObject({ notSecured: true, error: 'Couldn’t get the computer ready. Nothing was changed on it. Try again.' });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'nothing_waiting' });
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
+  });
+
+  it('the honest check (1B): a program still running is a 409 that says so and whether a restart is offered, with no program named; "anyway" is only taken as the boolean true', async () => {
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'still_running' });
+    lib.restartOffered.mockResolvedValue(true);
+    const blocked = await takeOverRoute(call('/x'), params);
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toEqual({ error: 'A program is still running on this computer.', reason: 'still_running', stillRunning: true, restartOffered: true });
+    expect(lib.takeOver).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), { anyway: false });
+    lib.restartOffered.mockResolvedValue(false);
+    expect(await (await takeOverRoute(call('/x', { body: { anyway: 'yes' } }), params)).json()).toMatchObject({ restartOffered: false });
+    expect(lib.takeOver).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), { anyway: false });
+    lib.takeOver.mockResolvedValue({ ok: true, job: { id: JOB } as never });
+    expect(await (await takeOverRoute(call('/x', { body: { anyway: true } }), params)).json()).toEqual({ job: { id: JOB } });
+    expect(lib.takeOver).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), { anyway: true });
+  });
+
+  it('Restart first (1B): the job when it was done, 409 notOffered when there is nothing to restart for, 409 inProgress while it is on its way, 404 for another person’s Brick', async () => {
+    lib.restartComputer.mockResolvedValue({ ok: true, job: { id: JOB } as never });
+    expect(await (await restartRoute(call('/x'), params)).json()).toEqual({ job: { id: JOB } });
+    lib.restartComputer.mockResolvedValue({ ok: false, reason: 'not_offered' });
+    const none = await restartRoute(call('/x'), params);
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({ notOffered: true });
+    lib.restartComputer.mockResolvedValue({ ok: false, reason: 'in_progress' });
+    expect(await (await restartRoute(call('/x'), params)).json()).toMatchObject({ inProgress: true });
+    lib.restartComputer.mockResolvedValue({ ok: false, reason: 'not_found' });
+    expect((await restartRoute(call('/x'), params)).status).toBe(404);
   });
 
   it('takes "Fill in my details" as one tap: only after a take over, and what the screen showed must still be what Brick named', async () => {

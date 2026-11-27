@@ -9,10 +9,19 @@ game (open, versions, code, share, restore, copy, delete).
 - **Owner:** the person who asked. The bot is its maker (id and the name it had). A guest owns nothing: what a guest asks
   for is kept for a day from its last change, and anyone in that chat may change it meanwhile.
 - **Who can open it** (`openScope`): `me` ("Just you": nobody but its owner, in its chat or by link, game #1994), `chat`
-  (people in the chat it was made in, the default) or `link` (anyone with the link). The owner always can. Someone who
+  (people in the chat it was made in, the default), `link` (anyone with the link) or `public` (anyone with the link, and
+  only the version its owner published, below). The owner always can. Someone who
   may not open it hears `404 not_found`, the same as for an artifact that does not exist. One exception: a "Just you"
   artifact asked for from the chat it was made in answers `404 kept_private`, because its card is in front of that
   person already ("Its owner keeps this one private."). A guest owns nothing, so a guest's artifact is never "Just you".
+- **Publish** (game #2115): the owner publishes a version (`publishedVersion`, with the `publishedTitle` it had and
+  `publishedAt`). From then on whoever opens it only by its link (the public page `/a/:id`, someone in the game who is not in
+  its chat, a bot reading a link someone pasted) sees that version under that title, and nothing else: not another version
+  by number, not the version list, the code or a copy of one, and nothing says a newer version exists. Its owner and the
+  people in the chat it was made in see the latest, as before. A `link` artifact that was never published keeps showing
+  the latest to everyone, as every link did before Publish; a `public` one that was never published is `404 not_found` to
+  everyone outside, and so is one whose published version is gone (never the latest in its place). Taking it off Public but
+  keeping the link keeps what was published. Only the owner publishes, from the game (there is no bot route).
 - **Who can ask for changes** (`changeScope`): `owner` (the default) or `openers` (everyone who can open it, in the chat
   it was made in). The owner may ask in any chat they have with a bot; nobody else asks from another chat.
 - **One bot's work is not another bot's context (game #1781, Orbit #790):** by id, a bot reaches the artifacts made in the
@@ -100,9 +109,13 @@ Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in 
 | `POST /api/artifacts/:id/versions` | `viewer` | `{ versions }`, newest first |
 | `POST /api/artifacts/:id/versions/:number` | `viewer` | `{ version, content }` (the Code view) |
 | `PUT /api/artifacts/:id/share` | `viewer`, `openScope?`, `changeScope?` | `{ artifact }`; owner only (`403` for others who can open it) |
+| `POST /api/artifacts/:id/publish` | `viewer`, `version?` | `{ artifact }` with `artifact.published { version, at }`; owner only, and only while it is `link` or `public` (`409 not_shared`) |
 | `POST /api/artifacts/:id/restore` | `viewer`, `number` | `{ artifact, version, you }`; owner only |
 | `POST /api/artifacts/:id/copy` | `viewer`, `version?` | `{ artifact, version, you }`; `403 sign_in_required` for a guest |
 | `DELETE /api/artifacts/:id` | `viewer` | `{ deleted: true }`; owner only. Removes every version and file; a copy keeps its own files |
+
+`artifact.published` is `{ version, at }` once the owner published (and `available`, in the answer to `open` for its owner: false when that
+version is gone), else null. For someone who sees only what was published, `artifact.version` and `artifact.title` are the published ones.
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
 `version.url` is where the file is served from, for the locked box. For a "Just you" artifact it is `null` everywhere
@@ -141,7 +154,8 @@ Every other artifact is served from the bucket's own address, which opens for an
   nor a passed-on address gives it. Those seconds count from the first request.
   The media beside a page are served once the page has been, for as long as the pass lasts.
 - **The lock:** a page is sent with the same policy the bucket's address puts on every artifact (`sandbox
-  allow-scripts`, no network but the common libraries, no forms), may be framed only by the game and by Orbit, and is
+  allow-scripts allow-popups allow-popups-to-escape-sandbox`, no network but the common libraries, no forms; a tapped
+  link opens in a new tab as the other site itself), may be framed only by the game and by Orbit, and is
   refused when a browser asks for it as a page of its own (`Sec-Fetch-Dest: document`). So although these addresses are
   Orbit's, a running page has no origin, and can reach neither the sign-in nor the game. One line is tighter than the
   bucket's: pictures, songs and videos load only from the pass's own folder for that version (`/af/<pass>/<version>/`),

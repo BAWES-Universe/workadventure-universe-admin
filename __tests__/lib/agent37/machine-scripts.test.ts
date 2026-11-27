@@ -20,8 +20,9 @@ const text = (name: string) => imageFiles().find((file) => file.name === name)!.
 let server: http.Server;
 let serverPort = 0;
 let archive = Buffer.alloc(0);
-let token = 'download-token';
+const token = 'download-token';
 let served = 0;
+let liveCounter = 0;
 let altered: { from: number; body: Buffer } | null = null;
 
 function writeTree(root: string) {
@@ -52,9 +53,12 @@ const tree = (root: string): string[] =>
 const sha = (buffer: Buffer) => createHash('sha256').update(buffer).digest('hex');
 
 /** Asynchronous on purpose: the gateway runs in this process, so a blocked process would never answer the script that waits for it. */
-function runCold(home: string, command: string, input: object | null, extra: Record<string, string> = {}): Promise<{ stdout: string; status: number | null }> {
+function runCold(home: string, command: string, input: object | null, extra: Record<string, string> = {}, asUser = false): Promise<{ stdout: string; status: number | null }> {
   return new Promise((resolveRun, reject) => {
-    const child = spawn('python3', [path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } });
+    // `asUser`: as the computer's own user (not root, as `restore` runs there), with the usual umask: tar then applies the umask to what it extracts unless it is told to keep the modes
+    const child = asUser
+      ? spawn('sh', ['-c', 'umask 022 && exec setpriv --reuid=1000 --regid=1000 --clear-groups python3 "$0" "$1"', path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } })
+      : spawn('python3', [path.join(scripts, 'universe-cold'), command], { env: { ...process.env, UNIVERSE_COLD_HOME: home, ...extra } });
     let stdout = '';
     child.stdout.on('data', (data) => (stdout += data));
     child.stderr.on('data', (d) => { if (process.env.DEBUG_COLD) console.error(String(d)); });
@@ -139,7 +143,73 @@ describe('restoring a copy on a computer', () => {
     }
   });
 
-  it('counts a file as outside the image when its change time is newer than the image, even if it kept an old modification time', () => {
+  describe('the compare leaves out the files a running computer rewrites by itself (found on a real computer: the proof failed by chance on Hermes logs, the gateway heartbeat and the browser profile)', () => {
+    const live = ['.hermes/logs/gateway.log', '.hermes/logs/agent.log', '.hermes/gateway.heartbeat', '.config/universe-chromium/Local State'];
+    /** A copy served first, and another served to the compare in which `changed` differ (and the files in `live` are rewritten as a running computer would). */
+    async function compared(changed: string[]) {
+      const base = path.join(dir, `live-${++liveCounter}`);
+      const source = path.join(base, 'a', 'home', 'node');
+      const other = path.join(base, 'b', 'home', 'node');
+      for (const root of [source, other]) {
+        fs.mkdirSync(root, { recursive: true });
+        writeTree(root);
+        for (const name of live) {
+          fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+          fs.writeFileSync(path.join(root, name), root === source ? 'before' : 'a later write');
+        }
+      }
+      for (const name of changed) fs.writeFileSync(path.join(other, name), 'a real change');
+      const target = path.join(base, 'target');
+      fs.mkdirSync(target, { recursive: true });
+      archive = makeArchive(source, 'relative', target);
+      altered = { from: served + 3, body: makeArchive(other, 'relative', target) };
+      try {
+        return await runCold(target, 'restore', { url: url(), token, sha256: sha(archive) });
+      } finally {
+        altered = null;
+      }
+    }
+
+    it('a copy whose Hermes logs, heartbeat and browser profile files were rewritten while it was compared still passes', async () => {
+      const done = await compared([]);
+      expect(done.stdout).toMatch(/restored=1 /);
+      expect(done.status).toBe(0);
+    });
+
+    it('but any other file that differs still fails it, with the number of files that differ', async () => {
+      const done = await compared(['.hermes/memory/memories.json']);
+      expect(done.stdout).toMatch(/restored=0 reason=differs_1\b/);
+      expect(done.status).toBe(1);
+    });
+  });
+
+  const unprivileged = process.getuid?.() === 0 && spawnSync('setpriv', ['--version']).status === 0 ? it : it.skip;
+
+  unprivileged('keeps the modes of what it restores when it runs as the computer\'s own user (a file of mode 0664, 0666 or 0775 is not cut down by the umask (the set-user-id bits are already gone from a list: the copy is handed over first), so finish finds what prepack listed; Seer on #1035)', async () => {
+    const source = path.join(dir, 'source-modes', 'home', 'node');
+    fs.mkdirSync(source, { recursive: true });
+    writeTree(source);
+    const modes: Record<string, number> = { 'shared/group-write.txt': 0o664, 'shared/world-write.txt': 0o666, 'shared/group-run.sh': 0o775, '.universe/outside/opt/tool/run.sh': 0o755, '.universe/outside/var/www/shared.txt': 0o666, '.universe/outside/etc/app.conf': 0o640, 'notes/read-only.md': 0o444 };
+    for (const [name, mode] of Object.entries(modes)) {
+      const file = path.join(source, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `content of ${name}`);
+      fs.chmodSync(file, mode);
+    }
+    const target = path.join(dir, 'target-modes');
+    fs.mkdirSync(target, { recursive: true });
+    // The computer's own user owns its home folder, and must be able to reach the script and the folder
+    for (const folder of [dir, scripts]) fs.chmodSync(folder, 0o755);
+    fs.chownSync(target, 1000, 1000);
+    // The copy is of the computer's own user's files, as on a computer (the compare checks the owner too)
+    spawnSync('chown', ['-R', '1000:1000', source]);
+    archive = makeArchive(source, 'relative', target);
+    const done = await runCold(target, 'restore', { url: url(), token, sha256: sha(archive) }, {}, true);
+    expect(done.stdout).toMatch(/restored=1 /);
+    for (const [name, mode] of Object.entries(modes)) expect([name, fs.lstatSync(path.join(target, name)).mode & 0o7777]).toEqual([name, mode]);
+  });
+
+  it('counts a file as outside the image when its change time is later than the end of the unpack (plus the margin), even if it kept an old modification time', () => {
     // cp -p, tar x and rsync -a keep the old modification time; the change time is the day the file arrived
     const file = path.join(dir, 'kept-old-time');
     fs.writeFileSync(file, 'a tool unpacked into /opt');
@@ -156,7 +226,7 @@ describe('restoring a copy on a computer', () => {
           'module = importlib.util.module_from_spec(spec)',
           'loader.exec_module(module)',
           'info = os.lstat(sys.argv[2])',
-          'print(info.st_mtime < float(sys.argv[3]), module.newer_than(info, float(sys.argv[3])))',
+          'print(info.st_mtime < float(sys.argv[3]), module.newer_than(info, float(sys.argv[3]), float(sys.argv[3])))',
         ].join('\n'),
         path.join(scripts, 'universe-cold'),
         file,
@@ -216,9 +286,9 @@ describe('the scripts are well formed', () => {
 });
 
 describe('old proxy settings from a dropped design', () => {
-  /** Runs only the clean-up function of the script, on a home folder in the temp folder (and only ever changes lines that name the old proxy). */
+  /** Runs only the clean-up function restore calls (the agent's own settings files, as the computer's own user), on a home folder in the temp folder (and only ever changes lines that name the old proxy). */
   const scrub = (home: string) =>
-    spawnSync('python3', ['-I', '-c', `import os,sys\nsrc=open(sys.argv[1]).read().replace('if __name__ == "__main__":','if False:')\nexec(compile(src,'universe-cold','exec'))\ndrop_legacy_proxy()`, path.join(scripts, 'universe-cold')], { env: { ...process.env, UNIVERSE_COLD_HOME: home }, encoding: 'utf8' });
+    spawnSync('python3', ['-I', '-c', `import os,sys\nsrc=open(sys.argv[1]).read().replace('if __name__ == "__main__":','if False:')\nexec(compile(src,'universe-cold','exec'))\ndrop_legacy_home()`, path.join(scripts, 'universe-cold')], { env: { ...process.env, UNIVERSE_COLD_HOME: home }, encoding: 'utf8' });
 
   it('removes lines that point software at the old local proxy from a restored home, and keeps every other line', () => {
     const home = path.join(dir, 'legacy-home');

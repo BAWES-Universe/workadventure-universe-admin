@@ -227,17 +227,17 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
       SELECT person_id,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS cost,
         (COUNT(DISTINCT bot_id) FILTER (WHERE brick IS TRUE))::int AS bricks,
-        (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS replies,
+        (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true' AND COALESCE(detail->>'imageRead', 'false') <> 'true'))::int AS replies,
         COALESCE(SUM(quantity) FILTER (WHERE kind = 'app_use'), 0)::bigint AS uses,
         COALESCE(SUM(CASE unit WHEN 'second' THEN quantity WHEN 'minute' THEN quantity * 60 ELSE 0 END) FILTER (WHERE kind = 'computer_time'), 0)::bigint AS seconds
       FROM meter_events WHERE ${inRange} AND person_id IS NOT NULL GROUP BY person_id ORDER BY cost DESC, person_id`),
     prisma.$queryRaw<{ bot_id: string; cost: bigint; replies: number; uses: bigint; seconds: bigint; own: number; measured: number; estimated: number; unpriced: number; others: number }[]>(Prisma.sql`
       SELECT bot_id,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS cost,
-        (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS replies,
+        (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true' AND COALESCE(detail->>'imageRead', 'false') <> 'true'))::int AS replies,
         COALESCE(SUM(quantity) FILTER (WHERE kind = 'app_use'), 0)::bigint AS uses,
         COALESCE(SUM(CASE unit WHEN 'second' THEN quantity WHEN 'minute' THEN quantity * 60 ELSE 0 END) FILTER (WHERE kind = 'computer_time'), 0)::bigint AS seconds,
-        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS own,
+        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true' AND COALESCE(detail->>'imageRead', 'false') <> 'true'))::int AS own,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'measured'))::int AS measured,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'estimated'))::int AS estimated,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND cost_micros IS NULL))::int AS unpriced,
@@ -246,7 +246,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     prisma.$queryRaw<{ kind: string; cost: bigint; events: number; uses: bigint; jobs: number; seconds: bigint }[]>(Prisma.sql`
       SELECT kind,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS cost,
-        (COUNT(*) FILTER (WHERE COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS events,
+        (COUNT(*) FILTER (WHERE COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true' AND COALESCE(detail->>'imageRead', 'false') <> 'true'))::int AS events,
         COALESCE(SUM(quantity), 0)::bigint AS uses,
         (COUNT(DISTINCT job_id))::int AS jobs,
         COALESCE(SUM(CASE unit WHEN 'second' THEN quantity WHEN 'minute' THEN quantity * 60 ELSE 0 END), 0)::bigint AS seconds

@@ -87,6 +87,8 @@ const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId:
       error: false,
       // A greeting the bot made on its own is free for the person (see lib/reply-limits.ts)
       greeting: false,
+      // So is a look Universe AI's vision took at an image: the person's use, never a reply
+      imageRead: false,
       timestamp: { gte: since },
     },
   });

@@ -19,7 +19,7 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
     const ticket = await screenTicket(id, ownerId, body?.mode === 'input' ? 'input' : 'watch');
     if (ticket.ok) return brickJson(request, { ticket: ticket.ticket, mode: ticket.mode, expiresAt: ticket.expiresAt });
     if (ticket.reason === 'not_found') return notFound(request);
-    if (ticket.reason === 'securing') return brickJson(request, { error: 'The computer is still being made safe for you. Try again in a moment.', securing: true }, 409);
+    if (ticket.reason === 'securing') return brickJson(request, { error: 'The computer is still getting ready for you. Try again in a moment.', securing: true }, 409);
     if (ticket.reason === 'not_taken_over') return brickJson(request, { error: 'The screen is only yours to use after you take over', notTakenOver: true }, 409);
     return brickJson(request, { error: 'Its computer is resting', resting: true }, 409);
   });

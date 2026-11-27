@@ -23,7 +23,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick } from '@/lib/brick-delete';
 import { checkBotAccess } from '@/lib/bot-access';
-import { startVisit, whereIsBrick } from '@/lib/brick-visit';
+import { brickIsHereFor, startVisit, whereIsBrick } from '@/lib/brick-visit';
 import { dropHomesWithoutAccess, homeOfBrick, moveBrick, takeOutBrick } from '@/lib/brick-home';
 import { canManageBots } from '@/lib/bot-permissions';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
@@ -552,6 +552,25 @@ run('a Brick that lives in a room, in a real database', () => {
       });
       expect(await dropHomesWithoutAccess(undefined, 2)).toBe(0);
       expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(4);
+    });
+  });
+
+  describe('coming into its room as one of its bots (a Brick joining the map)', () => {
+    it('is let in only to the room it lives in, and only while the person who placed it can still manage bots there', async () => {
+      await put(brickId, hosted.roomUrl);
+      expect(await brickIsHereFor(brickId, hosted.roomUrl)).toBe(true);
+      // another room is not its room
+      expect(await brickIsHereFor(brickId, own.roomUrl)).toBe(false);
+      // the placer lost the right to manage bots there
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: (await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } })).id } });
+      expect(await brickIsHereFor(brickId, hosted.roomUrl)).toBe(false);
+    });
+
+    it('is not let in when it is off or waits deleted', async () => {
+      await put(brickId, own.roomUrl);
+      expect(await brickIsHereFor(brickId, own.roomUrl)).toBe(true);
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: false } });
+      expect(await brickIsHereFor(brickId, own.roomUrl)).toBe(false);
     });
   });
 });

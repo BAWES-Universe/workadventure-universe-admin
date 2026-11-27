@@ -39,15 +39,15 @@ async function call(handler: unknown, body: unknown, token: string | null = ADMI
   return { status: response.status, body: await response.json() };
 }
 
-async function makeOne(who: Who, chat: object, title: string) {
-  const res = await call(make, { botId: 'bot1', person: who, chat, title, kind: 'page', content: '<p>x</p>' }, BOT_TOKEN);
+async function makeOne(who: Who, chat: object, title: string, botId = 'bot1') {
+  const res = await call(make, { botId, person: who, chat, title, kind: 'page', content: '<p>x</p>' }, BOT_TOKEN);
   expect(res.status).toBe(200);
   return res.body.artifact as { id: string };
 }
 
 /** The list a chat's profile shows this person, as the game asks for it. */
-async function listFor(who: Who, chat: object, inChat: boolean, offset?: number) {
-  return call(chatList, { viewer: { person: who, inChat, chat }, ...(offset === undefined ? {} : { offset }) });
+async function listFor(who: Who, chat: object, inChat: boolean, offset?: number, botId?: string) {
+  return call(chatList, { viewer: { person: who, inChat, chat }, ...(offset === undefined ? {} : { offset }), ...(botId === undefined ? {} : { botId }) });
 }
 const titles = (res: { body: { artifacts: { title: string }[] } }) => res.body.artifacts.map((artifact) => artifact.title);
 
@@ -118,6 +118,55 @@ describe('artifact lists for people (#1474)', () => {
       await makeOne(person('owner'), DM, 'Direct');
       await makeOne(person('owner'), { kind: 'nearby', ref: 'bubble-2' }, 'Other bubble');
       expect(titles(await listFor(person('owner'), NEARBY, true))).toEqual([]);
+    });
+
+    describe("a direct chat with a bot (what the bot made for this person elsewhere)", () => {
+      beforeEach(() => addBot('bot2', 'Other'));
+
+      it("also lists what the bot made for them in nearby chat, newest change first, as the bot finds it", async () => {
+        const deck = await makeOne(person('owner'), NEARBY, 'Pitch deck');
+        await makeOne(person('owner'), DM, 'Bubble bug');
+        db.artifacts.find((a) => a.id === deck.id)!.updatedAt = new Date(Date.now() + 60_000);
+        const res = await listFor(person('owner'), DM, false, undefined, 'bot1');
+        expect(titles(res)).toEqual(['Pitch deck', 'Bubble bug']);
+        expect(res.body).toMatchObject({ total: 2, next: null });
+        expect(res.body.artifacts.every((a: { yours: boolean }) => a.yours)).toBe(true);
+        // Without the bot named it is still only this chat's
+        expect(titles(await listFor(person('owner'), DM, false))).toEqual(['Bubble bug']);
+      });
+
+      it("never adds another bot's work, someone else's, an expired one or a copy", async () => {
+        await makeOne(person('owner'), NEARBY, 'Mine from bot2', 'bot2');
+        await makeOne(person('friend'), NEARBY, "Friend's from bot1");
+        await makeOne(guest, NEARBY, "Guest's from bot1");
+        const gone = await makeOne(person('owner'), NEARBY, 'Gone');
+        db.artifacts.find((a) => a.id === gone.id)!.expiresAt = new Date(Date.now() - 1000);
+        const copy = await makeOne(person('owner'), NEARBY, 'A copy');
+        Object.assign(db.artifacts.find((a) => a.id === copy.id)!, { chatKind: null, chatRef: null, copiedFromId: 'x' });
+        expect(titles(await listFor(person('owner'), DM, false, undefined, 'bot1'))).toEqual([]);
+        expect(titles(await listFor(person('friend'), DM, false, undefined, 'bot1'))).toEqual(["Friend's from bot1"]);
+        expect(titles(await listFor(guest, DM, false, undefined, 'bot1'))).toEqual([]);
+      });
+
+      it('keeps its own chat first in count and shows each artifact once, paged', async () => {
+        for (let i = 0; i < ARTIFACT_PAGE_SIZE + 2; i++) await makeOne(person('owner'), i % 2 ? DM : NEARBY, `A${i}`);
+        const first = await listFor(person('owner'), DM, false, undefined, 'bot1');
+        expect(first.body).toMatchObject({ total: ARTIFACT_PAGE_SIZE + 2, next: ARTIFACT_PAGE_SIZE });
+        const last = await listFor(person('owner'), DM, false, first.body.next, 'bot1');
+        const ids = [first, last].flatMap((page) => page.body.artifacts.map((a: { id: string }) => a.id));
+        expect(new Set(ids).size).toBe(ARTIFACT_PAGE_SIZE + 2);
+      });
+
+      it('does nothing for a nearby chat, which is only what was made in it', async () => {
+        await makeOne(person('owner'), DM, 'Direct');
+        expect(titles(await listFor(person('owner'), NEARBY, true, undefined, 'bot1'))).toEqual([]);
+      });
+
+      it('wants a sensible bot id', async () => {
+        const body = { viewer: { person: person('owner'), inChat: false, chat: DM } };
+        expect((await call(chatList, { ...body, botId: '' })).status).toBe(400);
+        expect((await call(chatList, { ...body, botId: 'x'.repeat(256) })).status).toBe(400);
+      });
     });
 
     it("leaves out a guest's artifact once its day is over", async () => {

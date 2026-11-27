@@ -110,6 +110,19 @@ export async function personFacts(db: Pick<Db, 'user' | 'universeMember'>, perso
   return { id: user.id, createdAt: user.createdAt, universeIds: new Set(memberships.map((m) => m.universeId)) };
 }
 
+/** `personFacts` for many people in two reads (not two per person), keyed by id; guests and people who do not exist are left out. */
+export async function peopleFacts(db: Pick<Db, 'user' | 'universeMember'>, personIds: readonly string[]): Promise<Map<string, PersonFacts>> {
+  const out = new Map<string, PersonFacts>();
+  if (personIds.length === 0) return out;
+  const users = await db.user.findMany({ where: { id: { in: [...personIds] }, isGuest: false }, select: { id: true, createdAt: true } });
+  if (users.length === 0) return out;
+  const memberships = await db.universeMember.findMany({ where: { userId: { in: users.map((user) => user.id) } }, select: { userId: true, universeId: true } });
+  const universes = new Map<string, Set<string>>();
+  for (const m of memberships) universes.set(m.userId, (universes.get(m.userId) ?? new Set<string>()).add(m.universeId));
+  for (const user of users) out.set(user.id, { id: user.id, createdAt: user.createdAt, universeIds: universes.get(user.id) ?? new Set<string>() });
+  return out;
+}
+
 /** The people a rule reaches by id, for a clash check or a preview: the saved ids, or a changing universe's members now. */
 export async function idsReached(db: Pick<Db, 'universeMember'>, rule: Pick<RuleFacts, 'recipient' | 'recipientIds'>): Promise<Set<string>> {
   const recipient = rule.recipient;
@@ -177,7 +190,7 @@ export async function usableLots(
     // A pool is open to the people its rule reaches: the version it was issued under, never a later edit
     const reached = new Map<string, boolean>();
     for (const lot of poolLots) {
-      const row = rules.find((rule) => rule.programId === lot.programId && rule.version === lot.ruleVersion) ?? rules.find((rule) => rule.programId === lot.programId);
+      const row = issuingVersion(rules.filter((rule) => rule.programId === lot.programId), lot.ruleVersion);
       reached.set(lot.id, !!row && !!person && reachesRow(row, person));
     }
     pools = poolLots.filter((lot) => reached.get(lot.id));
@@ -191,3 +204,18 @@ export async function usableLots(
 }
 
 const reachesRow = (row: RuleRow, person: PersonFacts): boolean => reaches(ruleFacts(row), person);
+
+/** The version a pool was issued under, from one program's versions newest first: the newest when that one is gone (or was never said). */
+const issuingVersion = (versions: readonly RuleRow[], ruleVersion: number | null): RuleRow | undefined => versions.find((rule) => rule.version === ruleVersion) ?? versions[0];
+
+/**
+ * Whether a shared pool is open to a person, the way `usableLots` decides it: by the rule version the pool was issued under (the latest
+ * version when that one is gone), never a later edit.
+ */
+export async function poolOpenTo(db: Db, lot: { programId: string; ruleVersion: number | null }, personId: string): Promise<boolean> {
+  const person = await personFacts(db, personId);
+  if (!person) return false;
+  const rules = await db.grantRule.findMany({ where: { programId: lot.programId }, include: ruleInclude, orderBy: { version: 'desc' } });
+  const row = issuingVersion(rules, lot.ruleVersion);
+  return !!row && reachesRow(row, person);
+}

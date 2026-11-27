@@ -71,6 +71,20 @@ export async function keepOutcome(db: Pick<Prisma.TransactionClient, '$executeRa
     WHERE "command_id" = ${command.id}::uuid`;
 }
 
+/**
+ * Keeps a FINAL outcome only while the command's stored outcome is still pending (or none): the first final outcome stays, so two copies of one command that finish together answer, and later replay, the same thing
+ * (CodeRabbit on #1038). Answers the outcome that was already stored when this write lost (the caller returns it), or null when this write landed.
+ */
+export async function keepFinalOutcome(command: Command, outcome: StoredOutcome): Promise<StoredOutcome | null> {
+  const written = await prisma.$queryRaw<Array<{ command_id: string }>>`
+    UPDATE "computer_job_commands" SET "outcome" = ${JSON.stringify(outcome)}::jsonb
+    WHERE "command_id" = ${command.id}::uuid AND ("outcome" IS NULL OR "outcome"->>'pending' = 'true')
+    RETURNING "command_id"`;
+  if (written.length === 1) return null;
+  const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.outcome ?? null;
+}
+
 /** Claims a command in a transaction of its own (Cancel, Stop: their effect runs in the finalizer's transactions). */
 export const claimCommand = (command: Command, row: CommandRow, initial: StoredOutcome) =>
   prisma.$transaction((tx) => claimCommandIn(tx, command, row, initial), { timeout: 15_000, maxWait: 15_000 });
@@ -130,6 +144,11 @@ export function resumeOutcomeFrom(job: { status: string; queuedFor: string | nul
  * Called, under the job's lock, by every write that takes a job out of `paused` (a Resume, a carry-on of the month or a limit): the Resumes of this job still pending (taken earlier, their request stopped before it kept an answer)
  * are settled NOW from the job as it stands, before the write changes it. A later start then never decides them: a pending Resume only ever answers its own start, never the one a newer Resume or a carry-on makes
  * (CodeRabbit on #1025, N1). Written once: an answer that was already kept stays.
+ *
+ * Also called by every ENDING of the job (before the ending write, in its transaction) and by every pause. The policy for a Resume with NO recorded decision whose job ends is decided (Opus, 24 Nov): it is settled from the job as it stood just
+ * before the ending, and that is FINAL, since no later decision can come for an ended job. A job that ran with its browser settled (`running` or `waiting`, no `prep_state`) answers ok: the Resume asked for the job to carry on and it did (only a
+ * start that passes the month and the rules makes a job run, and a carry-on settles pending Resumes first). A browser still `restoring` or in `recover` answers `not_ready`. A RECORDED decision (`row.decided`) always wins over the job row,
+ * whatever state the job is in when it ends (CodeRabbit on #1025, 14c4e407 pass, N7).
  */
 export async function settlePendingResumesIn(tx: Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>, jobId: string, except: string | null = null): Promise<number> {
   const pending = await tx.$queryRaw<Array<{ command_id: string; stretch: number | null; decided: StoredOutcome | null; status: string; queued_for: string | null; paused_why: string | null; prep_state: string | null; pauses: number }>>`

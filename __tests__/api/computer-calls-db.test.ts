@@ -1681,7 +1681,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
         });
 
-        it('N13 (d522f4b3 pass): the retirement of recovered pool refusals commits WITH the admission: when it cannot be written the call is refused (never admitted with the refusal still a fault), its room goes back, and the same call asked again is admitted and retires it', async () => {
+        it('N13 (d522f4b3 pass): the retirement of recovered pool refusals commits WITH the admission: when it cannot be written the call is refused (never admitted with the refusal still a fault), its room goes back, and a NEW call id is admitted and retires it', async () => {
           const { jobId } = await running();
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
           await setUp({ poolCeilingMicros: 60_000 });

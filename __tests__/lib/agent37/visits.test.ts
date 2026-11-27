@@ -235,7 +235,8 @@ describe('the record of where the browser went (the listener on the computer)', 
       expect(out).toContain('alive=1');
       expect(out).not.toContain('line=');
       listener.kill('SIGKILL');
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Asked until it says so (a fixed wait was too short when the machine running the tests is busy)
+      await until(() => readBack(home).includes('alive=0'));
       expect(readBack(home)).toContain('alive=0');
     } finally {
       pretend.close();

@@ -182,13 +182,14 @@ describe('the one cookie of a pass', () => {
 describe('the lock a private file is sent with', () => {
   it('runs a page with no origin, no network but the common libraries, no forms, framed only by the game and Orbit', () => {
     const policy = pagePolicy(passFolderAddress('TOKEN', 3)).split('; ');
-    expect(policy).toContain('sandbox allow-scripts');
+    // A tapped link opens in a new tab as the other site itself; nothing else is let out
+    expect(policy).toContain('sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox');
     expect(policy).toContain("default-src 'none'");
     expect(policy).toContain("connect-src 'none'");
     expect(policy).toContain("form-action 'none'");
     expect(policy).toContain("base-uri 'none'");
     expect(policy).toContain("frame-ancestors 'self' https://play.example.test");
-    expect(policy.join('; ')).not.toMatch(/allow-same-origin|allow-forms|allow-top-navigation|allow-popups/);
+    expect(policy.join('; ')).not.toMatch(/allow-same-origin|allow-forms|allow-top-navigation|allow-modals|allow-downloads/);
   });
 
   it('lets a page load pictures, songs and videos from its own folder only, never from the rest of Orbit', () => {

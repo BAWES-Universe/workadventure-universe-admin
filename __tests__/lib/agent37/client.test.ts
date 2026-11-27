@@ -26,6 +26,26 @@ describe('the Agent37 client', () => {
     expect((calls[1].init.headers as Record<string, string>)['X-Agent37-Key']).toBe('sk_live_secret');
   });
 
+  it('looks at an instance ONCE for a caller that must answer quickly: no asking again, and its own timeout on the request', async () => {
+    const busy = client([json(503, { code: 'try_again' }), json(200, { id: 'abc', status: 'running' })]);
+    await expect(busy.api.getInstanceOnce('abc', 3_000)).rejects.toMatchObject({ status: 503 });
+    expect(busy.calls).toHaveLength(1);
+    expect(busy.sleep).not.toHaveBeenCalled();
+    expect(busy.calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    const fine = client([json(200, { id: 'abc', status: 'sleeping' })]);
+    await expect(fine.api.getInstanceOnce('abc', 3_000)).resolves.toMatchObject({ status: 'sleeping' });
+  });
+
+  it('a look whose answer names no status is not reached, once or asked again: `{}`, a list and an empty body say nothing about the machine', async () => {
+    for (const body of [json(200, {}), json(200, { id: 'abc' }), json(200, { id: 'abc', status: 7 }), json(200, []), json(200, null)]) {
+      const once = client([body.clone()]);
+      await expect(once.api.getInstanceOnce('abc', 3_000)).rejects.toMatchObject({ name: 'Agent37Unreached' });
+      expect(once.calls).toHaveLength(1);
+      const again = client([body]);
+      await expect(again.api.getInstance('abc')).rejects.toMatchObject({ name: 'Agent37Unreached' });
+    }
+  });
+
   it('asks again when Agent37 says try_again, and gives up after a few waits', async () => {
     const { api, sleep } = client([json(409, { error: { code: 'try_again', message: 'checkpoint' } }), json(200, { id: 'abc', status: 'sleeping' })]);
     await expect(api.sleepInstance('abc')).resolves.toEqual({ id: 'abc', status: 'sleeping' });
@@ -33,6 +53,34 @@ describe('the Agent37 client', () => {
     const stubborn = client(Array.from({ length: 6 }, () => json(409, { code: 'try_again' })));
     await expect(stubborn.api.sleepInstance('abc')).rejects.toMatchObject({ status: 409, code: 'try_again' });
     expect(stubborn.sleep).toHaveBeenCalledTimes(3);
+  });
+
+  it('CodeRabbit on #1040: a stop or a sleep asked as a power operation (`refused`) is never repeated after a gateway answer that may have reached the machine (502, 503, 504) or an answer whose own `try_again` is not known to mean "refused"; only a 429 from the edge was not taken, and is asked again. Asked the default way (a restart under a wake\'s ticket) a gateway answer is repeated, as before', async () => {
+    for (const status of [502, 503, 504]) {
+      for (const call of ['stopInstance', 'sleepInstance'] as const) {
+        const gateway = client([json(status, {}), json(200, { id: 'abc', status: 'stopped' })]);
+        await expect(gateway.api[call]('abc', 'refused')).rejects.toMatchObject({ status });
+        expect(gateway.calls).toHaveLength(1);
+        expect(gateway.sleep).not.toHaveBeenCalled();
+        const plain = client([json(status, {}), json(200, { id: 'abc', status: 'stopped' })]);
+        await expect(plain.api[call]('abc')).resolves.toEqual({ id: 'abc', status: 'stopped' });
+        expect(plain.calls).toHaveLength(2);
+      }
+    }
+    const refused = client([json(429, {}), json(429, {}), json(200, { id: 'abc', status: 'stopped' })]);
+    await expect(refused.api.stopInstance('abc', 'refused')).resolves.toEqual({ id: 'abc', status: 'stopped' });
+    expect(refused.calls).toHaveLength(3);
+    // Agent37's own `try_again` (a 503, or a 409) may mean the request was accepted and is being carried out: a power POST is not repeated after it either (CodeRabbit on #1040)
+    for (const status of [503, 409]) {
+      for (const call of ['stopInstance', 'sleepInstance'] as const) {
+        const again = client([json(status, { error: { code: 'try_again' } }), json(200, { id: 'abc', status: 'stopped' })]);
+        await expect(again.api[call]('abc', 'refused')).rejects.toMatchObject({ status, code: 'try_again' });
+        expect(again.calls).toHaveLength(1);
+      }
+    }
+    // A start is still asked again after a gateway answer: a wake that lands twice is the same wake
+    const start = client([json(502, {}), json(200, { id: 'abc', status: 'running' })]);
+    await expect(start.api.startInstance('abc')).resolves.toEqual({ id: 'abc', status: 'running' });
   });
 
   it('hands back the whole list as it comes, and refuses one that says more is to come, so a part of the machines never passes for all of them', async () => {
@@ -55,6 +103,28 @@ describe('the Agent37 client', () => {
     }
     const empty = client([json(200, { data: [] })]);
     await expect(empty.api.listInstances()).resolves.toEqual([]);
+  });
+
+  it('Opus on #1040 (sweep recovery): the one list for the sweep is ONE request with its own timeout, never asked again (503, 429 and a lost answer end it), and a part list or a body with no list is refused like the asked-again list', async () => {
+    const machine = { id: 'a', status: 'running', url: 'https://a.agent37.app', created: 1793794006 };
+    for (const status of [503, 429, 502]) {
+      const busy = client([json(status, { error: { code: 'try_again' } }), json(200, { data: [machine] })]);
+      await expect(busy.api.listInstancesOnce(5_000)).rejects.toMatchObject({ status });
+      expect(busy.calls).toHaveLength(1);
+      expect(busy.sleep).not.toHaveBeenCalled();
+    }
+    const lost = client([new TypeError('fetch failed'), json(200, { data: [machine] })]);
+    await expect(lost.api.listInstancesOnce(5_000)).rejects.toBeInstanceOf(Agent37Unreached);
+    expect(lost.calls).toHaveLength(1);
+    const fine = client([json(200, { data: [machine] })]);
+    await expect(fine.api.listInstancesOnce(5_000)).resolves.toEqual([machine]);
+    expect(fine.calls[0].url).toBe('https://api.agent37.com/v1/instances');
+    expect(fine.calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    const part = client([json(200, { data: [machine], has_more: true })]);
+    await expect(part.api.listInstancesOnce(5_000)).rejects.toThrow('only part of them');
+    for (const bad of [json(200, {}), json(200, { data: null }), json(200, [1]), new Response('', { status: 200 })]) {
+      await expect(client([bad]).api.listInstancesOnce(5_000)).rejects.toThrow();
+    }
   });
 
   it('never asks again for a create: after a lost answer the caller looks first', async () => {

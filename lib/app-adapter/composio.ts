@@ -1,4 +1,4 @@
-import { AdapterError, type AppLink, type ConnectStart, type InstantAdapter, type InstantCall, type InstantLog, type LinkAnswer, type ReadyMadeAdapter, type UseResult, type WorkbenchAdapter, type WorkbenchRun } from '@/lib/app-adapter/types';
+import { AdapterError, type AppLink, type ConnectStart, type InstantAdapter, type InstantCall, type InstantLog, type LinkAnswer, type ProviderAction, type ReadyMadeAdapter, type UseResult, type WorkbenchAdapter, type WorkbenchRun } from '@/lib/app-adapter/types';
 import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { INSTANT_ACCOUNT, readInstantCharge } from '@/lib/instant/values';
 
@@ -72,6 +72,10 @@ const managedAuthConfigs = new Map<string, string>();
 export function forgetManagedAuthConfigs(): void {
   managedAuthConfigs.clear();
 }
+
+/** Actions read per page, and the most pages read for one App (the largest App had 905 actions on 26 Nov 2026). */
+const ACTION_PAGE = 1000;
+const ACTION_PAGES = 10;
 
 /** The most groups the usage API returns for one question. */
 const USAGE_GROUP_LIMIT = 1000;
@@ -547,6 +551,45 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
         arguments: args,
       });
       return { ok: json.successful === true, data: json.data ?? null, error: str(json.error), providerCallId: str(json.log_id) };
+    },
+
+    /**
+     * GET /tools?toolkit_slug&toolkit_versions=latest&limit&cursor -> { items: [{ slug, description, human_description, tags, version, is_deprecated }], next_cursor }
+     * (read live 26 Nov 2026: 1000 a page holds every action of the largest Apps; `tags` carries readOnlyHint, createHint, updateHint and
+     * destructiveHint among free words). Listing costs nothing. A page that cannot be read fails the whole list, so a cut list is never
+     * taken for all of an App's actions. Latest versions are asked for by name, as the single-action reads do, so each action is sorted
+     * and described from its newest version.
+     */
+    async actions(toolkit) {
+      const found: ProviderAction[] = [];
+      const seen = new Set<string>();
+      let cursor: string | null = null;
+      const cursors = new Set<string>();
+      for (let page = 0; page < ACTION_PAGES; page += 1) {
+        const query = `toolkit_slug=${encodeURIComponent(toolkit)}&toolkit_versions=latest&limit=${ACTION_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const json = await call(`/tools?${query}`, null);
+        if (!Array.isArray(json.items)) throw new AdapterError('provider', 'Provider sent no list of actions');
+        for (const item of json.items as unknown[]) {
+          if (!isObject(item)) continue;
+          const slug = str(item.slug);
+          if (!slug || seen.has(slug)) continue;
+          seen.add(slug);
+          found.push({
+            slug,
+            description: str(item.human_description) ?? str(item.description),
+            tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+            version: str(item.version),
+            ...(item.is_deprecated === true ? { deprecated: true } : {}),
+          });
+        }
+        const next = str(json.next_cursor);
+        if (!next) return found;
+        // A page that points back to one already read would end the list early: a cut list is never taken for all of an App's actions
+        if (cursors.has(next)) throw new AdapterError('provider', 'The list of actions points back to a page already read');
+        cursors.add(next);
+        cursor = next;
+      }
+      throw new AdapterError('provider', 'The list of actions has more pages than are read');
     },
 
     /** POST /project/usage/tool_calls { from, to, limit } -> { event_count, groups: [{ key, event_count }] } (read live 14 Nov 2026 with the project key). Counts only: no price comes back. `limit` is the most groups returned (1000 at most): a full list may be cut short, and is said to be partial. An unreadable total is an error, never a measured zero. */

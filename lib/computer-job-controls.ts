@@ -23,8 +23,9 @@
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { brickOf, computerView, controlInternals, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
+import { brickOf, computerView, controlInternals, notStartedYet, provedAtOf, provedSecondsOf, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
+import { pauseWhenRowFree, takeRowOrYield } from '@/lib/computer-power';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { revokeJobTokens } from '@/lib/computer-token';
 import { settleRoomIn } from '@/lib/meter-allowance';
@@ -34,10 +35,10 @@ import { dropProfile, parkProfile, settlePark, signInsKept } from '@/lib/compute
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
-import { claimCommand, claimCommandIn, commandRow, decidedOfCommand, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
+import { claimCommand, claimCommandIn, commandRow, decidedOfCommand, keepFinalOutcome, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
 
-/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). `not_ended`: a Cancel's ending did not finish (the job is still live after its bounded tries): nothing is kept as done, the command stays pending, and the same command id asked again ends it (CodeRabbit on #1025, N11 of the d522f4b3 pass). */
-export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused' | 'not_ended';
+/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). `started`: a Cancel that carried `expected: 'not_started'` found the job started since the person was asked: nothing was cancelled. `not_ended`: a Cancel's ending did not finish (the job is still live after its bounded tries): nothing is kept as done, the command stays pending, and the same command id asked again ends it (CodeRabbit on #1025, N11 of the d522f4b3 pass). */
+export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused' | 'not_ended' | 'started';
 /** `command_reused`: the control's command id was already used for another control (another job, kind or argument): refused, nothing written (finding 4). `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
 export type Controlled = { ok: true; view: ComputerView; signInsKept?: boolean } | { ok: false; reason: ControlRefusal };
 
@@ -49,7 +50,7 @@ export const pauseEventId = (jobId: string, n: number): string => `computer:${jo
 
 /** The job on this Brick, or null. */
 async function jobOnBrick(botId: string, jobId: string) {
-  return prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { id: true, botId: true, status: true, queuedFor: true, pauses: true } });
+  return prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { id: true, botId: true, status: true, queuedFor: true, pauses: true, stepDone: true } });
 }
 
 /** The highest rank in the Brick's line now (0 when nobody is ahead). */
@@ -75,11 +76,25 @@ async function answerOf(botId: string, ownerId: string, seen: Exclude<Claimed, {
 /** What a refusal is kept as. */
 const refusalOutcome = (reason: ControlRefusal): StoredOutcome => ({ ok: false, reason });
 
-/** A refusal found before the control's transaction, kept under its command (when it has one) so the same command always answers the same; a copy that got there first answers instead. */
+/**
+ * A refusal found before the control's transaction, kept under its command (when it has one) so the same command always answers the same; a copy that got there first answers instead. When that copy claimed the command but has not
+ * answered yet, this one waits (as long as a Resume copy does) for the final answer and gives it; if none comes, it is refused as it saw the job when it looked, and nothing is stored: it never answers the computer view, which reads as done
+ * (CodeRabbit on #1038).
+ */
 async function refused(botId: string, ownerId: string, under: { command: Command; row: CommandRow } | null, reason: ControlRefusal, now: Date): Promise<Controlled> {
   if (!under) return { ok: false, reason };
   const claimed = await refuseUnder(under.command, under.row, reason);
-  return 'fresh' in claimed ? { ok: false, reason } : answerOf(botId, ownerId, claimed, now);
+  if ('fresh' in claimed) return { ok: false, reason };
+  if ('replay' in claimed && claimed.replay === null) {
+    const began = Date.now();
+    for (;;) {
+      const seen = await seenCommand(under.command, under.row);
+      if (seen && ('reused' in seen || seen.replay !== null)) return answerOf(botId, ownerId, seen, now);
+      if (Date.now() >= began + resumeWait.ms) return { ok: false, reason };
+      await new Promise((resolve) => setTimeout(resolve, resumeWait.stepMs));
+    }
+  }
+  return answerOf(botId, ownerId, claimed, now);
 }
 
 /** How long a copy of a Resume waits for the first request's own answer before it settles the command itself (the first request may have stopped after its commit). Exported for the tests. */
@@ -99,10 +114,11 @@ async function resumeOutcomeOf(jobId: string, stretch: number | null = null): Pr
 async function resumeDecidedOf(command: Command, jobId: string): Promise<StoredOutcome | null> {
   const recorded = await decidedOfCommand(command);
   if (recorded) return recorded;
-  // Nothing recorded: the first request stopped inside its start. A job that RUNS with its browser settled cannot be refused by that start any more (a start finding it running changes nothing), so it is read as it stands; a job still
+  // The "a restoring job waits for a decision" rule below holds only for a job that is still LIVE: once the job ends, every ending settles its pending Resumes first (`settlePendingResumesIn`, final), so nothing stays pending for good (N7).
+  // Nothing recorded: the first request stopped inside its start. A job that RUNS (or waits for the person after running) with its browser settled cannot be refused by that start any more (a start finding it running changes nothing), so it is read as it stands; a job still
   // in line, paused or restoring waits for a decision (a try that is not this Resume's never decides it, N21)
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true, pauses: true } });
-  return job?.status === 'running' && job.prepState === null ? resumeOutcomeFrom(job, await stretchOfCommand(command)) : null;
+  return (job?.status === 'running' || job?.status === 'waiting') && job.prepState === null ? resumeOutcomeFrom(job, await stretchOfCommand(command)) : null;
 }
 
 /** Keeps the Resume's final outcome over its pending mark, once: the first write wins (a copy that settled the command meanwhile, or the request itself), and the stored outcome is what is returned. */
@@ -177,16 +193,23 @@ export interface PauseOptions {
   backInLine?: { rank: number };
   /** Only while this worker still owns the job (a pause decided for a worker, such as the month running out in its renewal): another owner's job is left alone (`superseded`). Left out for the person's own tap. */
   ownerEpoch?: number;
+  /** Only while the job is still on this control generation (a take-over and a hand back each move it): a pause decided from something read earlier (a machine found asleep) is not made under a hand-over that came since (`changed`, CodeRabbit on #1040). */
+  controlGeneration?: number;
   /** False when the caller moves the line itself afterwards. */
   advance?: boolean;
 }
 
 /** What a pause decided inside its transaction: nothing (and why), or the pause of a job that held the machine, with what the steps after the commit need. */
 export type PauseDecision =
-  | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' }
-  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean };
+  | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' | 'changed' }
+  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean; /** When the pause was decided (after every lock was held): the steps after the commit, and the job that starts next on the machine, are dated from it, never from the ask */ at: Date };
 
 export interface PauseInOptions extends PauseOptions {
+  /**
+   * The clock of a pause that may have waited for locks (`pauseWhenRowFree`): read once the pause holds every lock it needs, so the stretch it ends, its pause row and the next start are dated when the pause is WRITTEN, not when it
+   * was asked (the job kept running meanwhile). Without it the pause is dated `now`.
+   */
+  clock?: () => Date;
   /** A pause decided for a refused model call: only while that call's key is still good and was made under the owner epoch the job has now (a delayed call of a worker that was replaced pauses nothing: `key_gone`). */
   key?: string;
   /** The person's own tap may pause a job waiting in line; a pause for the month or a limit is only ever for a job that holds the machine (one in line is left to the line). */
@@ -199,7 +222,15 @@ export interface PauseInOptions extends PauseOptions {
   heldScreen?: boolean;
   /** The month or a limit only (finding 5, GPT round 6): what was refused, kept with the pause so it carries on by itself only once that fits (a model call's estimate, or the renewal's room). */
   blocked?: { kind: 'call' | 'renewal'; micros: number };
+  /**
+   * `machine` only (post-0.5.0 B): the machine was found asleep under the job. Its stretch ends at the last moment the machine was proved awake (`awake_proved_at`, or the readiness that began the stretch), never later: time
+   * after that proof is not priced, and what the job had counted since that proof (a hand-over carries the stretch on in `seconds_run`) is dropped from it before anything is booked.
+   */
+  endAtProof?: boolean;
 }
+
+/** Why a pause row was written: a pause the person or their limits made, or `machine` (post-0.5.0 B): the machine was found asleep under the job, which goes back in line by itself and is never told or shown as a pause. */
+export type PauseWhy = PausedWhy | 'machine';
 
 /** A pause makes an unsaid `carried_on` untrue for good: it is let go in the pause's own transaction, so a manual restart never makes it say "carrying on" of a job the person paused in between (CodeRabbit on #1025, 57). */
 async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: Date): Promise<void> {
@@ -212,11 +243,15 @@ async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: 
  * and, for the month or a limit, what Brick is to tell the person. Nothing is sent to the provider here: the caller runs `afterPause` once this commits (Rule C).
  * `provider`: the Brick computer's provider, read BEFORE the transaction opened (a read that fails inside it would leave the transaction aborted).
  */
-export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PausedWhy, now: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PauseWhy, asked: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+  // A machine pause is only ever a job sent back in line by itself, from the room the job held; it never becomes the job's own `paused_why`
+  if (why === 'machine' && !options.backInLine) throw new Error('A machine pause always goes back in line');
+  let now = asked;
   const row = await lockJob(tx, jobId);
   if (!row) return { kind: 'not_found' };
   if (isOver(row.status)) return { kind: 'over' };
   if (options.ownerEpoch !== undefined && row.ownerEpoch !== options.ownerEpoch) return { kind: 'superseded' };
+  if (options.controlGeneration !== undefined && row.controlGeneration !== options.controlGeneration) return { kind: 'changed' };
   if (row.status === 'queued') {
     if (options.heldOnly) return { kind: 'already' };
     if (options.backInLine) return { kind: 'already' };
@@ -244,12 +279,21 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
     const live = await tx.computerJobToken.count({ where: { id: options.key, jobId, revokedAt: null, expiresAt: { gt: now }, OR: [{ ownerEpoch: row.ownerEpoch }, ...(row.ownerEpoch === 0 ? [{ ownerEpoch: null }] : [])] } });
     if (live === 0) return { kind: 'key_gone' };
   }
+  // From here the pause writes the Brick computer's row: it is taken now, without waiting, before the room is settled (post-0.5.0: pause during take-over; see `takeRowOrYield`)
+  await takeRowOrYield(tx, row.botId);
+  // Every lock is held now (the job's, the computer's row): the pause is dated this moment, not the ask or the start of the transaction (CodeRabbit on #1040)
+  if (options.clock) now = options.clock();
   const job = await tx.computerJob.findUniqueOrThrow({
     where: { id: jobId },
-    select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true },
+    select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true, awakeProvedAt: true },
   });
   const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  const seconds = job.secondsRun + stretch;
+  const counted = job.secondsRun + stretch;
+  // Post-0.5.0 B: only the seconds the machine was proved awake. The stretch is one run from its readiness `began` (the hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
+  // awake, or that readiness itself. Never more than was counted, never less than nothing
+  const seconds = options.endAtProof ? provedSecondsOf(job, now, counted) : counted;
+  // Only the proved seconds are priced: the price window ends at the proof (kept on the pause, so the books read the same one), a rate that changed after it never prices them (CodeRabbit on #1036)
+  const pricedUntil = options.endAtProof && seconds < counted ? provedAtOf(job, now) : null;
   const n = job.pauses + 1;
   // The Resumes of this job still pending (their request stopped before it kept an answer) are settled NOW, from the job as it stands before this pause writes anything, under the job's lock: what each came to is recorded on its own
   // command, per attempt, while its browser state (`prep_state`) still belongs to it. A pause leaves `prep_state` as it is, and a later Resume sets it again, so read later it would be another attempt's: a restore that never settled would
@@ -258,7 +302,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // The time so far, priced as THIS stretch's room was held (its own terms: the same rule a job's ending uses), settles the room in this very commit: the unused part goes back at once
   if (job.reservationKey) {
     const lease = await tx.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } });
-    const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, now.getTime()) : null;
+    const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, (pricedUntil ?? now).getTime()) : null;
     const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
     await settleRoomIn(tx, { key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
   }
@@ -277,11 +321,12 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
       status: 'queued',
       queuedFor: options.backInLine ? 'turn' : 'paused',
       pausedAt: options.backInLine ? null : now,
-      pausedWhy: options.backInLine ? null : why,
+      pausedWhy: options.backInLine ? null : (why as PausedWhy),
       ...(options.backInLine ? { queueRank: options.backInLine.rank } : {}),
       pauses: n,
       // The time so far is the pause's (written below); the job counts again from 0 when it runs again
       secondsRun: 0,
+      awakeProvedAt: null,
       secondsBilled: { increment: seconds },
       stretchStarted: null,
       reservationKey: null,
@@ -310,11 +355,11 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   const grantsPrint = await grantsPrintIn(tx, job.botId);
   // What the month or a limit refused (finding 5): the sweep carries the job on only once that much fits again, so unchanged funds restart nothing
   const blocked = (why === 'allowance' || why === 'rule') && options.blocked ? { blockedKind: options.blocked.kind, blockedMicros: BigInt(Math.max(0, Math.round(options.blocked.micros))), blockedMonth: now.toISOString().slice(0, 7), blockedRuleRev: await ruleRevIn(tx, row.personId) } : {};
-  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint, heldScreen, ...blocked } });
+  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, pricedUntil, grantsPrint, heldScreen, ...blocked } });
   await staleCarriedOn(tx, jobId, now);
   // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them); a screen taken back says so, in place of the usual line
   if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now, { heldScreen });
-  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen };
+  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen, at: now };
 }
 
 /** A digest of the person's own active spending limits (their ids, versions and amounts): kept with a limit's pause, for support (the room check decides whether it carries on). */
@@ -327,12 +372,14 @@ async function ruleRevIn(tx: Prisma.TransactionClient, personId: string): Promis
  * The steps after a pause committed (Rule C), in this order: the turn the commit read is cancelled (that one only), the stretch is written to the books under its own event, where the browser went so far is kept, the job's
  * sign-ins are put away for it alone, the machine rests (or is proved asleep under a turn hold), and the line moves. None of it can undo the pause.
  */
-export async function afterPause(jobId: string, decided: PauseDecision, now: Date, options: PauseOptions = {}): Promise<PauseResult> {
+export async function afterPause(jobId: string, decided: PauseDecision, asked: Date, options: PauseOptions = {}): Promise<PauseResult> {
   if (decided.kind !== 'held') {
     if (decided.kind === 'queued' || decided.kind === 'already') return { ok: true, kind: decided.kind };
-    return { ok: false, reason: decided.kind === 'key_gone' ? 'superseded' : decided.kind };
+    return { ok: false, reason: decided.kind === 'key_gone' || decided.kind === 'changed' ? 'superseded' : decided.kind };
   }
   const { botId, n } = decided;
+  // Every step after the commit, and the job that starts next on the machine, is dated when the pause was decided, which is later than the ask when it waited for the computer's row: the next job's stretch never begins before the paused one's ends
+  const now = decided.at;
   // Rule C: only now, and only the turn the commit read
   if (decided.responseId) await controlInternals.cancelAgentTurn(botId, decided.responseId);
   await bookPause(jobId, n, now);
@@ -362,7 +409,8 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   if (!first) return { ok: false, reason: 'not_found' };
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-  const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, options), TX);
+  // A take-over leader's stop may hold the computer's row, which this pause writes: the pause yields at once when it cannot take it and is tried again once the row is free (`pauseWhenRowFree`)
+  const decided = await pauseWhenRowFree(first.botId, now, (clock) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ...options, clock }), TX));
   return afterPause(jobId, decided, now, options);
 }
 
@@ -377,7 +425,7 @@ export async function bookPause(jobId: string, n: number, now: Date = new Date()
     if (pause.bookedAt) return true;
     const eventId = pauseEventId(jobId, n);
     // A pause is the person's (their own Pause, or their month or their limit): never given back, so it is written as `paused` (no ending of ours)
-    await controlInternals.recordComputerTime({ id: jobId, botId: pause.job.botId, personId: pause.job.personId, runId: pause.job.runId, startedAt: pause.startedAt, reservationKey: pause.roomKey }, pause.seconds, pause.at, { endedBy: null, status: 'paused' }, eventId);
+    await controlInternals.recordComputerTime({ id: jobId, botId: pause.job.botId, personId: pause.job.personId, runId: pause.job.runId, startedAt: pause.startedAt, reservationKey: pause.roomKey }, pause.seconds, pause.at, { endedBy: null, status: 'paused' }, eventId, pause.pricedUntil);
     if (!(await prisma.meterEvent.findUnique({ where: { eventId }, select: { eventId: true } }))) return false;
     await prisma.computerJobPause.updateMany({ where: { id: pause.id, bookedAt: null }, data: { bookedAt: now } });
     return true;
@@ -424,17 +472,18 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
     if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
-    const done = await prisma.$transaction(async (tx) => {
+    // A take-over leader's stop may hold the computer's row: the pause yields and is tried again once it is free (see `pauseWhenRowFree`)
+    const done = await pauseWhenRowFree(botId, now, (clock) => prisma.$transaction(async (tx) => {
       // The job's locks first (the order used everywhere), then the command's row: a copy of this tap waits here for the first, then finds its row
       if (!(await lockJob(tx, jobId))) return { decided: { kind: 'not_found' } as PauseDecision };
       const claimed = await claimCommandIn(tx, under.command, under.row);
       if (!('fresh' in claimed)) return { seen: claimed };
-      const decided = await decidePauseIn(tx, jobId, 'person', now, provider);
+      const decided = await decidePauseIn(tx, jobId, 'person', now, provider, { clock });
       // A pause of a job that held the machine is kept PENDING until its sign-ins are put away (after this commit): a copy never reads a success that does not yet say whether they were kept (CodeRabbit on #1025, 51). A pause that
       // only moved a job out of the line, or was refused, has nothing more to do: its answer is final here
       await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId], held: [{ jobId, n: decided.n }] } : decisionOutcome(decided));
       return { decided };
-    }, TX);
+    }, TX));
     if (done.seen) return 'reused' in done.seen || done.seen.replay !== null ? answerOf(botId, ownerId, done.seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
     result = await afterPause(jobId, done.decided, now);
     if (result.ok && result.kind === 'held') {
@@ -539,7 +588,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = options.pauseRunning ? providerFor(await prisma.brickComputer.findUnique({ where: { botId } })) : null;
   type FirstDecided = { seen: Exclude<Claimed, { fresh: true }> } | { refused: ControlRefusal } | { paused: Array<{ id: string; decided: PauseDecision }> };
-  const decided = await prisma.$transaction(async (tx): Promise<FirstDecided> => {
+  const decide = (clock: () => Date) => prisma.$transaction(async (tx): Promise<FirstDecided> => {
     await lockLine(tx, botId);
     const holding = options.pauseRunning ? (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } })).map((held) => held.id) : [];
     const rows = new Map<string, Awaited<ReturnType<typeof lockJob>>>();
@@ -552,7 +601,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     // Everything after this point is undone by a refusal (finding 11), and the refusal itself is kept as the command's outcome
     await tx.$executeRaw`SAVEPOINT "do_this_first"`;
     try {
-      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now);
+      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now, clock);
       // What was paused has its sign-ins put away only after this commit: the answer stays pending until then (CodeRabbit on #1025, 51)
       if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id), held: paused.flatMap((one) => (one.decided.kind === 'held' ? [{ jobId: one.id, n: one.decided.n }] : [])) } : { ok: true });
       return { paused };
@@ -563,6 +612,8 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
       return { refused: error.reason };
     }
   }, TX);
+  // Pausing what holds the computer writes the computer's row, which a take-over leader's stop may hold: a pause that cannot take it yields at once (the line is let go) and is tried again once it is free. Without a pause the row is not written
+  const decided = await (options.pauseRunning ? pauseWhenRowFree(botId, now, decide) : decide(() => now));
   if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pendingOutcomeOf(under!.command, jobId), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };
   const paused = decided.paused;
@@ -572,7 +623,9 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     const after = await afterPause(one.id, one.decided, now, { advance: false });
     if (after.ok && after.kind === 'held') kept = (kept ?? true) && after.signInsKept;
   }
-  await controlInternals.startNext(botId, now);
+  // The next job starts when the pauses were written (the latest of them), never before: the wait for the computer's row is the paused job's time, not the next one's
+  const started = paused.reduce((latest, one) => (one.decided.kind === 'held' && one.decided.at > latest ? one.decided.at : latest), now);
+  await controlInternals.startNext(botId, started);
   if (under && paused.length > 0) {
     const final = await settleResume(under.command, kept === undefined ? { ok: true } : { ok: true, signInsKept: kept });
     if (final.ok && final.signInsKept !== undefined) kept = final.signInsKept;
@@ -582,7 +635,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
 }
 
 /** "Do this first" itself, under the line's and every job's locks: refused by throwing `ControlRefused` (the caller undoes everything it wrote). */
-async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: string, holding: string[], rows: Map<string, Awaited<ReturnType<typeof lockJob>>>, provider: Provider | null, now: Date): Promise<Array<{ id: string; decided: PauseDecision }>> {
+async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: string, holding: string[], rows: Map<string, Awaited<ReturnType<typeof lockJob>>>, provider: Provider | null, now: Date, clock: () => Date): Promise<Array<{ id: string; decided: PauseDecision }>> {
       const target = rows.get(jobId);
       if (!target || target.botId !== botId) throw new ControlRefused('not_found');
       if (isOver(target.status)) throw new ControlRefused('over');
@@ -602,49 +655,74 @@ async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: strin
       await tx.computerJob.update({ where: { id: jobId }, data: { queueRank: top + 2 } });
       const out: Array<{ id: string; decided: PauseDecision }> = [];
       for (const id of held) {
-        const decided = await decidePauseIn(tx, id, 'person', now, provider, { backInLine: { rank: top + 1 }, advance: false });
+        const decided = await decidePauseIn(tx, id, 'person', now, provider, { backInLine: { rank: top + 1 }, advance: false, clock });
         if (decided.kind !== 'held') throw new ControlRefused(decided.kind === 'taken_over' ? 'taken_over' : decided.kind === 'over' ? 'over' : 'ending');
         out.push({ id, decided });
       }
       return out;
 }
 
+/** The state the person was asked about when they said Cancel. `not_started`: they were told the job had not started, so no question was asked; it is cancelled only while that is still true (a job that started in the gap is refused as `started`, nothing cancelled). Left out: cancelled whatever it is now (the person's own buttons, and callers that asked first). */
+export type CancelExpectation = 'not_started';
+
 /**
  * Cancel ONE job: running or waiting, it ends as the person's own Stop of that job only (charged the time it used, never given back) and the line moves on; waiting in line or paused, it leaves the line and nothing
  * is charged (a pause already wrote its own time). Every other job is left as it is.
  */
-export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command): Promise<Controlled> {
+export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command, expected?: CancelExpectation): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const first = await jobOnBrick(botId, jobId);
   if (!first) return { ok: false, reason: 'not_found' };
   // The command (finding 4): its row is committed FIRST, naming this job, and the ending runs in the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not
   // keep that (it stopped half way), finishes ending THIS job, which ends a job once whoever asks.
-  const under = underOf(command, botId, ownerId, jobId, 'cancel', {}, first.pauses);
+  // The expectation is part of the command: the same id with another expectation is another control (a cancel without one keeps the key it always had)
+  const under = underOf(command, botId, ownerId, jobId, 'cancel', expected ? { expected } : {}, first.pauses);
   if (under) {
     let seen = await seenCommand(under.command, under.row);
     if (!seen) {
       if (isOver(first.status)) return refused(botId, ownerId, under, 'over', now);
+      if (expected === 'not_started' && !notStartedYet(first)) return refused(botId, ownerId, under, 'started', now);
       seen = await claimed(claimCommand(under.command, under.row, { ok: true, pending: true, targets: [jobId] }));
     }
     // Answered before (or another control's id); a first request that stopped half way leaves it pending: this one finishes ending the job
     if (seen && ('reused' in seen || seen.replay !== null)) return answerOf(botId, ownerId, seen, now);
   } else if (isOver(first.status)) return { ok: false, reason: 'over' };
+  else if (expected === 'not_started' && !notStartedYet(first)) return { ok: false, reason: 'started' };
   // The job can change between the look and the ending (a job in line can start): the ending is asked again on what it is now
   for (let attempt = 0; attempt < 3; attempt++) {
     const job = await jobOnBrick(botId, jobId);
     if (!job || isOver(job.status)) break;
-    if (job.status === 'queued') await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued' });
+    // The person was told it had not started: a job that has started since (it was in line when they were asked) is never ended on that word, here or inside the ending's own write
+    if (expected === 'not_started' && !notStartedYet(job)) return startedSince(botId, ownerId, under, now);
+    if (job.status === 'queued') {
+      const report: { started?: boolean } = {};
+      await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued', ...(expected === 'not_started' ? { notStarted: true } : {}), report });
+      if (report.started) return startedSince(botId, ownerId, under, now);
+    }
     // A job that holds the machine: an ending already committed for it (the runner's kept intent, a decided pool cutoff) governs instead of the person's stop, decided under the finalizer's own lock
     else await controlInternals.endByPerson(jobId, now, { advance: true, held: true });
   }
   const after = await jobOnBrick(botId, jobId);
-  if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  // The last look found a job that started since the person was told it had not (the tries ran out on it starting): that is the refusal, not an ending that did not finish
+  if (expected === 'not_started' && after && !isOver(after.status) && !notStartedYet(after)) return startedSince(botId, ownerId, under, now);
+  // The parked browser is let go only once the job is over: a job that is still live (every ending lost its race) stays resumable with its saved sign-ins, and a retried Cancel drops it once the job is over (CodeRabbit on #1025, 14c4e407 pass, N8)
+  if (after && after.pauses > 0 && isOver(after.status)) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // The answer is kept only once the job is over: an ending that lost its race on every try (a concurrent write moved the job each time) leaves the command pending, and a retry under the same id ends it again, instead of
   // answering the stored success forever while the job still holds the machine (CodeRabbit on #1025, 53)
-  if (under && (!after || isOver(after.status))) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });
+  // (kept only while nothing final is stored: a copy of this command that answered `started` first stays the answer, and is returned here too)
+  if (under && (!after || isOver(after.status))) {
+    const stored = await keepFinalOutcome(under.command, { ok: true, targets: [jobId] });
+    if (stored && !stored.ok) return { ok: false, reason: stored.reason as ControlRefusal };
+  }
   // A job that is still live is NOT told as cancelled: the person (or the Brick) would stop asking while it still holds the machine. The command stays pending and is asked again under the same id (CodeRabbit on #1025, N11)
   if (after && !isOver(after.status)) return { ok: false, reason: 'not_ended' };
   return viewOf(botId, ownerId, now);
+}
+
+/** A Cancel that was told "not started" found the job started: nothing was ended. The refusal is kept under its command, once, so a retry of the same id answers the same; a copy of the command that already stored its own final answer stays the answer. */
+async function startedSince(botId: string, ownerId: string, under: { command: Command; row: CommandRow } | null, now: Date): Promise<Controlled> {
+  const stored = under ? await keepFinalOutcome(under.command, refusalOutcome('started')) : null;
+  return stored ? answerOf(botId, ownerId, { replay: stored, targets: null }, now) : { ok: false, reason: 'started' };
 }
 
 /** A claim in a transaction of its own, as a seen command (or null when it is this request's). */

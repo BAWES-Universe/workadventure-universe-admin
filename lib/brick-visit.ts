@@ -272,6 +272,19 @@ export async function whereIsBrick(botId: string, roomUrl: string | null, now: D
 }
 
 /**
+ * Whether a Brick may come into this room as one of its bots right now, because it has a home here or walks here beside its owner: the same answer `whereIsBrick` gives other people
+ * (a visit not run out, the universe still takes visits, the owner may still open the room, the person who placed a home may still manage bots there), and a visit whose owner is a
+ * guest never counts (as in `keepVisitAlive`). A Brick that is off or waits deleted is not here.
+ */
+export async function brickIsHereFor(botId: string, roomUrl: string, now: Date = new Date()): Promise<boolean> {
+  const here = await whereIsBrick(botId, roomUrl, now);
+  if (!here) return false;
+  if (here.kind === 'home') return true;
+  const owner = await prisma.user.findUnique({ where: { id: here.ownerId }, select: { isGuest: true } });
+  return !!owner && !owner.isGuest;
+}
+
+/**
  * The visiting Bricks the bot server should have in this room, for the people it found there (their WorkAdventure
  * ids). Every person found has their visit seen here, now: that is where a Brick follows its person from room to room,
  * and what keeps a visit alive. A person who is not here, or whose Brick is off, deleted or not visiting, adds nothing;

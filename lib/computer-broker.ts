@@ -7,6 +7,7 @@ import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token
 import { agentMayAct } from '@/lib/computer-control';
 import { jobTagOf } from '@/lib/computer-values';
 import { withoutTags } from '@/lib/computer-turn-tags';
+import { powerTiming } from '@/lib/computer-power';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/github/git-login';
@@ -327,7 +328,17 @@ export type StartedTurn =
  */
 export async function startTurn(jobId: string, text: unknown, signal?: AbortSignal, owner: { epoch: EpochSaid } = { epoch: undefined }): Promise<StartedTurn> {
   if (typeof text !== 'string' || text.trim() === '' || text.length > 200_000) return { ok: false, reason: 'failed' };
-  const live = await liveJob(jobId, owner);
+  let live = await liveJob(jobId, owner);
+  // A job that is Brick's and running on a machine that is stopped: a hand back that could not wake it yet (a stop of ours was still in flight) left it so, and nothing else will wake it before the next renewal finds it asleep. It is woken
+  // here, waiting only for a live stop as a start does, and looked at again; a stop that still can land answers "starting", so the caller asks again (Opus on #1040)
+  // The same for a job banked while its machine was stopped (no stretch, its awake proof kept) whose machine another path has woken since: nothing else starts its stretch again, and a job with no stretch is never admitted (below), so it would
+  // answer "starting" for good. Woken or found working here, its stretch starts again at once (Opus and Sentry on #1040)
+  const banked = live.ok || live.reason === 'no_machine' ? await prisma.computerJob.findFirst({ where: { id: jobId, status: 'running', control: 'brick', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } }, select: { botId: true } }) : null;
+  if ((!live.ok && live.reason === 'no_machine') || banked) {
+    const row = banked ?? (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } }));
+    if (row && (await wakeIfStopped(row.botId, { ms: powerTiming().waitMs, dead: false })) === 'pending') return { ok: false, reason: 'starting' };
+    live = await liveJob(jobId, owner);
+  }
   if (!live.ok) return live;
   const { job, provider } = live;
   // A turn is kept but its conversation is not known (the agent did not say it): whether it still runs cannot be asked, so the caller is
@@ -381,7 +392,11 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       }
       // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
       // if it will not come back, its room given back), so the job goes on instead of failing for nothing
-      await wakeIfStopped(fresh.job.botId);
+      if ((await wakeIfStopped(fresh.job.botId, { ms: powerTiming().waitMs, dead: false })) === 'pending') {
+        // A stop of ours may still land: the machine is not woken under it and the job is not ended. The caller asks again: the turn start above wakes a machine that is still stopped for a job that is Brick's and running
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return { ok: false, reason: 'starting' };
+      }
       fresh = await liveJob(job.jobId, owner);
       if (!fresh.ok) {
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
