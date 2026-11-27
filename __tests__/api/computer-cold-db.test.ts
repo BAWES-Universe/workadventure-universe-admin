@@ -298,6 +298,22 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(names().filter((call) => call.startsWith('stop:'))).toEqual([]);
     });
 
+    it('CodeRabbit on #1040: a run that lost its claim between moving its step to `stored` and recording its stop records no stop and sends none', async () => {
+      const brick = await idleBrick();
+      const real = prisma.brickComputer.updateMany.bind(prisma.brickComputer);
+      jest.spyOn(prisma.brickComputer, 'updateMany').mockImplementation((async (args: { data?: { packStage?: string } }) => {
+        const done = await real(args as never);
+        // Recovery takes the claim over right after the step moved to `stored`, before this run records its stop
+        if (args.data?.packStage === 'stored') await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimId: 'taken-over', packClaimedAt: new Date() } });
+        return done;
+      }) as never);
+      const result = await packAway(brick.botId, provider, NOW);
+      jest.restoreAllMocks();
+      expect(result).toBe('busy');
+      expect(names().filter((call) => call.startsWith('stop:'))).toEqual([]);
+      expect(await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM "computer_power_ops" WHERE "bot_id" = ${brick.botId}`).toEqual([{ n: BigInt(0) }]);
+    });
+
     it('a pack-away stopped between marking its copy verified and moving its step on goes on from the proved copy: no new copy and no second proof', async () => {
       const brick = await idleBrick();
       // The server stopped after the proof passed and the copy was marked verified, before the step moved from "stored" to "verified"

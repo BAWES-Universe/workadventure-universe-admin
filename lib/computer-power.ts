@@ -58,6 +58,83 @@ export function setRowLockWaitForTests(holdMs: number | null): void {
   rowLockWaitMs = holdMs === null ? 150_000 : holdMs + 30_000;
 }
 
+/**
+ * Waits, holding nothing else, until the Brick computer's row is free: a transaction that only locks the row and lets it go at once. A pause writes that row (the park mark, the turn hold) inside a 15 s transaction that already holds the
+ * job's locks (and, for "do this first", the Brick's line), and a take-over leader's stop holds the row for up to 120 s: waited for INSIDE that transaction the pause would time out (P2028) and not happen. Waiting here instead takes no other
+ * lock, so it can join no wait cycle, whatever order the pause then takes its locks in.
+ */
+export async function untilRowFree(botId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+  }, rowLockWait());
+}
+
+/** A transaction that gave up waiting (Prisma's P2028: it never began in time, or ran out of time while a lock held it up). It wrote nothing: the database rolled it back. */
+export function isTransactionTimeout(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028';
+}
+
+/** The computer's row was taken by someone else when a pause asked for it without waiting (`takeRowOrYield`: Postgres 55P03, lock not available). It wrote nothing: the transaction is rolled back and the pause is tried again. */
+export function isRowBusy(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message} ${JSON.stringify((error as { meta?: unknown }).meta ?? '')} ${String((error as { cause?: unknown }).cause ?? '')}` : '';
+  return /55P03|could not obtain lock on row/i.test(text);
+}
+
+/**
+ * The first thing a pause that will write the Brick computer's row does with it, before it settles the room (which takes the one lock every meter step of every person shares) and before it writes anything: take the row, WITHOUT
+ * waiting. A take-over leader's stop holds that row for up to 120 s, and a statement that waits for it while the transaction holds the meter lock or a job lock stalls everyone behind those locks (Prisma's own timeout does not
+ * interrupt a blocked statement). A pause that does not get the row yields at once (`isRowBusy`): its transaction is rolled back, and `pauseWhenRowFree` waits for the row holding nothing and tries again. A pause that never
+ * writes the row (the person holds the screen, a kept ending, a job in line) never reaches this, so it never waits. It also cannot wait in a cycle with a Restart first, which takes the row and then the jobs.
+ */
+export async function takeRowOrYield(tx: Db, botId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE NOWAIT`;
+}
+
+/**
+ * How long a pause keeps trying when the row is taken again between the wait and its transaction (a second leader's stop right behind the first, wake beats): longer than the longest hold of the row (a leader's stop holds it up to 120 s) and
+ * the wait that follows it, so a pause that meets one busy row after another is not given up on after three tries (Sentry on #1040: it would end in an error where the person only had to wait). Every try waits for the row first, holding nothing, so
+ * trying again never spins. A count also bounds it.
+ */
+let rowRetryBudgetMs = 330_000;
+const ROW_TRIES_MAX = 25;
+/** Test seam: the time a pause keeps trying (null restores the real one). */
+export function setRowRetryBudgetForTests(ms: number | null): void {
+  rowRetryBudgetMs = ms === null ? 330_000 : ms;
+}
+
+/**
+ * Runs the transaction of a pause (`run`: one `prisma.$transaction`, nothing after it, nothing sent to a provider) so that a take-over leader's stop on the Brick computer's row never makes the pause fail with a timeout
+ * (post-0.5.0: pause during take-over). The first try goes straight in: the pause takes the row without waiting (`takeRowOrYield`) the moment it knows it will write it. One that did not get the row (or timed out) wrote nothing:
+ * the row is waited for here, outside any transaction, holding nothing, and the same pause is tried again, for as long as the budget lasts (`rowRetryBudgetMs`) and at most `ROW_TRIES_MAX` times. Any other error is the caller's, and so is the last failure of a pause that used its budget up.
+ *
+ * The job kept running while the pause waited, so the pause is dated when it is WRITTEN, not when it was asked: `run` receives a `clock`: the caller's `now` moved on by the real time spent since the ask, for the pause to read once it holds its locks (Sentry and CodeRabbit on #1040: a stretch ended at
+ * the moment of the ask would leave the seconds of the wait unpriced). The caller's `now` itself, simulated or not, is never replaced: only the pause's own moment moves with the wait.
+ */
+export async function pauseWhenRowFree<T>(botId: string, now: Date, run: (clock: () => Date) => Promise<T>, options: { retryTimeouts?: boolean } = {}): Promise<T> {
+  // A try that timed out (P2028) is retried unless the caller says otherwise: a renewal's timeout is the job's lock or the shared meter lock being slow, not the computer's row (that is taken without waiting and yields as `isRowBusy`), and
+  // its runner has long given up and asks again, so retrying it would pile retriers onto the shared lock (Sentry on #1040). The waits for the row below are always retried: a wait that timed out IS the row being held
+  const retryTimeouts = options.retryTimeouts !== false;
+  const began = Date.now();
+  // Read by the pause once it holds every lock it needs (`decidePauseIn`), so a wait for the job's lock counts too, not only the wait for the row
+  // Moved on in whole seconds only (the books count whole seconds, and the few milliseconds of an ordinary pause that waited for nothing are not a wait: a pause that did not wait keeps the caller's time exactly)
+  const clock = () => new Date(now.getTime() + Math.floor((Date.now() - began) / 1000) * 1000);
+  // An error that is not a busy row or a timeout is the caller's at once; so is the last one of a pause that used its time or its count up
+  const giveUp = (error: unknown, attempt: number, waiting = false) => !(((retryTimeouts || waiting) && isTransactionTimeout(error)) || isRowBusy(error)) || attempt >= ROW_TRIES_MAX || Date.now() - began >= rowRetryBudgetMs;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run(clock);
+    } catch (error) {
+      if (giveUp(error, attempt)) throw error;
+    }
+    try {
+      await untilRowFree(botId);
+    } catch (error) {
+      // The wait itself can time out (a second leader's hold right behind the first, past the wait): it wrote nothing, so it is one more try used, and the pause goes on within the same time and count (Sentry on #1040)
+      if (giveUp(error, attempt, true)) throw error;
+    }
+  }
+}
+
 type Db = Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>;
 
 /** Writes the operation inside the caller's transaction, which already holds the Brick computer's row (its claim wrote it, or it locked it). */

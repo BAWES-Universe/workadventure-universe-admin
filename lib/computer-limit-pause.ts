@@ -1,7 +1,9 @@
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { controlInternals, providerFor } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
 import { afterPause, decidePauseIn } from '@/lib/computer-job-controls';
+import { pauseWhenRowFree } from '@/lib/computer-power';
 import { settlePendingResumesIn } from '@/lib/computer-commands';
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { getMeterSettings } from '@/lib/meter';
@@ -41,12 +43,15 @@ export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', no
     if (!first) return 'not';
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-    const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 });
+    // A take-over leader's stop may hold the computer's row: the pause yields and is tried again once it is free (see `pauseWhenRowFree`)
+    const decided = await pauseWhenRowFree(first.botId, now, (clock) => prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { clock, ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 }));
     if (decided.kind !== 'held') return 'not';
     await afterPause(jobId, decided, now);
     return 'paused';
   } catch (error) {
     console.error('[Computer] Could not pause a job its month or a limit stopped:', error instanceof Error ? error.message : 'unknown');
+    // Every try found the computer's row taken (or timed out): the job keeps running and the next refused call tries again, but it is seen (Opus on #1040, F4)
+    Sentry.captureException(error, { tags: { area: 'computer', step: 'limit-pause' } });
     return 'not';
   }
 }

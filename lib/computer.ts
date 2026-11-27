@@ -87,7 +87,9 @@ import { fenceCommand } from '@/lib/computer-fence-script';
 import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
-import { endPowerOp, openPowerOpOf, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
+import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
+import { endPowerOp, openPowerOpOf, pauseWhenRowFree, powerTiming, PROVIDER_MARGIN_MS, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -394,12 +396,14 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
  * `stopping`: nothing uses it, it still counts as awake for the wind-down, and every sweep tries again. `only` limits which stored states this
  * may rewrite (the caller knows what it saw). Returns whether the machine is proved asleep.
  */
-async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number): Promise<boolean> {
+async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }, onSent?: () => void): Promise<boolean> {
   // A stop the caller decided from a state it saw (`only`, and for a start that failed, its wake ticket) is CLAIMED first, in a committed conditional write, and the provider is called only when that write changed the row: a
   // replacement that woke the machine since (it sets another state and takes the next ticket) makes the claim write nothing, and nothing is stopped under it (GPT's seventh note, B)
   if (only || ticket !== undefined) {
-    const op = await claimStop(botId, ref, only, ticket);
+    const op = await claimStop(botId, ref, only, ticket, abandoned);
     if (!op) return false;
+    // The caller hears that its claim was taken and the stop is on its way, proved or not (a stop that is not proved stays `stopping` and is sent again by the sweep)
+    onSent?.();
     const proven = await stopAtProvider(botId, ref, provider, op);
     await noteStopped(botId, ref, proven, ['stopping']);
     return proven;
@@ -413,11 +417,16 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
  * The claim of a stop: the machine goes to `stopping` only while it is still in a state the caller saw (and, for a start's own failure, under that start's ticket). The stop is recorded as a power operation IN THE SAME COMMIT
  * (post-0.5.0 B): a wake whose ticket comes after this claim sees the stop open and waits for it, and one that came before made the claim write nothing. The operation's id when this write took it, else null.
  */
-async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<string | null> {
+async function claimStop(botId: string, ref: string, only?: string[], ticket?: number, abandoned?: { epoch: number; staleMs: number }): Promise<string | null> {
   const states = only ? Prisma.sql`AND "machine" = ANY(${only}::text[])` : Prisma.empty;
-  const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : Prisma.empty;
+  // An abandoned wake is stopped only under the epoch that was seen and while its beat is STILL stale, judged by the database's clock in this write (a live wake beats, a replacement takes the next ticket)
+  const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : abandoned ? Prisma.sql`AND "wake_epoch" = ${abandoned.epoch} AND "updated_at" <= ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${abandoned.staleMs / 1000}))` : Prisma.empty;
   return prisma.$transaction(async (tx) => {
-    const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
+    // The stop of an abandoned wake takes the next epoch in the same write (CodeRabbit on #1040): the wake that was given up on may still resume (it only missed its beats), and its ticket then no longer matches, so its final write, its beat and its own failure stop all land on nothing
+    // The same write also pushes a turn hold out by the watch time (Opus on #1040): the wake that was given up on may still reach the provider after this stop is proved (and its sender may be dead, so nothing of its own cleans up), so the
+    // hold is not lifted on this proof but only on a proof from a stop sent after the watch time has passed. In the same write as the claim: a crash between the two would leave the hole open
+    const fence = abandoned ? Prisma.sql`, "wake_epoch" = "wake_epoch" + 1, "turn_unproven_since" = CASE WHEN "turn_unproven_since" IS NULL THEN NULL ELSE (NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${(ABANDONED_WAKE_WATCH_MS + TURN_HOLD_CLOCK_SKEW_MS) / 1000}) END` : Prisma.empty;
+    const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC')${fence} WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
   }, rowLockWait());
 }
@@ -428,6 +437,21 @@ export class StopInFlight extends Error {
     super('A stop of this computer may still land: it is not woken under it');
     this.name = 'StopInFlight';
   }
+}
+
+/**
+ * A start whose machine the row now calls `stopped` or `stopping` can still have woken it at the provider after that stop was proved (its wake call landed late, or it only failed afterwards): a machine awake that nothing counts. The stop
+ * may be the one that took its ticket (an abandoned wake) or one that moved no number (Turn off computer, the deletion of the Brick, a take-over leader's stop): either way it is stopped again, against the states the row can have now. A
+ * replacement that woke it since (the row is `waking`, `restoring` or `working`) owns it and is never stopped, and the claim of a stop writes nothing when the row left those states between the read and the claim. A second stop is harmless
+ * (the sweep stops a `stopping` row again). True when the row said stopped or stopping and this stop was sent.
+ */
+async function stopLateWake(botId: string, ref: string, provider: Provider, mine: number): Promise<boolean> {
+  const now = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, providerRef: true, wakeEpoch: true } }).catch(() => null);
+  if (!now || now.providerRef !== ref || (now.machine !== 'stopped' && now.machine !== 'stopping')) return false;
+  // A `stopping` row under this start's own number is the stop that was just sent under it and not proved (or a turn-off's whose proof is still to come): the sweep sends it again until it is proved, so it is not sent twice at once
+  if (now.machine === 'stopping' && now.wakeEpoch === mine) return false;
+  await stopMachine(botId, ref, provider, ['stopped', 'stopping']).catch(() => false);
+  return true;
 }
 
 /** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
@@ -461,6 +485,21 @@ export const takeWakeTicketForTests = takeWakeTicket;
  * image update, a restart of the instance), so no fixed limit of that wait is assumed.
  */
 let wakeTiming = { beatMs: 30_000, staleMs: 2 * 60_000 };
+/**
+ * How long after the stop of an abandoned wake its turn hold is kept: a power call that was in flight can still land at the provider, and the sweep stops the machine again each pass until that time has passed. A start sends a power call only right after
+ * a fenced beat proved it still owns its wake (`stillMine`), the stop of an abandoned wake can only be claimed `staleMs` after that beat, and a call that was retried (`again`) can reach the provider as late as the longest account call plus the provider's
+ * margin after the beat: so the watch must be at least that minus `staleMs`. It is the whole of it (Opus on #1040).
+ */
+const ABANDONED_WAKE_WATCH_MS = LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS;
+/**
+ * The most that this server's clock may be ahead of the database's before a turn hold is lifted late (Sentry on #1040): an ordinary hold is dated by this server's clock (a JavaScript date, with the job's end), while the lift is judged by the database's clock.
+ * `settleTurnHold` lifts a hold dated up to this much past the database's now, and the hold that the stop of an abandoned wake pushes out is dated this much further (watch + this), so the watch itself is kept whole.
+ */
+const TURN_HOLD_CLOCK_SKEW_MS = 30_000;
+/** Test seam: the wake timings in force and the watch time, to prove a stale wake is never judged abandoned before its late call can no longer land. */
+export function wakeTimingForTests(): { beatMs: number; staleMs: number; watchMs: number } {
+  return { ...wakeTiming, watchMs: ABANDONED_WAKE_WATCH_MS };
+}
 /** Test seam: shorter beat and stale times (null restores the real ones). */
 export function setWakeTimingForTests(timing: { beatMs: number; staleMs: number } | null): void {
   wakeTiming = timing ?? { beatMs: 30_000, staleMs: 2 * 60_000 };
@@ -2042,9 +2081,10 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
   // The rest is done: no longer claimed, so the sweep never mistakes it for one that was left half way
   await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { restClaimedAt: null } });
   if ((await holders()) > 0) {
-    // A job started while the machine was resting and its wake may have come before the rest: wake it again, so it works
-    await provider.wake(row.providerRef).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null } });
+    // A job started while the machine was resting and its wake may have come before the rest: it is woken again, so it works. Through the same ticketed wake as every start (CodeRabbit on #1036, found on #1040): the ticket is taken from
+    // `resting` (a start's wake in flight is waited for, never woken a second time under it, and a stop or sleep of ours that can still land is waited for), readiness is waited for, and only then does the row say `working`. A bare wake
+    // here was sent outside the ticket and the power-operation fence, so it could land beside a start's own wake, or under a stop that was recorded after the rest
+    await bringUp(botId, provider, now).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
   }
   return true;
 }
@@ -2087,6 +2127,13 @@ async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string):
  * claimed in one write before the provider is called, so two jobs starting at the same moment make ONE computer, never two.
  */
 async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, /** How long to wait for a stop of ours on this machine before giving up with StopInFlight, and whether a dead sender's is waited out too (post-0.5.0 B). A start waits only for a live one: it can go back in line. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
+  await bringUpMachine(botId, provider, now, kept, stopWait);
+  // The machine answered, by whichever start, hand back or turn woke it: the stretches a return banked while it was stopped start again here (Sentry on #1040: a return left pending whose machine another path woke would leave its jobs
+  // without a stretch for good). Only banked jobs are started (see `restartBankedStretches`), so the job whose own start is in this very call is never touched
+  await restartBankedStretches(botId, new Date()).catch((error) => console.error('[Computer] Could not start the stretches banked while a machine was stopped:', error instanceof Error ? error.message : 'unknown'));
+}
+
+async function bringUpMachine(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
   let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   if (row.machine === 'working') {
     // A guard (post-0.5.0 B): a `working` row with a rest or stop of ours that can still land (live, or a dead sender's inside its life) cannot be trusted, and nothing is started on it: the job goes back in line with nothing held. The rest that
@@ -2196,21 +2243,48 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     }, wakeTiming.beatMs);
     beat.unref?.();
     let mark: MachineMark | null = null;
+    // A fenced beat, asked right before every call that wakes, stops or restarts the machine: the start's own beat write, which lands only while it still owns its wake (its ticket is the Brick's and the row is still waking or restoring).
+    // The write itself is the proof: neither the sweep's claim of an abandoned wake nor a take-over can land for `staleMs` after it. An error is a no (nothing is sent). A start that lost its wake sends nothing (Opus on #1040)
+    const stillMine = async (): Promise<boolean> => {
+      try {
+        return (await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine} AND "machine" IN ('waking', 'restoring')`) === 1;
+      } catch {
+        return false;
+      }
+    };
+    // A start that lost its wake looks again, as one whose final write found another ticket does (it never fails its job, and never writes the row `broken` over the replacement's wake)
+    let replaced = false;
     try {
       // A computer that has worked before and has no mark saved here (made ready before Orbit kept marks) may be on a boot that already ran jobs: a machine that slept keeps its boot and its
       // programs. A mark taken now would put its clock reading AFTER whatever those jobs left running, and the fence would keep it as the computer's own. So it is started afresh before the first
       // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
       const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
       const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
-      await provider.wake(ref);
+      // A wake call that fails may still have started the instance (Agent37 starts it and then waits for health; a wait that runs out rejects with the instance running at full rate): it is stopped as a failed readiness is, under this
+      // start's own ticket, and against the state the row has when that ticket went to a stop (the stop of an abandoned wake, Turn off computer). Nothing stops a `broken` row afterwards, so nothing is left to the sweep (Opus on #1040)
       try {
+        await provider.wake(ref, { stillMine });
+      } catch (error) {
+        if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine).catch(() => false))) await stopLateWake(botId, ref, provider, mine);
+        if (!(error instanceof WakeReplaced)) throw error;
+        replaced = true;
+      }
+      // A wake that was given up on (its beat missed, so its stop was claimed under the next epoch) can still reach the provider AFTER the stop was proved: the machine the row calls stopped is awake again. It is stopped against the
+      // state the row has now, and this start looks again from the top (it wakes the machine under a ticket of its own when it still needs it) instead of waiting for readiness on a machine it no longer owns (CodeRabbit on #1040)
+      if (!replaced && (await stopLateWake(botId, ref, provider, mine))) {
+        // A machine that was stopped under this start (a turn-off, a take-over's stop, the stop of an abandoned wake) is woken again only while a job still needs it: with none left there is nothing to wake it for, and it stays asleep (Sentry on #1040)
+        if (!(await wakeStillWanted(botId))) return;
+        continue;
+      }
+      if (!replaced) try {
         // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
-        mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
+        mark = (await provider.ready(ref, { ...(freshBoot ? { freshBoot: true } : {}), stillMine })) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
-        await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine);
-        throw error;
+        if (!(await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine))) await stopLateWake(botId, ref, provider, mine);
+        if (!(error instanceof WakeReplaced)) throw error;
+        replaced = true;
       }
     } finally {
       clearInterval(beat);
@@ -2218,7 +2292,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
     let from: Date | null = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
     let older = cameBack?.olderCopyUsed ?? false;
-    if (!restoring && cameBack === null) {
+    if (!replaced && !restoring && cameBack === null) {
       // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
       // It is cleared only when the files were saved after the return finished: the saved-copy date that stood when the return began (the newest copy's, which an older-copy
       // return leaves in place) is not a save made since.
@@ -2230,7 +2304,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       }
     }
     // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
-    const wrote = await prisma.$transaction(async (tx) => {
+    const wrote = replaced ? false : await prisma.$transaction(async (tx) => {
       const held = await tx.$queryRaw<Array<{ wake_epoch: number; mark_boot_id: string | null }>>`SELECT "wake_epoch", "mark_boot_id" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if (held[0]?.wake_epoch !== mine) return false;
       await tx.brickComputer.update({
@@ -2241,6 +2315,9 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       return true;
     }, rowLockWait());
     if (wrote) return;
+    // A start whose beats failed can be in `ready` when its wake is given up on, and `ready` can restart the machine after the stop was proved: the row says stopped, nobody wants it, and the machine is awake. It is stopped against the
+    // state the row has (a replacement's waking row is never stopped), as when the wake call itself lands late (Opus on #1040)
+    if (!replaced) await stopLateWake(botId, ref, provider, mine);
     // Replaced: the machine is the replacement's to make ready. A job runs only on a machine that is `working`: if it is, this start has nothing more to do; if it is not (the replacement's wake is still going, or it failed and the machine
     // was stopped) the loop waits for it like any start that arrives then, and wakes it with its own ticket when no wake is in flight
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
@@ -2248,7 +2325,97 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       await untilCleaned(botId);
       return;
     }
+    // The wake was given up on and the machine stopped (its ticket went to that stop): with no job left that needs it, it stays asleep instead of being woken again for nobody (Sentry on #1040)
+    if ((row.machine === 'stopped' || row.machine === 'stopping') && !(await wakeStillWanted(botId))) return;
+    // A start that lost its wake before it sent a power call (stillMine) is no longer the start that just made the machine: it looks again as a start that arrives now would (it waits for a wake in flight, and takes a stale one over only when
+    // its beat is stale), and the looks are counted, so a check that keeps saying no ends the start instead of looping (Opus on #1040)
+    if (replaced) spins++;
   }
+}
+
+/**
+ * A wake whose sender died leaves the row `waking` or `restoring` for good, and the machine it woke running (a redeploy in the middle of a wake, the old container killed after seconds). Only `settleTurnHold` stopped such a wake, and only when a
+ * turn hold existed. The sweep stops it here too: a wake whose beat has been missed for the whole stale time, with no running or waiting job that could be using the machine, is claimed with the abandoned claim (the epoch seen AND the beat still stale
+ * are checked by the database in the write, and the epoch moves on: a live wake beats every 30 s, and a replacement took the next ticket, so neither is ever claimed). A cold-storage return (`restoring` with its stage `returning`) has its own claim and
+ * does not beat this row: it is left to that. The row is `stopped` afterwards, so `stopLateStarts` also catches a start the dead sender had already sent (Opus on #1040).
+ * Every path that writes `waking` or `restoring` with a machine goes through `bringUpMachine` (the start's own make, the return from cold storage inside it, and the ticket), which beats the row.
+ */
+async function stopAbandonedWakes(): Promise<void> {
+  const rows = await prisma.brickComputer.findMany({
+    where: { machine: { in: ['waking', 'restoring'] }, NOT: { providerRef: null }, updatedAt: { lte: new Date(Date.now() - wakeTiming.staleMs) }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] },
+    select: { botId: true, providerRef: true, provider: true, machine: true, wakeEpoch: true },
+    take: 200,
+  });
+  for (const row of rows) {
+    if (!row.providerRef) continue;
+    if ((await prisma.computerJob.count({ where: { botId: row.botId, status: { in: ['running', 'waiting'] } } })) > 0) continue;
+    const provider = providerFor(row);
+    if (!provider) continue;
+    await stopMachine(row.botId, row.providerRef, provider, [row.machine], undefined, { epoch: row.wakeEpoch, staleMs: wakeTiming.staleMs }).catch(() => false);
+  }
+}
+
+/** The longest the look at the whole account may take (one request, never asked again). A test shortens it. */
+let lateStartListMs = 5_000;
+export function setLateStartListMsForTests(ms: number | null): void {
+  lateStartListMs = ms ?? 5_000;
+}
+/** How many `stopped` rows are read at a time (a page of the cursor on botId). A test makes it small. */
+let lateStartPageRows = 1000;
+export function setLateStartPageRowsForTests(rows: number | null): void {
+  lateStartPageRows = rows ?? 1000;
+}
+
+/**
+ * A start of ours can reach the provider long after its row was stopped (its sender froze, or died right after sending it), and nothing fences a call already sent: the machine then runs behind a row that says `stopped`. Looked for here, once
+ * for the whole account (CodeRabbit on #1040, Opus): EVERY `stopped` row of this database with a machine is read FIRST (in pages, so no row is left out by a count), then ONE list of the account is asked (one try, a short timeout, never asked again), so a machine the list calls awake was awake after
+ * its row was stopped, never before it (the other order would stop a machine a normal turn-off had just stopped). Only for machines this database knows (dev and prod may share an account): the list is never walked for its own sake.
+ * A machine the list calls awake behind a row that is still `stopped` at the epoch that was read is stopped with the state AND the epoch in the claim's own write: a replacement that took the next ticket, or woke the machine and stopped it again
+ * (the epoch moved), makes the claim write nothing. Nothing is started or billed here. A list that gets no clean answer (an error, a rate limit, a part of the account, no answer in time) skips the pass. Sentry hears of every stop this step sends, proved or not.
+ */
+async function stopLateStarts(): Promise<void> {
+  const rows: Array<{ botId: string; providerRef: string | null; provider: string; wakeEpoch: number }> = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await prisma.brickComputer.findMany({
+      where: { machine: 'stopped', NOT: { providerRef: null } },
+      select: { botId: true, providerRef: true, provider: true, wakeEpoch: true },
+      orderBy: { botId: 'asc' },
+      take: lateStartPageRows,
+      ...(cursor ? { cursor: { botId: cursor }, skip: 1 } : {}),
+    });
+    rows.push(...page);
+    if (page.length < lateStartPageRows) break;
+    cursor = page[page.length - 1].botId;
+  }
+  if (rows.length === 0) return;
+  const byProvider = new Map<Provider, typeof rows>();
+  for (const row of rows) {
+    const provider = providerFor(row);
+    if (!provider?.awakeMachinesOnce) continue;
+    byProvider.set(provider, [...(byProvider.get(provider) ?? []), row]);
+  }
+  for (const [provider, mine] of byProvider) {
+    const said = await withinMs(
+      provider.awakeMachinesOnce!(lateStartListMs).catch((error) => {
+        console.error('[Computer] The list of machines did not answer, no late start was looked for this pass:', error instanceof Error ? error.message : 'unknown');
+        return null;
+      }),
+      lateStartListMs + 1_000,
+      null,
+    );
+    if (!said) continue;
+    for (const row of mine) {
+      if (!row.providerRef || said.get(row.providerRef) !== true) continue;
+      await stopMachine(row.botId, row.providerRef, provider, ['stopped'], row.wakeEpoch, undefined, () =>
+        Sentry.captureMessage('A computer was found running behind a row that says it is stopped, and its stop was sent', { level: 'warning', tags: { area: 'computer', step: 'late-start-found' }, extra: { botId: row.botId } }),
+      ).catch(() => false);
+    }
+  }
+}
+
+/** Whether any job of this Brick is running or waiting, that is, still needs its machine woken. */
+async function wakeStillWanted(botId: string): Promise<boolean> {
+  return (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0;
 }
 
 /**
@@ -2310,12 +2477,14 @@ export async function renewJob(
   let look = await awakeLookFor(first, row, provider);
   if (look === 'asleep' && row?.providerRef) {
     if (!epochMatches(first.ownerEpoch, owner.epoch)) return SUPERSEDED;
-    const lost = await machineLostUnder(jobId, first.botId, row.providerRef, first.ownerEpoch, provider, now);
+    const lost = await machineLostUnder(jobId, first.botId, row.providerRef, first.ownerEpoch, first.controlGeneration, provider, now);
     // The person took the screen while the machine was being read (Opus on e58adde1, fix 1): their take-over stands. The renewal goes on as usual and proves nothing; the take-over has its own owner of the machine
+    // The same when the job changed hands since it was read (a take-over and a hand back both move its control generation; CodeRabbit on #1040): the asleep look was of a machine that has been handed over meanwhile, so it pauses nothing
     if (lost !== 'taken_over') return lost;
     look = 'unknown';
   }
-  const decided = await prisma.$transaction(
+  // The renewal writes the computer's row only when the room is refused and the job pauses; a take-over leader's stop may hold it then. The pause yields at once when it cannot take the row (before it settles anything), and the renewal waits for the row outside any transaction and tries again
+  const decide = (clock: () => Date) => prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
       if (!job || isOver(job.status)) return { kind: 'over' as const };
@@ -2340,13 +2509,15 @@ export async function renewJob(
       // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. While the person holds the screen it pauses too: the screen is taken back in
       // the same write and it never carries on by itself (Fable's ruling of 23 Nov, section 7)
       if (room.reason === 'allowance' || room.reason === 'rule') {
-        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true, blocked: { kind: 'renewal', micros: moreMicros } });
+        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { clock, ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true, blocked: { kind: 'renewal', micros: moreMicros } });
         if (paused.kind === 'held') return { kind: 'paused' as const, paused, why: room.reason };
       }
       return { kind: 'refused' as const, room, epoch: job.ownerEpoch };
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+  // A renewal retries only a busy computer row, never a timeout: its timeouts are the job's lock or the shared meter lock, and the runner gives up at 8 s and asks again (Sentry on #1040; the pauses keep retrying both)
+  const decided = await pauseWhenRowFree(first.botId, now, decide, { retryTimeouts: false });
   if (decided.kind === 'over') {
     const again = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
     return again && isOver(again.status) && again.endedBy === 'unanswered' ? { ok: false, reason: 'unanswered' } : { ok: false, reason: 'over' };
@@ -2427,19 +2598,21 @@ async function awakeLookFor(job: { status: string; stretchStarted: Date | null; 
  * told, never shown as a pause), with its stretch ended at the last proof of awake and only those seconds priced; the room's unused part goes back in the same commit. The machine is marked `stopping`, so nothing uses it until a
  * recorded stop proves it asleep, and the next start wakes it under the power-operation fence. The turn died with the machine: no cancel is sent to it. The worker is told it no longer owns the job.
  */
-async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
+async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, controlGeneration: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
   const controls = await import('@/lib/computer-job-controls');
-  const decided = await prisma.$transaction(
+  // A take-over leader's stop may hold the computer's row, which this pause writes: it yields at once when it cannot take it, and is tried again once the row is free (`pauseWhenRowFree`)
+  const decide = (clock: () => Date) => prisma.$transaction(
     async (tx) => {
       const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
       // Never `heldScreen`: a machine pause never takes the screen back from a person who took it (their take-over answers `taken_over` and stands)
-      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { ownerEpoch, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
+      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { clock, ownerEpoch, controlGeneration, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
       if (paused.kind === 'held') await tx.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'working' }, data: { machine: 'stopping', restClaimedAt: null } });
       return paused;
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
-  if (decided.kind === 'taken_over') return 'taken_over';
+  const decided = await pauseWhenRowFree(botId, now, decide);
+  if (decided.kind === 'taken_over' || decided.kind === 'changed') return 'taken_over';
   console.error('[Computer] A machine was found asleep under a billed job: the job goes back in line, billed only to the last proof of awake');
   Sentry.captureMessage('Computer machine found asleep under a billed job', { level: 'warning', tags: { area: 'computer', step: 'machine-lost' } });
   if (decided.kind === 'held') {
@@ -2934,7 +3107,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // Post-0.5.0 B, an `unanswered` ending (the sweep's): the machine is read once, as a renewal reads it. Found asleep (a stop that landed late and nothing renewed since), the stretch ends at the last proof of awake and only those
-    // seconds are priced, never the time up to this ending. A look that does not answer proves nothing and the ending is priced as before. Read after the guards above, so a sweep that defers never asks the provider; asked once
+    // seconds are priced, never the time up to this ending. A look that does not answer is priced the same way (second GPT audit, O3, Opus): what a person is charged is only ever what was proved, so an hour of waiting is never billed to them
+    // on a provider that did not answer. The provider's own bill for the rest is not hidden: the daily check of the books against the provider's bill (`unbooked_time`) reports it. Read after the guards above, so a sweep that defers never asks the provider; asked once
     // however many tries the write takes (the write's own WHERE holds the lease version, so a renewal that proved the machine since moves it and the try is read again)
     if (endedBy === 'unanswered' && held) {
       if (look === undefined) {
@@ -2942,7 +3116,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         look = await awakeLookFor(job, machine, providerFor(machine));
       }
       pricedUntil = null;
-      if (look === 'asleep') {
+      if (look === 'asleep' || look === 'unknown') {
         const proved = provedSecondsOf(job, now, seconds);
         if (proved < seconds) {
           seconds = proved;
@@ -3614,6 +3788,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // A machine that may still run the turn of a job that ended is put to sleep and proved, and only then do the jobs behind it start
   const turnHolds = await prisma.brickComputer.findMany({ where: { NOT: { turnUnprovenSince: null } }, select: { botId: true }, take: 200 });
   for (const machine of turnHolds) await settleTurnHold(machine.botId);
+  // A wake whose sender died (a redeploy in the middle of it) and a start that reached the provider after its row was stopped leave a machine running that nothing counts (CodeRabbit on #1040): both are looked for here, and never block the rest of the sweep
+  await stopAbandonedWakes().catch((error) => console.error('[Computer] Abandoned wakes could not be looked for:', error instanceof Error ? error.message : 'unknown'));
+  await stopLateStarts().catch((error) => console.error('[Computer] Machines running behind a stopped row could not be looked for:', error instanceof Error ? error.message : 'unknown'));
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of idle) await restIfUnheld(machine.botId, now);
   // A machine a job holds is kept awake while it works
@@ -4019,27 +4196,39 @@ export async function underTurnHold(botId: string): Promise<boolean> {
  */
 export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
   try {
-    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true } });
+    // The database's clock before anything is decided (moved on by the skew a server's clock may have): a hold lifts only on proof that is NEWER than the hold (a stop claimed after this moment and proved asleep, with the hold itself dated no later than this moment), so the hold
+    // that the stop of an abandoned wake pushes out (see `claimStop`) outlasts the wake call that may still land (Opus on #1040)
+    const [{ now: t0 }] = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT ((NOW() AT TIME ZONE 'UTC') + make_interval(secs => ${TURN_HOLD_CLOCK_SKEW_MS / 1000})) AS now`;
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true, wakeEpoch: true, updatedAt: true, packStage: true } });
     if (!row?.turnUnprovenSince) return true;
     const seen = row.turnUnprovenSince;
-    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays
-    const lift = () => prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen }, data: { turnUnprovenSince: null } });
-    if (await agentCannotRun(botId)) {
-      await lift();
-      await clearFirstTurnMarks(botId);
-      return true;
+    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays; and one dated after the moment this looked (the watch of an abandoned wake) stays
+    const lift = async () => (await prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen, AND: [{ turnUnprovenSince: { lte: t0 } }] }, data: { turnUnprovenSince: null } })).count === 1;
+    // No machine at all (none was made, or the row has no provider ref): nothing can be running, so the hold goes at once. A machine that is `stopped` is asked again (below): its stop is proved afresh, after the hold was set
+    if (!row.providerRef || row.machine === 'none') {
+      const lifted = await lift();
+      if (lifted) await clearFirstTurnMarks(botId);
+      return lifted;
     }
     const holders = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, ...(exceptJobId ? { id: { not: exceptJobId } } : {}) } });
     if (holders > 0) return false;
     const provider = providerFor(row);
     if (!provider || !row.providerRef) return false;
+    // A cold-storage return is left to its own claim whole: no copy (it would save the half-restored home folder as the newest copy, and `dropColdCopiesIfNewer` could then delete the cold copy being restored), no stop, the hold stays (Opus on #1040; the same rule as `stopComputerWork`)
+    if (row.packStage === 'returning') return false;
+    // A cold-storage return (`restoring` with its stage `returning`) does not beat this row (it beats its own claim) and is never taken for an abandoned wake: it is left to its own claim, as in the sweep's `stopAbandonedWakes` (Sentry on #1040)
+    const abandoned = (row.machine === 'waking' || row.machine === 'restoring') && row.packStage !== 'returning' && Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
-    if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
+    // (A wake that is abandoned is not copied: the copy would write the row, and with it the beat that proves the wake dead, and it has run nothing since the last copy)
+    if (!abandoned && (await provider.awake(row.providerRef).catch(() => false))) await saveCopy(botId, row.providerRef, provider);
     // Claimed against the state it saw: a wake that took its ticket since (the machine is then `waking`) makes the claim write nothing, and no stop is sent under it (Opus's second minor note on #1036). The state read is the one claimed
     // (a machine `resting` or `broken` under a hold is stopped and the hold lifted, as before). A machine in any other state is not touched: a live wake has a running job (counted above), a park's wake has none and is not stopped
-    if (!(['working', 'stopping', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
-    if (!(await stopMachine(botId, row.providerRef, provider, [row.machine]))) return false;
-    await lift();
+    // One exception (CodeRabbit on #1040): a wake that took its ticket and then died (no job holds the machine, nothing beats the row) leaves it `waking` or `restoring` for good, and every queued job waits for this hold to lift. A wake whose beat has
+    // been missed for the whole stale time is abandoned, and is stopped like any machine: claimed against the wake epoch that was seen AND the beat still being stale in the same write, so a live wake, or a replacement that took the next ticket, is never stopped
+    if (!abandoned && !(['working', 'stopping', 'stopped', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
+    if (!(await stopMachine(botId, row.providerRef, provider, [row.machine], undefined, abandoned ? { epoch: row.wakeEpoch, staleMs: wakeTiming.staleMs } : undefined))) return false;
+    // The hold of an abandoned wake was pushed out by its stop: it lifts only on a stop sent after that time, by a later pass (the sweep walks the holds every pass and stops the machine again each time)
+    if (!(await lift())) return false;
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
     await clearFirstTurnMarks(botId);
     return true;
@@ -4229,8 +4418,9 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
         const done = await leadFence(botId, resumed, now, anyway || (await anywayChosen(botId)));
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
         if (done === 'blocked') return { ok: false, reason: 'still_running' };
-      } else {
-        await finishReturnOf(botId, resumed);
+      } else if ((await finishReturnOf(botId, resumed)) === 'pending') {
+        // A return that could not wake the machine yet stays pending (its lease is let go for the sweep): answered as on its way, never resumed again here past the deadline (Opus on #1040)
+        return { ok: false, reason: 'in_progress' };
       }
       continue;
     }
@@ -4244,19 +4434,99 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-export async function wakeIfStopped(botId: string): Promise<void> {
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+export async function wakeIfStopped(botId: string, /** How long to wait for a stop of ours that can still land. The hand back waits out a dead sender's whole life; a request that can be asked again (a runner's turn) waits only for a live one, as a start does. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true }, /** Whose the jobs were while the machine was stopped: `brick` (a machine that went down under them) or `person` (a return from a take-over: the person held the machine the fence stopped). Decides how far their stretch is banked (see `bankStretches`). */ held: 'brick' | 'person' = 'brick'): Promise<'up' | 'pending'> {
+  let row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
-  if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return;
+  if (!row?.providerRef || !provider) return 'up';
+  // A machine that is working answers for the jobs banked while it was stopped (another path woke it since a return or a turn went pending): their stretch starts again here, as a wake of our own would (Sentry on #1040)
+  if (row.machine === 'working') {
+    if (await hasBankedJobs(botId)) {
+      // ...but not while a stop or sleep of ours may still land on it (Sentry on #1040): the stop is recorded before the row says so, and a stretch started now would run on a machine about to sleep. It is waited for as a start waits (a live one always, a dead
+      // sender's only when the caller asks); one that outlasts the wait keeps the jobs banked and the return pending, and once nothing can land the machine is looked at again (a stop that landed leaves it stopped, and it is woken below)
+      if ((await waitForPowerOps(row.providerRef, Date.now() + stopWait.ms, stopWait.dead)) === 'open') {
+        console.error('[Computer] Banked jobs were not restarted, because a stop of ours may still land on their machine; they stay banked');
+        return 'pending';
+      }
+      row = await prisma.brickComputer.findUnique({ where: { botId } });
+      if (!row?.providerRef) return 'up';
+    }
+    if (row.machine === 'working') {
+      await restartBankedStretches(botId, new Date());
+      return 'up';
+    }
+  }
+  const stopped = row.machine === 'stopped' || row.machine === 'stopping';
+  // Any other state (a wake that is still going, a machine at rest or broken) is left to its own owner, unless jobs are waiting banked for it: their stretch is not started on a machine that is not up (Opus on #1040, N5), so it is brought up
+  // (a wake in flight is waited for, a stale one taken over) and the stretches start once it works
+  if (!stopped && !(await hasBankedJobs(botId))) return 'up';
+  // The jobs of this Brick that are running are not billed for the time the machine sits stopped and is woken (Opus on #1040, F1): their stretch so far is banked, and starts again at readiness
+  if (stopped) await bankStretches(botId, new Date(), held, row.providerRef);
   try {
-    // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included
-    await bringUp(botId, provider, new Date(), undefined, { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true });
+    // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included. `bringUp` starts the banked stretches again once the machine works
+    await bringUp(botId, provider, new Date(), undefined, stopWait);
+    return 'up';
   } catch (error) {
+    // A stop of ours that outlasted even the extended wait is not a machine that will not come back (CodeRabbit on #1040): no wake was tried, so no job ends and nothing is marked broken. The caller keeps the return pending
+    // (the transition's lease is let go, so the sweep and the next request ask again) and the jobs stay as they are, banked
+    if (error instanceof StopInFlight) {
+      console.error('[Computer] A machine was not woken after a hand back, because a stop of ours may still land; the return stays pending');
+      return 'pending';
+    }
+    // A machine that was not stopped (another start is waking it, it rests, or it is broken) and could not be brought up now is no reason to end the jobs on it or to write over a wake that another start owns (Opus on #1040, N6): the banked
+    // jobs stay banked and the row is left as it is. The caller asks again (the next turn start, the sweep or the next request)
+    if (!stopped) {
+      console.error('[Computer] A machine that was not stopped could not be brought up for the jobs banked on it; they stay banked and it is tried again:', error instanceof Error ? error.message : 'unknown');
+      return 'pending';
+    }
     console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
     for (const job of jobs) await endJob(job.id, 'stopped', 'error', new Date());
-    await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] } }, data: { machine: 'broken' } });
+    // Never a cold-storage return that another start is running (`restoring`, stage `returning`): the `stopped` read above is old by now, and marking that row broken would make the return's last write fail and leave a computer billed that nothing owns (Opus on #1040; as in the sweep, line `stopAbandonedWakes`)
+    await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] }, data: { machine: 'broken' } });
+    return 'up';
   }
+}
+
+/** Whether a running job of this Brick waits banked (no stretch, its awake proof kept, nothing to restore) for its machine to be up again. */
+async function hasBankedJobs(botId: string): Promise<boolean> {
+  return (await prisma.computerJob.count({ where: { botId, status: 'running', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } } })) > 0;
+}
+
+/**
+ * The wake of a hand back (and of a Restart first): `wakeIfStopped` banks the running jobs' stretch while the stopped machine is woken (see there), and starts it again once the machine works, whoever woke it. The jobs were the person's.
+ */
+async function wakeForReturn(botId: string): Promise<'up' | 'pending'> {
+  return wakeIfStopped(botId, undefined, 'person');
+}
+
+/**
+ * The running jobs' stretch so far goes into `secondsRun` and the stretch pauses, up to the last moment the machine is known to have been awake and no further (Opus on #1040, N2, N3 and N4). Which moment depends on whose the jobs were:
+ *  - `brick`: a machine that went down under jobs Brick was working. The last awake proof (`provedAtOf`) only: the sweep stops a `stopping` machine again on every pass and records an operation each time, so no stop of ours says when it went down. Renewals prove
+ *    the machine every few minutes, so the most this gives away is one renewal gap, in the customer's favour.
+ *  - `person`: jobs coming back from a take-over, on a machine the fence (or a Restart first) stopped while the person held it. The EARLIEST stop or sleep of ours on this machine sent after the stretch began (`computer_power_ops`): the machine was awake until we
+ *    sent that one, and the sweep's retries after it say nothing. Never earlier than the proof.
+ * Never later than `now`. A banked job carries its cap in `awakeProvedAt` (a job with no stretch and no mark has not started yet: see `restartBankedStretches`). Conditional on the stretch that was read, so a concurrent write is never overwritten; the lease
+ * version moves, as every change of a job's billed basis does.
+ */
+async function bankStretches(botId: string, now: Date, held: 'brick' | 'person', ref: string): Promise<void> {
+  const running = await prisma.computerJob.findMany({ where: { botId, status: 'running', NOT: { stretchStarted: null } }, select: { id: true, secondsRun: true, stretchStarted: true, awakeProvedAt: true } });
+  for (const job of running) {
+    if (!job.stretchStarted) continue;
+    const proof = provedAtOf(job, now)?.getTime() ?? job.stretchStarted.getTime();
+    const stop = held === 'person' ? await prisma.computerPowerOp.findFirst({ where: { botId, providerRef: ref, sentAt: { gt: job.stretchStarted } }, orderBy: { sentAt: 'asc' }, select: { sentAt: true } }) : null;
+    const cap = Math.min(now.getTime(), Math.max(proof, stop?.sentAt.getTime() ?? 0));
+    const stretch = Math.max(0, Math.round((cap - job.stretchStarted.getTime()) / SECOND));
+    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', stretchStarted: job.stretchStarted }, data: { secondsRun: job.secondsRun + stretch, stretchStarted: null, awakeProvedAt: new Date(cap), leaseVersion: { increment: 1 } } });
+  }
+}
+
+/**
+ * The stretches `bankStretches` banked start again at readiness, and only those: a job that is banked has no stretch and carries its last awake proof, whereas a fresh job whose own start has not marked it ready, and a job whose
+ * browser is still being brought back (`prepState`), have no stretch and no proof and are never started here, since their time is booked by their own ready write (Opus and Sentry on #1040, N1). Only ever called for a machine that works (the
+ * machine answered at `now`, which is also the proof the stretch carries from here).
+ */
+async function restartBankedStretches(botId: string, now: Date): Promise<void> {
+  await prisma.computerJob.updateMany({ where: { botId, status: 'running', stretchStarted: null, prepState: null, NOT: { awakeProvedAt: null } }, data: { stretchStarted: now, awakeProvedAt: now, leaseVersion: { increment: 1 } } });
 }
 
 /**
@@ -4268,7 +4538,7 @@ export async function wakeIfStopped(botId: string): Promise<void> {
  *   4. only then does control become Brick's.
  * Brick is not admitted at any point before step 4, whatever state the jobs are in.
  */
-async function finishReturn(botId: string, epoch: number | null, restart = false): Promise<'back' | 'lost'> {
+async function finishReturn(botId: string, epoch: number | null, restart = false): Promise<'back' | 'lost' | 'pending'> {
   const mine = async () => epoch === null || (await renewTransition(botId, 'returning', epoch));
   if (epoch !== null) await drainHumanInput(botId);
   if (!(await mine())) return 'lost';
@@ -4282,7 +4552,11 @@ async function finishReturn(botId: string, epoch: number | null, restart = false
   await noteHands(botId, 'brick');
   // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
   await fenceControl(botId);
-  await wakeIfStopped(botId);
+  if ((await wakeForReturn(botId)) === 'pending') {
+    // The machine could not be woken yet (a stop of ours may still land): control does not go back to Brick's with its jobs on a stopped machine. The lease is let go, so the sweep (or the next request) finishes the return
+    if (epoch !== null) await releaseLease(botId, 'returning', epoch);
+    return 'pending';
+  }
   if (epoch === null) {
     await setTakeOverCheck(botId, null);
     return 'back';
@@ -4303,7 +4577,7 @@ async function finishReturn(botId: string, epoch: number | null, restart = false
  *   3. the jobs go back to Brick, every key made before ends, the machine is woken (its note for the new boot is written as for any wake), and control is Brick's.
  * A machine that will not wake ends its jobs (as after any hand back, `wakeIfStopped`).
  */
-async function restartSteps(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed'> {
+async function restartSteps(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed' | 'pending'> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (row?.providerRef && provider && row.machine === 'working') {
@@ -4320,7 +4594,7 @@ async function restartSteps(botId: string, epoch: number): Promise<'back' | 'los
  * A `returning` transition whose leader is gone, finished by whoever finds it: as the restart it is when the check says `restarting` (the machine is stopped and proved asleep
  * first, and the job's ask is kept), otherwise as an ordinary hand back. A restart finished as an ordinary hand back would clear the ask it kept and never stop the machine.
  */
-async function finishReturnOf(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed'> {
+async function finishReturnOf(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed' | 'pending'> {
   const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck ?? null;
   return check === 'restarting' ? restartSteps(botId, epoch) : finishReturn(botId, epoch);
 }
@@ -4364,6 +4638,8 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
       if (epoch === null) continue;
       const done = await restartSteps(botId, epoch);
       if (done === 'lost') continue;
+      // A stop of ours that outlasted the wake's wait leaves the return pending (the lease is let go and the sweep finishes it): the person is told it is on its way, never that it is done
+      if (done === 'pending') return { ok: false, reason: 'in_progress' };
       break;
     }
     // A restart that is on its way (its leader is alive) is joined; one whose leader is gone is finished here
@@ -4376,7 +4652,7 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
     if (row.state === 'returning' && check === 'restarting') {
       if (leaseLapsed(row, t)) {
         const resumed = await resumeTransition(botId, row);
-        if (resumed !== null) await restartSteps(botId, resumed);
+        if (resumed !== null && (await restartSteps(botId, resumed)) === 'pending') return { ok: false, reason: 'in_progress' };
         continue;
       }
       if (t >= deadline) return { ok: false, reason: 'in_progress' };
@@ -4408,7 +4684,8 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
   for (;;) {
     const row = await readControl(botId);
     if (!row) {
-      await finishReturn(botId, null);
+      // No transition to hold open here (no lease to let go): a return that could not wake the machine yet is answered as on its way, and the next request or the sweep asks again (Sentry on #1040)
+      if ((await finishReturn(botId, null)) === 'pending') return { ok: false, reason: 'in_progress' };
       break;
     }
     const t = Date.now();
@@ -4417,13 +4694,15 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
       // From `fencing` with its leader gone (a fence that was never proved): the person never had input, so there is nothing to drain
       const epoch = await beginTransition(botId, row.state, row.epoch, 'returning');
       if (epoch === null) continue;
-      if ((await finishReturn(botId, epoch)) === 'lost') continue;
+      const finished = await finishReturn(botId, epoch);
+      if (finished === 'lost') continue;
+      if (finished === 'pending') return { ok: false, reason: 'in_progress' };
       break;
     }
     if (row.state === 'agent') break;
     if (row.state === 'returning' && leaseLapsed(row, t)) {
       const resumed = await resumeTransition(botId, row);
-      if (resumed !== null) await finishReturnOf(botId, resumed);
+      if (resumed !== null && (await finishReturnOf(botId, resumed)) === 'pending') return { ok: false, reason: 'in_progress' };
       continue;
     }
     if (t >= deadline) return { ok: false, reason: 'in_progress' };

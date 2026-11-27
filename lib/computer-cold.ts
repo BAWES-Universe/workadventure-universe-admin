@@ -6,7 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { recordPowerOp, recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
+import { recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import { readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
@@ -249,6 +249,17 @@ async function advance(botId: string, claimId: string, from: string, to: string,
   return moved.count === 1;
 }
 
+/**
+ * Records the pack-away's stop with the computer's row locked, and only while the row still says this run holds the pack-away of this machine (`packing`, this provider ref, this claim). A run whose claim was taken over, or whose
+ * machine was given up or replaced, between its last write and this one records nothing (null), so it sends nothing: the run that holds the claim now decides what happens to the machine.
+ */
+async function recordStopWhilePacking(botId: string, ref: string, claimId: string): Promise<string | null> {
+  return prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ one: number }>>`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} AND "machine" = 'packing' AND "provider_ref" = ${ref} AND "pack_claim_id" = ${claimId} FOR UPDATE`;
+    return held.length === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
+  }, rowLockWait());
+}
+
 /** Gives the computer back as it was. `awake` leaves it as it is (a job is arriving for it); otherwise it is put to sleep and proved so. */
 async function giveUp(botId: string, row: PackRow, why: string, options: { awake: boolean; count: boolean; provider?: Cold; stage?: string; claimId: string }): Promise<'failed' | 'busy'> {
   const previous = row.packPrevious === 'stopped' ? 'stopped' : 'resting';
@@ -351,7 +362,8 @@ async function runPack(botId: string, provider: Cold, claimId: string): Promise<
         if (!(await advance(botId, claimId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
         // The copy is whole: the computer sleeps while it is proved (it only has to exist until the proof passes)
         // Recorded as a power operation like every stop of ours (post-0.5.0 B); a stop that could not be recorded is not sent (the proof does not need the machine asleep)
-        const op = await recordPowerOp(botId, ref, 'stop').catch(() => null);
+        // Only while this run still holds the claim: one that lost it between the move to `stored` and this write must not record or send a stop (CodeRabbit on #1040)
+        const op = await recordStopWhilePacking(botId, ref, claimId).catch(() => null);
         if (op) await underPowerOp(op, () => provider.stop(ref)).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
       }));
       row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });

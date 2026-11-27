@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import * as Sentry from '@sentry/nextjs';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import type { ExecOptions } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
 import { asciiJson, LIST_SEND_PIECE } from '@/lib/computer-outside';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
@@ -33,6 +34,8 @@ const COLD_SHA = createHash('sha256').update(UNIVERSE_COLD).digest('hex');
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const instances = new Map<string, Instance>();
   const calls: string[] = [];
+  /** How each stop and sleep asked to be repeated (the second argument the provider gave). */
+  const retries: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
   let coldSum: string | null = COLD_SHA;
@@ -48,6 +51,12 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const client = {
     async listInstances() {
       calls.push('list');
+      return [...instances.values()];
+    },
+    /** The one look at the whole account (one request, never asked again): a test makes it fail with `refuse.listOnce`. */
+    async listInstancesOnce(timeoutMs: number) {
+      calls.push(`listOnce:${timeoutMs}`);
+      if (refuse.listOnce) throw refuse.listOnce;
       return [...instances.values()];
     },
     async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }) {
@@ -81,14 +90,16 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       instances.get(id)!.status = 'running';
       return { id, status: 'running' };
     },
-    async sleepInstance(id: string) {
+    async sleepInstance(id: string, retry?: string) {
       calls.push(`sleep:${id}`);
+      retries.push(`sleep:${retry ?? 'any'}`);
       instances.get(id)!.status = 'sleeping';
       instances.get(id)!.slept_at = Math.floor(Date.now() / 1000);
       return { id, status: 'sleeping' };
     },
-    async stopInstance(id: string) {
+    async stopInstance(id: string, retry?: string) {
       calls.push(`stop:${id}`);
+      retries.push(`stop:${retry ?? 'any'}`);
       instances.get(id)!.status = 'stopped';
       return { id, status: 'stopped' };
     },
@@ -171,7 +182,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value), setColdInPlace: (value: string | null) => (coldInPlace = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, retries, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value), setColdInPlace: (value: string | null) => (coldInPlace = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { slept?: number[]; sleepLog?: string[]; image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -598,6 +609,44 @@ describe('the Agent37 provider', () => {
   });
 });
 
+describe('the look at every machine of the account (the sweep stops a machine that runs behind a stopped row, CodeRabbit on #1040)', () => {
+  it('says each machine by its status in ONE request: awake for a running or starting one, asleep for a stopped, sleeping, stopping or gone one, not known for a status Agent37 never documented (said to Sentry)', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.create('bot-2');
+    await p.create('bot-3');
+    await p.create('bot-4');
+    const set = (id: string, status: string) => {
+      (w.instances.get(id) as { status: string }).status = status;
+    };
+    set('m1', 'running');
+    set('m2', 'stopping');
+    set('m3', 'sleeping');
+    set('m4', 'quantum');
+    (Sentry.captureMessage as jest.Mock).mockClear();
+    w.calls.length = 0;
+    const said = await p.awakeMachinesOnce(5_000);
+    expect(said.get('m1')).toBe(true);
+    expect(said.get('m2')).toBe(false);
+    expect(said.get('m3')).toBe(false);
+    expect(said.get('m4')).toBeNull();
+    // One request with the short timeout, no other call
+    expect(w.calls).toEqual(['listOnce:5000']);
+    expect(Sentry.captureMessage).toHaveBeenCalledWith('Agent37 said a machine status that is not in the list', expect.objectContaining({ level: 'warning' }));
+  });
+
+  it('a list that gets no clean answer throws (an error, a rate limit) and is asked once: nothing is read from it', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.refuse.listOnce = new Agent37Error(429, null, 'slow down');
+    w.calls.length = 0;
+    await expect(p.awakeMachinesOnce(5_000)).rejects.toBeInstanceOf(Agent37Error);
+    expect(w.calls).toEqual(['listOnce:5000']);
+  });
+});
+
 describe("Agent37's bill for a day", () => {
   it('says which machine of Agent37 is a Brick of ours, one that is not ours, and one that is gone, and what its published rates make of the awake minutes', async () => {
     const w = world();
@@ -838,6 +887,22 @@ describe('getting a machine ready for a job', () => {
     });
   });
 
+  it('CodeRabbit on #1040, Opus F4: a stop or a sleep that is a power operation of ours asks not to be repeated after a gateway answer, and the readiness restarts (under a wake\'s own ticket) keep the retry', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.rest('m1');
+    w.instances.get('m1')!.status = 'running';
+    await p.stop('m1');
+    expect(w.retries).toEqual(['sleep:refused', 'stop:refused']);
+    // The fresh-boot restart and the restart a part asked for are readiness steps: the default retry
+    w.retries.length = 0;
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await p.ready('m1');
+    expect(w.retries).toEqual(['stop:any']);
+  });
+
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
     const w = world();
     const p = provider(w);
@@ -862,6 +927,101 @@ describe('getting a machine ready for a job', () => {
     const order = w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
     expect(order).toEqual(['stop:m1', 'start:m1']);
     expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  describe('a start that lost its wake sends no power call (Opus on #1040: stillMine is asked right before EVERY stop and start)', () => {
+    const OLD_BOOT = '11111111-2222-4333-8444-555555555555';
+    const prepare = async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let ups = 0;
+      // A fresh boot AND a part that asks for a restart: all four power calls of `ready` are reached
+      w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? `${OLD_BOOT}\n` : command === 'universe-up' ? (++ups === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n') : 'ok'));
+      return { w, p };
+    };
+    const power = (w: { calls: string[] }) => w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
+
+    // The asks of a fresh boot that is followed by a restart a part asked for: before the stop, before the start, right after the start (the sender may have been paused since the check), then the same again
+    it.each([
+      [1, []],
+      [2, ['stop:m1']],
+      [3, ['stop:m1', 'start:m1']],
+      [4, ['stop:m1', 'start:m1']],
+      [5, ['stop:m1', 'start:m1', 'stop:m1']],
+      [6, ['stop:m1', 'start:m1', 'stop:m1', 'start:m1']],
+    ])('ready: refused at ask %i, only the calls before it were sent, and WakeReplaced is thrown', async (refusedAt, sent) => {
+      const { w, p } = await prepare();
+      let asks = 0;
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks < refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(power(w)).toEqual(sent);
+      expect(asks).toBe(refusedAt);
+    });
+
+    it('ready: true before and false right after a start: the start was sent once, WakeReplaced is thrown, and no health poll, universe-up or mark follows (freshBoot start, then the restart a part asked for)', async () => {
+      for (const refusedAt of [3, 6]) {
+        const { w, p } = await prepare();
+        let asks = 0;
+        await expect(p.ready('m1', { freshBoot: true, stillMine: async () => ++asks !== refusedAt })).rejects.toBeInstanceOf(WakeReplaced);
+        const at = w.calls.lastIndexOf('start:m1');
+        expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(refusedAt === 3 ? 1 : 2);
+        // Nothing follows the start: no health poll (getInstance), no exec of any kind, no other power call
+        expect(w.calls.slice(at + 1)).toEqual([]);
+      }
+    });
+
+    it('ready: a start that still owns its wake asks before each of the four calls and after each start, and every call is sent once', async () => {
+      const { w, p } = await prepare();
+      const order: string[] = [];
+      await expect(p.ready('m1', { freshBoot: true, stillMine: async () => (order.push(`ask@${power(w).length}`), true) })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+      // Asked right before each call, and again right after each start (CodeRabbit on #1040)
+      expect(order).toEqual(['ask@0', 'ask@1', 'ask@2', 'ask@2', 'ask@3', 'ask@4']);
+    });
+
+    it('ready: an Orbit that asks nothing (no stillMine) restarts as before', async () => {
+      const { w, p } = await prepare();
+      await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(power(w)).toEqual(['stop:m1', 'start:m1', 'stop:m1', 'start:m1']);
+    });
+
+    it('wake: refused after the waits (a machine going down, the billing call), no start is sent', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('start:m1');
+      // Still its own: started once
+      await p.wake('m1', { stillMine: async () => true });
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a start whose sender was paused after the check and lost its wake is told right after the request returns, not after the wait for the machine to be healthy (CodeRabbit on #1040)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      await p.rest('m1');
+      // The machine never answers as healthy: without the second ask the start would wait for it (and fail with the error of the wait, the machine left running)
+      w.setHealthy(false);
+      w.calls.length = 0;
+      let asks = 0;
+      await expect(p.wake('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    });
+
+    it('wake: a machine that is already running is not asked about (nothing is sent to it)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      let asks = 0;
+      await p.wake('m1', { stillMine: async () => (asks++, false) });
+      expect(asks).toBe(0);
+    });
   });
 
   it('is ready when the second ask succeeds after a part that was still coming up', async () => {
@@ -914,6 +1074,68 @@ describe('getting a machine ready for a job', () => {
       });
       return { w, p };
     }
+
+    it('a start that lost its wake sends no image update (Opus on #1040: stillMine is asked right before it, after the check that can take minutes), and ready throws WakeReplaced', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      await expect(p.ready('m1', { stillMine: async () => (asks++, false) })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(1);
+      expect(w.calls).not.toContain('update:m1');
+      expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+      // Still its own: the update is sent once, after the check
+      await expect(p.ready('m1', { stillMine: async () => true })).resolves.toMatchObject({ bootId: BOOT });
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+    });
+
+    it('a start that lost its wake while the image update was on its way is told as soon as it returns, before anything else is brought up (CodeRabbit on #1040)', async () => {
+      const { w, p } = await behind('outside_check=1 any=0\n');
+      let asks = 0;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(asks).toBe(2);
+      expect(w.calls.filter((call) => call === 'update:m1')).toHaveLength(1);
+      expect(w.execs.some((entry) => entry.command === 'universe-up')).toBe(false);
+      // The update was sent and the wake that sent it was lost: one warning, with the machine and both revisions (Opus on #1040)
+      const warnings = (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2 } });
+    });
+
+    it('an image update that throws while the wake is replaced is told too (it may have been applied), and WakeReplaced stops the start (the original error is in the warning); one that throws while the wake is still its own warns nothing and throws the original error (CodeRabbit on #1040)', async () => {
+      const failure = new Agent37Unreached('update answer lost');
+      const warnings = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement');
+      const lost = await behind('outside_check=1 any=0\n');
+      lost.w.client.updateInstance = (async (id: string) => (lost.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      let asks = 0;
+      await expect(lost.p.ready('m1', { stillMine: async () => ++asks < 2 })).rejects.toBeInstanceOf(WakeReplaced);
+      expect(warnings()).toHaveLength(1);
+      expect(warnings()[0][1]).toMatchObject({ level: 'warning', tags: { area: 'computer' }, extra: { ref: 'm1', revision: 1, image: 2, updateFailed: true, updateError: 'update answer lost' } });
+      const own = await behind('outside_check=1 any=0\n');
+      own.w.client.updateInstance = (async (id: string) => (own.w.calls.push(`update:${id}`), Promise.reject(failure))) as never;
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await expect(own.p.ready('m1', { stillMine: async () => true })).rejects.toBe(failure);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('a start that is still its own after the image update, and one that lost its wake BEFORE the update (nothing was sent), warn nothing', async () => {
+      const own = await behind('outside_check=1 any=0\n');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await own.p.ready('m1', { stillMine: async () => true });
+      const lost = await behind('outside_check=1 any=0\n');
+      await expect(lost.p.ready('m1', { stillMine: async () => false })).rejects.toBeInstanceOf(WakeReplaced);
+      expect((Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => (call[1] as { tags?: { step?: string } })?.tags?.step === 'late-image-update-under-replacement')).toEqual([]);
+    });
+
+    it('a machine that is not behind the image is not asked about for an update (nothing is sent)', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      let asks = 0;
+      await p.ready('m1', { stillMine: async () => (asks++, true) });
+      expect(asks).toBe(0);
+    });
 
     it('moves it to the current image only after the computer says it holds nothing outside its home folder, and before it is brought up', async () => {
       const { w, p } = await behind('outside_check=1 any=0\n');

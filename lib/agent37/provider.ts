@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_PIECE_END, LIST_READ_PIECE, LIST_SEND_PIECE, LIST_TRIES, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import * as Sentry from '@sentry/nextjs';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
@@ -336,7 +337,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
    * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
    */
-  private async settle(ref: string, options: { update?: boolean | 'unless_outside' } = {}): Promise<Instance> {
+  private async settle(ref: string, options: { update?: boolean | 'unless_outside'; /** Asked right before the image update (it restarts the machine, and can come after minutes of waiting): a start that lost its wake sends nothing (Opus on #1040) */ beforeUpdate?: () => Promise<void>; /** Asked right after the image update returned (the second look, CodeRabbit on #1040) */ afterUpdate?: () => Promise<void> } = {}): Promise<Instance> {
     // The image is only looked up when the machine may be moved to it: a pack-away (`update: false`) needs the rule and the budget, never the image, and is not held up by a lookup that fails
     const state = options.update !== false && this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
@@ -362,7 +363,30 @@ export class Agent37ComputerProvider implements ComputerProvider {
           Sentry.captureMessage('A computer behind the image was not updated: it holds files outside its home folder, or could not say', { level: 'warning', tags: { area: 'computer', step: 'image-update-skipped' }, extra: { ref, revision: instance.template_revision, image: state.revision } });
         }
       } else {
-        await this.client.updateInstance(ref);
+        await options.beforeUpdate?.();
+        const wasOn = instance.template_revision;
+        // The request may have been received and applied even when it throws (a timeout, a lost answer): the wake is looked at once either way, and the original error is the one that stops the start (CodeRabbit on #1040)
+        let updateError: unknown = null;
+        let updateThrew = false;
+        try {
+          await this.client.updateInstance(ref);
+        } catch (error) {
+          updateThrew = true;
+          updateError = error;
+        }
+        try {
+          await options.afterUpdate?.();
+        } catch (error) {
+          // The update was sent and the wake that sent it is gone: a replacement may own the machine, which the update just restarted, and the files it holds outside its home folder may have been replaced. Nothing can recall a request that
+          // is sent, and Agent37's update has no condition to make it atomic with the check, so this is told to Sentry (once for each such update) for us to learn whether it ever happens (Opus on #1040)
+          if (error instanceof WakeReplaced) {
+            // Also when the update itself threw: the replaced path is the only one the caller treats as "look again" (a replaced start never fails its job), so WakeReplaced is what is thrown, and the update's own error is kept in the warning (Opus on #1040)
+            Sentry.captureMessage('A computer was updated to the image by a start that had lost its wake', { level: 'warning', tags: { area: 'computer', step: 'late-image-update-under-replacement' }, extra: { ref, revision: wasOn, image: state.revision, updateFailed: updateThrew, ...(updateThrew ? { updateError: updateError instanceof Error ? updateError.message : String(updateError) } : {}) } });
+            throw error;
+          }
+          throw updateThrew ? updateError : error;
+        }
+        if (updateThrew) throw updateError;
         instance = await this.untilHealthy(ref, instance.url);
       }
     }
@@ -389,8 +413,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null> {
-    let instance = await this.settle(ref, { update: 'unless_outside' });
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null> {
+    // Before EVERY stop or start of the machine in here (each restart waits for the machine to be down between the two, and a start that lost its wake must never send one after the stop that replaced it was proved): the wake is
+    // renewed (a fenced beat) and must still be this start's, else nothing is sent (Opus on #1040)
+    const owned = async () => {
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
+    };
+    let instance = await this.settle(ref, { update: 'unless_outside', beforeUpdate: owned, afterUpdate: owned });
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
     // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
@@ -400,9 +429,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
       const read = await this.client.exec(ref, BOOT_ID_COMMAND, { timeoutMs: 15_000 }).catch(() => null);
       const seen = read && read.exitCode === 0 ? read.stdout.trim() : '';
       was = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seen) ? seen : null;
+      await owned();
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
+      await owned();
       await this.client.startInstance(ref);
+      // A start that lost its wake while its request was on the way (its sender was paused after the check above) finds out as soon as the request returns: the machine it started is stopped by the caller's cleanup, never left running (CodeRabbit on #1040)
+      await owned();
       instance = await this.untilHealthy(ref, instance.url);
     }
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
@@ -414,9 +447,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
     };
     let up = await again(await this.up(ref));
     if (up.restart) {
+      await owned();
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
+      await owned();
       await this.client.startInstance(ref);
+      await owned();
       await this.untilHealthy(ref, instance.url);
       up = await again(await this.up(ref));
     }
@@ -483,7 +519,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
   }
 
-  async wake(ref: string): Promise<void> {
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     let instance = await this.client.getInstance(ref);
     // A machine that is still going down cannot be started yet: wait for it to be down (or asleep), then wake it as any other
     if (instance.status === 'stopping') instance = await this.untilDown(ref);
@@ -491,7 +527,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (gone(status)) throw new Error(`The computer is ${status}`);
     if (status === 'sleeping' || status === 'stopped') {
       await this.checkFunds();
+      // After the waits above (a machine going down, the billing call): a start that lost its wake in the meantime sends nothing (Opus on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       await this.client.startInstance(ref);
+      // Asked again as soon as the request returns: a start whose sender was paused after the check above, and whose wake was given up on meanwhile, is told so now and its caller stops the machine it started (CodeRabbit on #1040)
+      if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     }
     // Running, starting, waking or provisioning: it is on its way, and asking again would only queue a second wake
     await this.untilHealthy(ref, instance.url);
@@ -519,7 +559,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (status === 'sleeping' || status === 'stopped' || status === 'stopping') return;
     if (gone(status)) return;
     try {
-      await this.client.sleepInstance(ref);
+      await this.client.sleepInstance(ref, 'refused');
     } catch (error) {
       // A 400 means it was not running after all: if it is resting now, that is what was asked for
       if (error instanceof Agent37Error && error.status === 400) {
@@ -533,7 +573,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async stop(ref: string): Promise<void> {
     const instance = await this.client.getInstance(ref);
     if (instance.status === 'stopped' || instance.status === 'stopping' || gone(String(instance.status))) return;
-    await this.client.stopInstance(ref);
+    // A power operation of ours: not repeated after a gateway answer that may have reached the machine (the readiness restarts above keep the retry: they run under a wake's own ticket)
+    await this.client.stopInstance(ref, 'refused');
   }
 
   async remove(ref: string): Promise<void> {
@@ -562,6 +603,23 @@ export class Agent37ComputerProvider implements ComputerProvider {
 
   async awakeOnce(ref: string, timeoutMs: number): Promise<boolean> {
     return this.awakeFrom(() => this.client.getInstanceOnce(ref, timeoutMs));
+  }
+
+  /** Every machine of the account from ONE request (see the interface): a status that is not documented is `null`, said to Sentry, and never taken for awake or asleep. */
+  async awakeMachinesOnce(timeoutMs: number): Promise<Map<string, boolean | null>> {
+    const listed = await this.client.listInstancesOnce(timeoutMs);
+    const said = new Map<string, boolean | null>();
+    for (const instance of listed) {
+      if (!instance || typeof instance.id !== 'string' || typeof instance.status !== 'string') continue;
+      const status = String(instance.status);
+      if (AWAKE_STATUSES.includes(status)) said.set(instance.id, true);
+      else if (ASLEEP_STATUSES.includes(status) || gone(status)) said.set(instance.id, false);
+      else {
+        said.set(instance.id, null);
+        Sentry.captureMessage('Agent37 said a machine status that is not in the list', { level: 'warning', tags: { area: 'computer', step: 'awake-status' }, extra: { status: status.slice(0, 40) } });
+      }
+    }
+    return said;
   }
 
   private async awakeFrom(look: () => Promise<Instance>): Promise<boolean> {

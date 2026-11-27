@@ -142,6 +142,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
 const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
+/** Which answers a stop or a sleep is asked again after: `any` (a gateway's too, for a restart under a wake's own ticket) or `refused` (only an answer that says it was NOT taken: a power operation of ours, whose earlier attempt must not be hidden). */
+export type Retry = 'any' | 'refused';
 /**
  * The longest one asked-again account call can take from its first request to its last answer: every attempt runs to its timeout and every wait between them is taken. A power operation (stop, sleep) whose sender died
  * (post-0.5.0 B) is counted as still able to land for this long after its last beat, on top of a margin for the provider's own processing (lib/computer-power.ts).
@@ -228,6 +230,24 @@ export class Agent37Client {
     }
   }
 
+  /**
+   * For a power POST (a stop or a sleep): asked again only after an answer that says it was NOT taken: a 429 from Agent37's edge (a rate limit refuses the request before it reaches the machine). Everything else is thrown, and the caller
+   * (`stopAtProvider`) keeps the power operation open for the provider's margin, as it does for a call that got no answer: a gateway's 502, 503 or 504 may have come after the request reached the machine, and Agent37's own `try_again` is not known to
+   * mean "refused" either (on the network settings a 503 `try_again` means the change WAS saved and applies within two minutes). A repeat that then succeeded would have hidden the earlier attempt, and the operation would have been closed while
+   * that one could still land (CodeRabbit on #1040).
+   */
+  private async againPower<T>(run: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await run();
+      } catch (error) {
+        const last = attempt >= RETRY_WAITS_MS.length;
+        if (last || !(error instanceof Agent37Error && error.status === 429)) throw error;
+        await this.sleep(RETRY_WAITS_MS[attempt]);
+      }
+    }
+  }
+
   private account = () => ({ Authorization: `Bearer ${this.key}` });
   private own = () => ({ 'X-Agent37-Key': this.key });
 
@@ -257,7 +277,15 @@ export class Agent37Client {
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
   async listInstances(): Promise<Instance[]> {
-    const answer = await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account()));
+    return this.listed(await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account())));
+  }
+
+  /** The same list from ONE request with its own short timeout and never asked again: for the sweep's look for a machine that runs behind a row that says it is stopped (it never waits on Agent37, and skips a pass that gets no clean answer). */
+  async listInstancesOnce(timeoutMs: number): Promise<Instance[]> {
+    return this.listed(await this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account(), undefined, timeoutMs));
+  }
+
+  private listed(answer: { data?: Instance[]; [more: string]: unknown } | null): Instance[] {
     // An answer with no list in it (an empty body, `{}`, a page that is not the list) says nothing: it is not read as an account with no machines,
     // which would let a make look for its machine in nothing and a purge call a Brick clear without looking
     if (!answer || typeof answer !== 'object' || !Array.isArray(answer.data)) throw new Error('Agent37 did not answer with a list of machines');
@@ -274,13 +302,15 @@ export class Agent37Client {
   }
 
   /** Sleeps a running instance now: memory and processes are kept, the disk is kept, only the disk is billed. */
-  sleepInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.again(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account()));
+  sleepInstance(id: string, retry: Retry = 'any'): Promise<{ id: string; status: string }> {
+    const run = () => this.call<{ id: string; status: string }>('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/sleep`, this.account());
+    return retry === 'refused' ? this.againPower(run) : this.again(run);
   }
 
   /** Halts the container: memory is lost, the disk is kept, and it stays down until started. */
-  stopInstance(id: string): Promise<{ id: string; status: string }> {
-    return this.again(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account()));
+  stopInstance(id: string, retry: Retry = 'any'): Promise<{ id: string; status: string }> {
+    const run = () => this.call<{ id: string; status: string }>('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/stop`, this.account());
+    return retry === 'refused' ? this.againPower(run) : this.again(run);
   }
 
   /** Deletes for good, disk included. */

@@ -1194,7 +1194,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working' });
       });
 
-      it('a wake call that THROWS leaves the machine waking with no stop, and its beat is let go with it: the next start takes the dead wake over after the stale time and runs', async () => {
+      it('a wake call that THROWS stops the machine (it may have started), and its beat is let go with it: the next start wakes it under a ticket of its own and runs', async () => {
         setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
         const sara = await sleepingBrick('b1-wakefail');
         // Another job is on the machine (so a failed start does not rewrite its state), and the machine is `waking` with a wake that has no start behind it
@@ -1203,17 +1203,18 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking' } });
         await ageWake(sara.brickId);
         const wakes = wakesOf();
+        const stops = fake.calls.filter((call) => call.name === 'stop').length;
         fake.failNext.wake = true;
         const first = await readerOf(sara, 'X', minutes(10));
         expect(first).toEqual({ ok: false, reason: 'broken_start' });
         const epochAfterFail = (await machineOf(sara.brickId)).wakeEpoch;
-        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'waking' });
-        const started = Date.now();
+        // The wake that failed may have started the instance (Agent37 starts it, then waits for health): it is stopped under the start's own ticket (Opus on #1040)
+        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'stopped' });
+        expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stops + 1);
         // A beat that outlived the failed wake would keep it fresh for ever, and this start would wait on it for ever
         const second = await Promise.race([readerOf(sara, 'Y', minutes(10)), sleep(5000).then(() => 'still waiting' as const)]);
         expect(second).not.toBe('still waiting');
         expect(second !== 'still waiting' && second.ok && second.job.status).toBe('running');
-        expect(Date.now() - started).toBeGreaterThanOrEqual(300);
         expect(wakesOf()).toBeGreaterThanOrEqual(wakes + 1);
         expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: epochAfterFail + 1 });
       });

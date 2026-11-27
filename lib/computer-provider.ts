@@ -11,6 +11,7 @@
  */
 
 import { prisma } from '@/lib/db';
+import { WakeReplaced } from '@/lib/computer-wake-replaced';
 import type { OutsideManifest } from '@/lib/computer-outside';
 import { Agent37Client } from '@/lib/agent37/client';
 import { Agent37ComputerProvider } from '@/lib/agent37/provider';
@@ -123,8 +124,11 @@ export interface ComputerProvider {
   diskBytes?(): number | null;
   /** Makes this Brick's one computer. Asked once for a Brick: a second ask for the same Brick is the same machine. */
   create(botId: string): Promise<MachineInfo>;
-  /** Wakes a resting or cold machine. */
-  wake(ref: string): Promise<void>;
+  /**
+   * Wakes a resting or cold machine. `stillMine`: asked right before the call that starts the machine (a start can wait minutes for the machine to be down first): it renews the start's own wake (a fenced beat) and says whether the
+   * start still owns it. When it says no, nothing is sent and `WakeReplaced` is thrown (Opus on #1040).
+   */
+  wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void>;
   /**
    * Brings a machine that was just made or woken to what a job needs: the current image, the screen and the browser, the local model
    * address. Safe to ask any number of times. Throws when it cannot be made ready (the job then does not start). Answers the mark the take-over fence
@@ -133,8 +137,10 @@ export interface ComputerProvider {
    * `freshBoot`: the computer is stopped and started first, so what it was running before is gone and the mark is the first of a boot nothing has run on. Asked for a
    * computer that has worked before and has no mark saved (made ready before marks were kept by Orbit): a mark taken on a boot that already ran jobs would name
    * their programs as the computer's own.
+   * `stillMine`: asked right before EVERY call that stops or starts the machine (each restart waits for the machine to be down in between, and a start that lost its wake must never send one after the stop that replaced it was proved): it renews
+   * the start's own wake (a fenced beat) and says whether the start still owns it. When it says no, nothing is sent and `WakeReplaced` is thrown (Opus on #1040).
    */
-  ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void>;
+  ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null | void>;
   /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
   checkup(): Promise<Check[]>;
   /** What the provider billed for a UTC day, by machine, for the daily check of our books against its bill. Reads only. Absent for a provider with no bill. */
@@ -156,6 +162,12 @@ export interface ComputerProvider {
   awake(ref: string): Promise<boolean>;
   /** The same as `awake`, from ONE request with this timeout and no asking again (a renewal must answer its worker within a few seconds, post-0.5.0 B). Absent: `awake` is used under the caller's own cap. */
   awakeOnce?(ref: string, timeoutMs: number): Promise<boolean>;
+  /**
+   * What the provider says about EVERY machine of its account, from ONE request with this timeout and no asking again (the sweep's look for a machine that runs behind a row that says it is stopped, CodeRabbit on #1040): by machine,
+   * `true` = running or on its way up, `false` = stopped, asleep or gone, `null` = a status it never documented (not known, never taken for either). Throws when it gets no clean answer (an error, a rate limit, a list that is only part of the account).
+   * A machine the list does not name is not in the map. Absent: this provider has no such look.
+   */
+  awakeMachinesOnce?(timeoutMs: number): Promise<Map<string, boolean | null>>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
@@ -337,11 +349,15 @@ export class FakeComputerProvider implements ComputerProvider {
   /** A test sets it to pretend a restart that does not show a new boot: a fresh boot is asked for, no mark is proved, and `ready` answers null (the job still runs). */
   freshBootUnproved = false;
 
-  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void> {
+  async ready(ref: string, options?: { freshBoot?: boolean; stillMine?: () => Promise<boolean> }): Promise<MachineMark | null | void> {
     this.fail('ready');
     this.readied.push(ref);
     if (options?.freshBoot) {
+      // The pretend restart is a stop and a start: it is only sent while the start still owns its wake
+      if (options.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       this.freshBoots.push(ref);
+      this.awake_.add(ref);
+      if (options.stillMine && !(await options.stillMine())) throw new WakeReplaced();
       if (this.freshBootUnproved) return null;
       this.rebootForTests(ref);
     }
@@ -372,10 +388,19 @@ export class FakeComputerProvider implements ComputerProvider {
     return [{ name: 'provider', ok: true, detail: 'The pretend provider (development only)' }];
   }
 
-  async wake(ref: string): Promise<void> {
+  /** Test seam: what happens after the pretend start returned and was told it still owns its wake (the real one waits for the machine to be healthy). */
+  afterStartForTests: ((ref: string) => Promise<void>) | null = null;
+
+  async wake(ref: string, options?: { stillMine?: () => Promise<boolean> }): Promise<void> {
     this.note('wake', ref);
     this.fail('wake');
+    // The pretend start is only sent while the start still owns its wake
+    if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
     this.awake_.add(ref);
+    // ...and asked again as soon as the start returned (a sender that was paused after the check): the caller stops what it started
+    if (options?.stillMine && !(await options.stillMine())) throw new WakeReplaced();
+    // What the real provider does next: it waits for the machine to be healthy (a test holds it here)
+    await this.afterStartForTests?.(ref);
   }
 
   async rest(ref: string): Promise<void> {
@@ -409,6 +434,25 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async awake(ref: string): Promise<boolean> {
     return this.awake_.has(ref) || this.stuckAwake.has(ref);
+  }
+
+  /** Test seams for the look at the whole account: runs between "the list was taken" and "the answer returned" (a test moves a row there); makes the list fail (`throw`) or never answer (`hang`); machines the list calls not known. */
+  listHookForTests: (() => Promise<void>) | null = null;
+  listFailsForTests: 'throw' | 'hang' | null = null;
+  readonly listNotKnownForTests = new Set<string>();
+  listsAsked = 0;
+
+  async awakeMachinesOnce(_timeoutMs: number): Promise<Map<string, boolean | null>> {
+    this.listsAsked++;
+    if (this.listFailsForTests === 'throw') throw new Error('The pretend provider did not answer with a list');
+    if (this.listFailsForTests === 'hang') await new Promise<void>(() => undefined);
+    // The list is taken now: what is awake at this moment is what it says
+    const taken = new Map<string, boolean | null>();
+    for (const ref of this.awake_) taken.set(ref, true);
+    for (const ref of this.stuckAwake) taken.set(ref, true);
+    for (const ref of this.listNotKnownForTests) taken.set(ref, null);
+    await this.listHookForTests?.();
+    return taken;
   }
 
   async watch(ref: string): Promise<WatchSession | null> {
