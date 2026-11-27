@@ -143,7 +143,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * `{ ok: true, retired: false, answer }`, the answer a send of it would get now (read only): the game follows that start.
  *
  * Round 8 (GPT's seventh note, Opus's design A1/A2), for a start with `X-Computer-Start-Acks: 1`:
- *  - The key MUST carry its issue time (`t<ms base36>-<rest>`, the moment of the person's message): 400 without one, or one more than 5 minutes in the future.
+ *  - The key MUST carry its issue time (`t<ms base36>-<rest>`, the moment of the person's message): 400 `untimed_key` without one, or with one later than the start's own moment (read when the request arrives) plus 5 minutes. The five minutes are a clock-skew allowance, not a refusal of the future: a key issued up to and including exactly 5 minutes ahead is accepted, one millisecond further ahead is 400. A key from the past is never refused for being early (a key older than 6 hours is `stale_consent`, below).
  *  - The start is REGISTERED (its attempt, with the request's own moment) before anything else is asked, the spending rule included: a later request under another key that decides meanwhile waits for it, and a look for
  *    this key says it is going on.
  *  - Every refusal is kept on the key: a retry of it gets the same body again (never `expired`).
@@ -199,7 +199,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A start that says the game confirms its answers, retried under a NEW key while an earlier start of this person on this Brick is still unconfirmed, is answered with that job BEFORE the spend rule is asked: the earlier job may
     // have used what a chat-stated rule leaves, and the answer the game is owed is the job it asked for, never a false `rule`. (The decision that makes or refuses a job is still the one under the person's lock in `startJob`.)
     const acking = attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1';
-    // Round 8, A2: a start that acks carries the moment the person gave consent in its key. None, or one in the future, is not a start that can be held to its consent
+    // Round 8, A2: a start that acks carries the moment the person gave consent in its key. None, or one more than ISSUE_SKEW_MS (5 minutes, inclusive) ahead of this start's own moment, is not a start that can be held to its consent
     const issued = acking && attempt?.success ? issuedOfKey(attempt.data) : null;
     if (acking && (!issued || issued.getTime() > began.getTime() + ISSUE_SKEW_MS)) return NextResponse.json({ error: 'Invalid input data', reason: 'untimed_key' }, { status: 400 });
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);

@@ -979,14 +979,49 @@ run('a Brick’s computer, in a real database', () => {
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
       if (!a.ok || !b.ok) throw new Error('no');
-      await finishJob(a.job.id, 'done', minutes(1));
+      // The first job is over without finishJob (which would start the waiting one itself): B stays queued and eligible until the two sweeps begin
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedAt: minutes(1) } });
+      const waiting = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
+      expect(waiting.status).toBe('queued');
+      expect(await prisma.meterReservation.count({ where: { jobId: b.job.id, state: 'held' } })).toBe(0);
+      // A barrier at the job-start boundary (the first read of the try that starts a queued job): neither sweep goes on until both are there, so the two really race for the one room
+      // (Promise.all alone lets one sweep finish before the other begins). If the sweeps are ever serialised before this point the barrier gives up after a second and the test says so.
+      const original = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      let arrived = 0;
+      let gaveUp = false;
+      let release: () => void = () => undefined;
+      const both = new Promise<void>((resolve) => (release = resolve));
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        const atStart = args?.where?.id === b.job.id && args.select !== undefined && Object.keys(args.select).join() === 'queueRank';
+        if (!atStart) return original(args as never);
+        arrived += 1;
+        if (arrived === 2) release();
+        return Promise.race([
+          both,
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              // The give-up only counts when it fires before both sweeps arrived; after the release it is harmless
+              if (arrived < 2) gaveUp = true;
+              resolve();
+            }, 1000),
+          ),
+        ]).then(() => original(args as never));
+      }) as never);
+      try {
+        await Promise.all([sweepComputers(minutes(2)), sweepComputers(minutes(2))]);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(arrived).toBe(2);
+      // Neither sweep went on by the give-up: both were at the boundary together, so the race was real and not a sequential run
+      expect(gaveUp).toBe(false);
+      // Exactly one of the two started it, and its room is held once, not taken from the one that won by the one that lost
       const settled = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
       expect(settled.status).toBe('running');
       expect(settled.reservationKey).not.toBeNull();
-      const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } });
-      expect(room.state).toBe('held');
-      await Promise.all([sweepComputers(minutes(2)), sweepComputers(minutes(2))]);
-      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } })).state).toBe('held');
+      expect(await prisma.meterReservation.count({ where: { jobId: b.job.id, state: 'held' } })).toBe(1);
+      // The room that is held is the winner's own for this job: a sweep that lost and gave its room back must not have taken the shared one with it
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } })).toMatchObject({ state: 'held', jobId: b.job.id });
     });
 
     it('a Brick turned off while its machine was still being made does not end up awake with nobody holding it', async () => {

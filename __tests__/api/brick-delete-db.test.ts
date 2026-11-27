@@ -22,7 +22,7 @@ import { prisma } from '@/lib/db';
 import { ensureDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
 import { deleteBrick, recentlyRemovedBricks, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { BRICK_LOOKS, makeBrick, makeBrickFromChat, bricksForChat } from '@/lib/brick-make';
-import { answerOffer, claimOffer, offersSoFar } from '@/lib/brick-offers';
+import { answerOffer, claimOffer, offersSoFar, releaseOffer, RELEASE_WITHIN_MS } from '@/lib/brick-offers';
 import { endAllApprovals, ENDED_BY_DELETE } from '@/lib/bot-actions';
 import { checkBotAccess } from '@/lib/bot-access';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
@@ -445,6 +445,30 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect(await offersSoFar(brick!.id, gus.uuid)).toMatchObject({ ok: false, status: 404 });
     expect(await claimOffer(brick!.id, { userId: faye.uuid, topic: ' ?! ' })).toMatchObject({ ok: false, status: 400 });
     expect(await prisma.brickOffer.count({ where: { userId: faye.id } })).toBe(2);
+  });
+
+  it('takes back a fresh unanswered claim whose card never reached the person, and nothing else', async () => {
+    const hal = await person('hal');
+    const mia = await person('mia');
+    const { brick } = await ensureDefaultBrick(hal.id);
+    const theirs = await ensureDefaultBrick(mia.id);
+    expect(await claimOffer(brick!.id, { userId: hal.uuid, topic: 'recipes' })).toMatchObject({ show: true });
+    // someone else's Brick cannot take it back, and a topic has to name something
+    expect(await releaseOffer(theirs.brick!.id, { userId: hal.uuid, topic: 'recipes' })).toMatchObject({ ok: false, status: 404 });
+    expect(await releaseOffer(brick!.id, { userId: hal.uuid, topic: ' ?! ' })).toMatchObject({ ok: false, status: 400 });
+    expect(await offersSoFar(brick!.id, hal.uuid)).toMatchObject({ topics: [{ topic: 'recipes', answer: null }] });
+    // the claim is taken back, so the topic may be suggested again, once
+    expect(await releaseOffer(brick!.id, { userId: hal.uuid, topic: 'Recipes!' })).toEqual({ ok: true, released: true });
+    expect(await releaseOffer(brick!.id, { userId: hal.uuid, topic: 'recipes' })).toEqual({ ok: true, released: false });
+    expect(await claimOffer(brick!.id, { userId: hal.uuid, topic: 'recipes' })).toMatchObject({ show: true });
+    // an answered one stays closed
+    await answerOffer(brick!.id, { userId: hal.uuid, topic: 'recipes', answer: 'not_now' });
+    expect(await releaseOffer(brick!.id, { userId: hal.uuid, topic: 'recipes' })).toEqual({ ok: true, released: false });
+    // and so does one claimed long ago
+    await claimOffer(brick!.id, { userId: hal.uuid, topic: 'workouts' });
+    const later = new Date(Date.now() + RELEASE_WITHIN_MS + 60_000);
+    expect(await releaseOffer(brick!.id, { userId: hal.uuid, topic: 'workouts' }, later)).toEqual({ ok: true, released: false });
+    expect(await offersSoFar(brick!.id, hal.uuid)).toMatchObject({ topics: expect.arrayContaining([{ topic: 'workouts', answer: null }]) });
   });
 
   it('asks nothing through a Brick that waits deleted: it makes no Brick and suggests none', async () => {
