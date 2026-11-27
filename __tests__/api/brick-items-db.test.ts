@@ -1000,7 +1000,14 @@ run('goals and tasks, in a real database', () => {
     // with every test added to this file. Only the work these tests left is cleared (never anyone else's rows): what is checked is that
     // asking for work, again and again, makes nothing for an account that never asked
     await prisma.brickItem.deleteMany({ where: { ownerId: { in: people.filter((id) => id !== quiet.id) } } });
-    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY));
+    // One controlled due item of someone else stays, so every claim really has work to hand out: a fault that makes something for the quiet
+    // account only while it is handing out another person's work cannot pass on an empty database
+    const busy = await person('busy');
+    const busyItem = await set(busy);
+    const claimed = [];
+    for (let day = 1; day <= 7; day++) claimed.push(...(await claimDueRuns(at(day * DAY))));
+    expect(claimed.some((one) => one.itemId === busyItem.id && one.userId === busy.uuid)).toBe(true);
+    expect(await runsOf(busyItem.id)).toHaveLength(1);
     expect(await prisma.brickItem.count({ where: { ownerId: quiet.id } })).toBe(0);
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);
