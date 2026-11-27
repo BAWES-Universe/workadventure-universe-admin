@@ -352,6 +352,15 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
       });
     });
 
+    it('turns Show app use off or on (the Apps screen), keeping the rest of the config as it stands', async () => {
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { showToolCalls: false } } }), params());
+      expect(response.status).toBe(200);
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: { behaviorConfig: { ...brick.behaviorConfig, showToolCalls: false }, updatedById: SARA.id },
+      });
+    });
+
     it('merges into the config as it stands when the Brick is held for the write, never the copy read before the checks', async () => {
       db.$queryRaw.mockResolvedValue([{ behavior_config: { showToolCalls: true, assignedSpace: { center: { x: 9, y: 9 }, radius: 4 }, apps: { chosen: 'later-save' } } }]);
       const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { moves: 'wander' } } }), params());
@@ -560,7 +569,8 @@ describe('PATCH /api/bricks/:id: what a Brick’s owner can change', () => {
     ['a room', { roomId: 'room-1' }],
     ['another owner', { ownerId: OMAR.id }],
     ['a voice', { voiceEnabled: true }],
-    ['a behavior key that is not Behavior’s', { behaviorConfig: { showToolCalls: true } }],
+    ['a behavior key that is not Behavior’s', { behaviorConfig: { apps: { chosen: 'x' } } }],
+    ['Show app use that is not a true or false', { behaviorConfig: { showToolCalls: 'yes' } }],
     ['a tool timeout', { toolTimeoutSeconds: 5 }],
   ])('refuses a save that names %s, and writes nothing', async (_what, extra) => {
     const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { name: 'Helper', ...extra } }), params());

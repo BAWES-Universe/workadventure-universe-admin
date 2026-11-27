@@ -152,7 +152,8 @@ export async function transformBotToServerFormat(
     behaviorType: bot.behaviorType as 'idle' | 'patrol' | 'social',
     behaviorConfig: {
       ...behaviorConfig,
-      showToolCalls: behaviorConfig.showToolCalls === true,
+      // "Show app use" is on unless its owner turned it off: a bot that never had the setting shows it
+      showToolCalls: behaviorConfig.showToolCalls !== false,
       behaviorType: bot.behaviorType,
       assignedSpace: behaviorConfig.assignedSpace,
     },
@@ -223,7 +224,7 @@ export function transformBrickToServerFormat(
     universeUrl: null,
     userId: bot.ownerId,
     behaviorType: 'idle',
-    behaviorConfig: { ...stored, showToolCalls: stored.showToolCalls === true, behaviorType: 'idle', assignedSpace },
+    behaviorConfig: { ...stored, showToolCalls: stored.showToolCalls !== false, behaviorType: 'idle', assignedSpace },
     assignedSpace,
     // The database keeps a deleted Brick off; said here too, so the answer never depends on that alone
     enabled: bot.enabled && bot.deletedAt === null,

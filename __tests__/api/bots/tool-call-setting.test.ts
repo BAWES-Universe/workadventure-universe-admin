@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { NextRequest } from 'next/server';
 import { PATCH } from '@/app/api/admin/bots/[id]/route';
-import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { transformBotToServerFormat, transformBrickToServerFormat } from '@/lib/bot-config-helpers';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
@@ -91,9 +91,14 @@ test('reports a deleted bot', async () => {
   expect((await save({ showToolCalls: true }, 'missing')).status).toBe(404);
 });
 
-test.each([undefined, false, true, 'true'])(
-  'server config only enables explicit boolean true (%s)',
-  async (setting) => {
+test.each([
+  [undefined, true],
+  [true, true],
+  [false, false],
+  ['true', true],
+])(
+  'server config shows app use unless it is explicitly off (%s)',
+  async (setting, shown) => {
     const output = await transformBotToServerFormat(
       {
         id: 'bot-a',
@@ -106,7 +111,35 @@ test.each([undefined, false, true, 'true'])(
       false,
       false
     );
-    expect(output.behaviorConfig.showToolCalls).toBe(setting === true);
+    expect(output.behaviorConfig.showToolCalls).toBe(shown);
     expect(output.behaviorConfig.moves).toBe('route');
   }
 );
+
+test.each([
+  [{ moves: 'stay' }, true],
+  [{ showToolCalls: true }, true],
+  [{ showToolCalls: false }, false],
+  [null, true],
+])('a Brick whose config is %j shows app use: %s (on unless its owner turned it off)', (config, shown) => {
+  const output = transformBrickToServerFormat(
+    {
+      id: 'brick-a',
+      name: 'Nudge',
+      ownerId: 'owner',
+      enabled: true,
+      behaviorConfig: config,
+      characterTextureId: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      aiProviderRef: null,
+      chatInstructions: null,
+      toolTimeoutSeconds: null,
+      maxReplyTokens: null,
+      maxSteps: null,
+      deletedAt: null,
+    } as Parameters<typeof transformBrickToServerFormat>[0],
+    false
+  );
+  expect(output.behaviorConfig.showToolCalls).toBe(shown);
+});
