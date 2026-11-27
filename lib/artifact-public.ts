@@ -19,7 +19,9 @@ a { color: #c4b5fd; } p, ul, ol, blockquote, pre, table { margin: 0 0 1em; }
 code { font: .88em ui-monospace, Menlo, Consolas, monospace; background: rgba(255,255,255,.08); padding: .1em .35em; border-radius: 6px; }
 pre { background: #0a0814; border: 1px solid #2a2638; border-radius: 12px; padding: 12px; overflow-x: auto; } pre code { background: none; padding: 0; }
 blockquote { border-left: 3px solid #8629fc; margin-left: 0; padding-left: 14px; color: #b3acc7; }
-table { border-collapse: collapse; display: block; overflow-x: auto; } th, td { border: 1px solid #2a2638; padding: 6px 10px; }
+table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; font-size: 14px; }
+/* The page breaks words anywhere, which would shrink every column to one letter and make each row thousands of pixels tall: a cell keeps to one line, and a table wider than the window scrolls sideways. */
+th, td { border: 1px solid #2a2638; padding: 6px 10px; text-align: left; vertical-align: top; white-space: nowrap; overflow-wrap: normal; word-break: normal; } th { background: rgba(255,255,255,.07); }
 img { max-width: 100%; height: auto; } hr { border: 0; border-top: 1px solid #2a2638; }
 </style></head><body>${html}</body></html>`;
 }

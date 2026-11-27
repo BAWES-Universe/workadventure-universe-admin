@@ -56,6 +56,15 @@ describe('the public artifact page', () => {
     expect(doc).toContain('<li>one</li>');
   });
 
+  it('draws a table as a table whose cells keep to one line, so a wide table scrolls sideways instead of squeezing to one letter per column', () => {
+    const doc = markdownDocument('| # | Note |\n|---|---|\n| 1 | A long note about the calendar |');
+    expect(doc).toContain('<table>');
+    expect(doc).toContain('<td>A long note about the calendar</td>');
+    // The page breaks words anywhere; a cell must not follow that rule or its column shrinks to a letter
+    expect(doc).toMatch(/th, td \{[^}]*white-space: nowrap[^}]*overflow-wrap: normal/);
+    expect(doc).toMatch(/table \{[^}]*display: block[^}]*overflow-x: auto/);
+  });
+
   it('says one thing when the link is not available, with no way to tell why', () => {
     const html = renderToStaticMarkup(<LinkNotAvailable universeUrl={UNIVERSE} />);
     expect(html).toContain('This link is not available');
