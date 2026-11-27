@@ -48,6 +48,7 @@
     "@sentry/nextjs": "^10.56.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "entities": "^6.0.1",
     "ioredis": "^5.8.2",
     "lru-cache": "^11.2.4",
     "lucide-react": "^0.561.0",

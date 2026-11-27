@@ -28,11 +28,27 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<Note | null>(null);
   const box = useRef<HTMLDivElement>(null);
+  const pill = useRef<HTMLButtonElement>(null);
+  const items = useRef<(HTMLButtonElement | null)[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restoreFocus = useRef(false);
 
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
   }, []);
+
+  // The list opens with its first choice focused, so a keyboard goes straight into it
+  useEffect(() => {
+    if (open) items.current[0]?.focus();
+  }, [open]);
+
+  // Keeping focus on the pill once a file is made (the pill is off while it works, which would drop focus to the page)
+  useEffect(() => {
+    if (!busy && document.activeElement === document.body && restoreFocus.current) {
+      restoreFocus.current = false;
+      pill.current?.focus();
+    }
+  }, [busy]);
 
   // A tap anywhere else puts the list away
   useEffect(() => {
@@ -51,8 +67,28 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
     timer.current = setTimeout(() => setNote(null), NOTE_MS);
   }
 
+  /** Arrow keys move between the two choices, Escape and Tab put the list away (Escape gives focus back to the pill). */
+  function menuKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    const at = items.current.findIndex((item) => item === document.activeElement);
+    const last = items.current.length - 1;
+    const go = (to: number) => {
+      event.preventDefault();
+      items.current[(to + last + 1) % (last + 1)]?.focus();
+    };
+    if (event.key === 'ArrowDown') go(at + 1);
+    else if (event.key === 'ArrowUp') go(at - 1);
+    else if (event.key === 'Home') go(0);
+    else if (event.key === 'End') go(last);
+    else if (event.key === 'Escape') {
+      event.preventDefault();
+      setOpen(false);
+      pill.current?.focus();
+    } else if (event.key === 'Tab') setOpen(false);
+  }
+
   async function download(what: 'markdown' | 'spreadsheet') {
     if (busy) return;
+    restoreFocus.current = true;
     setOpen(false);
     setBusy(true);
     try {
@@ -80,12 +116,12 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
   return (
     <div ref={box} className="relative">
       {open ? (
-        <div role="menu" data-testid="downloadMenu" className="absolute bottom-full right-0 mb-2 w-[250px] overflow-hidden rounded-xl border border-white/15 bg-[#1f1b2e] shadow-[0_10px_30px_rgba(0,0,0,.5)]">
-          <button type="button" role="menuitem" data-testid="downloadMarkdown" onClick={() => void download('markdown')} className="block w-full border-b border-white/10 px-3.5 py-2.5 text-left hover:bg-white/8">
+        <div role="menu" aria-label="Download" onKeyDown={menuKey} data-testid="downloadMenu" className="absolute bottom-full right-0 mb-2 w-[250px] overflow-hidden rounded-xl border border-white/15 bg-[#1f1b2e] shadow-[0_10px_30px_rgba(0,0,0,.5)]">
+          <button type="button" role="menuitem" tabIndex={-1} ref={(el) => { items.current[0] = el; }} data-testid="downloadMarkdown" onClick={() => void download('markdown')} className="block w-full border-b border-white/10 px-3.5 py-2.5 text-left hover:bg-white/8">
             <b className="block text-[14px] font-semibold text-[#f3f1fa]">Document</b>
             <span className="text-[12px] text-[#b3acc7]">Markdown file (.md)</span>
           </button>
-          <button type="button" role="menuitem" data-testid="downloadSheet" onClick={() => void download('spreadsheet')} className="block w-full px-3.5 py-2.5 text-left hover:bg-white/8">
+          <button type="button" role="menuitem" tabIndex={-1} ref={(el) => { items.current[1] = el; }} data-testid="downloadSheet" onClick={() => void download('spreadsheet')} className="block w-full px-3.5 py-2.5 text-left hover:bg-white/8">
             <b className="block text-[14px] font-semibold text-[#f3f1fa]">Table as spreadsheet</b>
             <span className="text-[12px] text-[#b3acc7]">Spreadsheet file (.xlsx), one tab per table</span>
           </button>
@@ -101,6 +137,7 @@ export function DownloadPill({ title, markdown, hasTables }: { title: string; ma
         </p>
       ) : null}
       <button
+        ref={pill}
         type="button"
         onClick={tapped}
         disabled={busy}

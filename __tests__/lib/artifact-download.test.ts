@@ -143,3 +143,23 @@ describe('a document with more tables than a spreadsheet keeps', () => {
     expect(fs.readFileSync('components/artifact-download.tsx', 'utf8')).toContain(`const MAX_SHEET_TABS = ${MAX_SHEET_TABS};`);
   });
 });
+
+describe('what the page shows is what the sheet holds', () => {
+  const cells = (markdown: string) => markdownTables(markdown).flatMap((table) => table.rows.flat());
+
+  it('keeps a tag written in a cell as the text the page shows for it', () => {
+    expect(cells('| a | b |\n|---|---|\n| <Widget> | x <b>bold</b> |')).toEqual(['a', 'b', '<Widget>', 'x <b>bold</b>']);
+  });
+
+  it('decodes numeric and named character references once, as the page shows them (a name with no semicolon is not one)', () => {
+    expect(cells('| a |\n|---|\n| &#8364;10 |\n| caf&eacute; |\n| &copy 2026 |\n| `&#8364;` |\n| &amp;lt; |')).toEqual(['a', '€10', 'café', '&copy 2026', '&#8364;', '&lt;']);
+  });
+
+  it('finds tables inside a quote and inside a list, in order, and none inside code', () => {
+    const doc = ['# Top', '', '| t |', '|---|', '| 1 |', '', '> ## Quoted', '>', '> | q |', '> |---|', '> | 2 |', '', '- item', '', '  | l |', '  |---|', '  | 3 |', '', '```', '| c |', '|---|', '| 4 |', '```'].join('\n');
+    const tables = markdownTables(doc);
+    expect(tables.map((t) => t.rows[1][0])).toEqual(['1', '2', '3']);
+    expect(tables.map((t) => t.title)).toEqual(['Top', 'Quoted', 'Quoted']);
+    expect(hasTable('> | q |\n> |---|\n> | 2 |')).toBe(true);
+  });
+});

@@ -1,3 +1,4 @@
+import { decodeHTML } from 'entities';
 import { marked, type Token, type Tokens } from 'marked';
 
 /**
@@ -35,6 +36,8 @@ function plainOf(tokens: Token[] | undefined, fallback: string): string {
         text += ' ';
         break;
       case 'html':
+        // The page shows a tag written in a document as text, so the sheet keeps it as the same text
+        text += (token as Tokens.HTML | Tokens.Tag).text;
         break;
       case 'escape':
       case 'codespan':
@@ -54,29 +57,31 @@ function plainOf(tokens: Token[] | undefined, fallback: string): string {
   return text;
 }
 
-/** The few entities Markdown leaves in text (&amp; and the like). */
+/** The character references Markdown leaves in text (&amp;, &#8364;, &eacute;), decoded once the way a browser reads them, so what the sheet holds is what the page shows. */
 function decode(text: string): string {
-  return text
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&');
+  return decodeHTML(text);
 }
 
-/** Every table of a Markdown text, in order, each with the heading above it. */
+/** Every table of a Markdown text, in order, each with the heading above it. Tables inside a quote or a list are found too; code is not looked into. */
 export function markdownTables(markdown: string): DocumentTable[] {
   const tables: DocumentTable[] = [];
   let heading = '';
-  for (const token of marked.lexer(markdown, { gfm: true })) {
-    if (token.type === 'heading') {
-      heading = plainOf((token as Tokens.Heading).tokens, (token as Tokens.Heading).text).trim();
-    } else if (token.type === 'table') {
-      const table = token as Tokens.Table;
-      const row = (cells: Tokens.TableCell[]) => cells.map((cell) => plainOf(cell.tokens, cell.text).trim());
-      tables.push({ title: heading, rows: [row(table.header), ...table.rows.map(row)] });
+  const walk = (tokens: Token[]): void => {
+    for (const token of tokens) {
+      if (token.type === 'heading') {
+        heading = plainOf((token as Tokens.Heading).tokens, (token as Tokens.Heading).text).trim();
+      } else if (token.type === 'table') {
+        const table = token as Tokens.Table;
+        const row = (cells: Tokens.TableCell[]) => cells.map((cell) => plainOf(cell.tokens, cell.text).trim());
+        tables.push({ title: heading, rows: [row(table.header), ...table.rows.map(row)] });
+      } else if (token.type === 'blockquote') {
+        walk((token as Tokens.Blockquote).tokens);
+      } else if (token.type === 'list') {
+        for (const item of (token as Tokens.List).items) walk(item.tokens);
+      }
     }
-  }
+  };
+  walk(marked.lexer(markdown, { gfm: true }));
   return tables;
 }
 
