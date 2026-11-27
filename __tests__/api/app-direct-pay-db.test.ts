@@ -47,7 +47,7 @@ jest.mock('@/lib/app-direct/page-contract-inventory', () => {
   const actual = jest.requireActual('@/lib/app-direct/page-contract-inventory');
   return { ...actual, inventoryPaymentPages: jest.fn(actual.inventoryPaymentPages) };
 });
-import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, reconcileEveryMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder, verifyOrderForReturnPage } from '@/lib/app-direct/pay';
+import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, reconcileEveryMs, restorePurchase, shownVersionFor, startCheckout, sweepPageOrders, verifyOrder, verifyOrderForReturnPage } from '@/lib/app-direct/pay';
 import { keyAppsOf, runKeyApp } from '@/lib/app-direct/use';
 import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as sweepLoad, POST as sweepRoute } from '@/app/api/app-pay/sweep/route';
@@ -99,7 +99,10 @@ async function makeArtifact(over: { ownerId?: string; kind?: string; openScope?:
 const job = (serverId: string, artifactId: string, body: Record<string, unknown> = {}) =>
   makeJob(request(`/api/bots/${brick}/key-apps/${serverId}/page-jobs`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}`, artifactId, amount: '4.500', currency: 'KWD', description: 'A mug', ...body } }), params({ id: brick, serverId }));
 
-const start = (artifactId: string, address = '203.0.113.7') => publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+/** The version a page opened by its link shows right now: the one its open page says it shows when it starts a payment. */
+const onLink = async (artifactId: string) => shownVersionFor(await prisma.artifact.findUniqueOrThrow({ where: { id: artifactId }, select: { latestVersion: true, publishedVersion: true } }), false);
+const start = async (artifactId: string, address = '203.0.113.7') =>
+  publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { shownVersion: await onLink(artifactId) }, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
 
 /** What the gateway answers: a charge made, then its record. */
 let lastOrder = '';
@@ -277,7 +280,7 @@ run('payments for pages, in a real database', () => {
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
       const sent = gateway();
-      const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { amount: 0.001, currency: 'USD' } }), params({ artifactId }));
+      const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { amount: 0.001, currency: 'USD', shownVersion: 1 } }), params({ artifactId }));
       expect(response.status).toBe(200);
       expect(JSON.parse(sent[0].body as string)).toMatchObject({ amount: 4.5, currency: 'KWD' });
     });
@@ -499,14 +502,244 @@ run('payments for pages, in a real database', () => {
       expect((await call({ viewer }, null)).status).toBe(401);
       expect((await call({ viewer }, SERVICE_TOKEN)).status).toBe(401);
       expect(await (await call({ viewer })).json()).toEqual({ enabled: true });
-      const started = await call({ viewer, start: true });
+      const started = await call({ viewer, start: true, shownVersion: 1 });
       expect(started.status).toBe(200);
       const { orderId } = await started.json();
       expect((await (await call({ viewer, order: orderId })).json()).status).toBe('checking');
       // A person who may not open the page hears nothing about it (this one is shared with its chat, and they are not in it)
       await prisma.artifact.update({ where: { id: artifactId }, data: { openScope: 'chat' } });
       const stranger = { person: { signedIn: true, identifier: `omar-${tag}` }, inChat: false };
-      expect((await call({ viewer: stranger, start: true })).status).toBe(404);
+      expect((await call({ viewer: stranger, start: true, shownVersion: 1 })).status).toBe(404);
+    });
+  });
+
+  /* ------------------------- terms set on a draft (GPT audit 26 Nov, O2) ------------------------- */
+
+  describe('terms set on a version newer than the one the link shows', () => {
+    /** A page with versions 1..latest, version `published` published (null: never), as the owner's drafts leave it. */
+    async function pageWith(latest: number, published: number | null, openScope = 'link'): Promise<string> {
+      const artifactId = await makeArtifact({ openScope });
+      for (let number = 1; number <= latest; number++) await prisma.artifactVersion.create({ data: { artifactId, number, fileKey: `o2/${artifactId}/${number}.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: latest, publishedVersion: published, publishedAt: published === null ? null : new Date(), publishedTitle: published === null ? null : 'Shop' } });
+      return artifactId;
+    }
+    const publish = (artifactId: string, version: number) => prisma.artifact.update({ where: { id: artifactId }, data: { publishedVersion: version, publishedAt: new Date() } });
+    /** A start from the game's window, open on version `shown` (what the viewer is shown: the latest for the owner, what was published for others). */
+    const gameCall = (artifactId: string, viewer: unknown, shown: number) =>
+      gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer, start: true, shownVersion: shown } }), params({ id: artifactId }));
+    const outsider = { person: { signedIn: true, identifier: `omar-${tag}` }, inChat: false };
+    const owner = { person: { signedIn: true, identifier: `sara-${tag}` }, inChat: false };
+    const word = () => randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+    const wish = () => `i${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+
+    it('refuses a visitor of the published version 1 when the terms were set on draft version 2, charges nothing, and works once the owner publishes again', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 1);
+      const made = await job(serverId, artifactId);
+      expect(made.status).toBe(200);
+      // The Brick is told the terms go live when the owner publishes
+      expect(await made.json()).toMatchObject({ waitsForPublish: true });
+      const sent = gateway();
+      const refused = await start(artifactId);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual({ error: 'This page isn’t taking payments right now. Try again later', code: 'not_published' });
+      // Nothing was made, nothing was sent to the service, nothing was counted
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+      // The same through the game, for someone who sees only what was published
+      const game = await gameCall(artifactId, outsider, 1);
+      expect(game.status).toBe(409);
+      expect(await game.json()).toMatchObject({ error: 'not_published' });
+      expect(sent).toHaveLength(0);
+      // The owner publishes version 2: the same visitor now checks out with the terms version 2 shows
+      await publish(artifactId, 2);
+      const body = await checkout(artifactId);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: body.orderId } })).amountMinor).toBe(4500);
+      expect(sent).toHaveLength(1);
+      // And the job read back no longer waits
+      const read = await readJob(request(`/api/bots/${brick}/key-apps/${serverId}/page-jobs?artifactId=${artifactId}`, { token: SERVICE_TOKEN }), params({ id: brick, serverId }));
+      expect(await read.json()).toMatchObject({ waitsForPublish: false });
+    });
+
+    it('lets the owner check out on the latest version in the game while visitors of the link wait', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 1);
+      await job(serverId, artifactId);
+      gateway();
+      expect((await gameCall(artifactId, owner, 2)).status).toBe(200);
+      expect((await start(artifactId, '203.0.113.20')).status).toBe(409);
+    });
+
+    it('does not wait on a page never published (its link shows the latest), nor on terms set on the published version', async () => {
+      const { serverId } = await connectGateway();
+      const never = await pageWith(2, null);
+      expect(await (await job(serverId, never)).json()).toMatchObject({ waitsForPublish: false });
+      const same = await pageWith(2, 2);
+      expect(await (await job(serverId, same)).json()).toMatchObject({ waitsForPublish: false });
+      gateway();
+      expect((await start(never, '203.0.113.21')).status).toBe(200);
+      expect((await start(same, '203.0.113.22')).status).toBe(200);
+      // A draft made AFTER the terms keeps the terms on the published version: they were set on what visitors see
+      await prisma.artifactVersion.create({ data: { artifactId: same, number: 3, fileKey: `o2/${same}/3.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: same }, data: { latestVersion: 3 } });
+      expect((await start(same, '203.0.113.23')).status).toBe(200);
+    });
+
+    it('refuses when the owner publishes an older version again after setting the terms', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      gateway();
+      expect((await start(artifactId, '203.0.113.24')).status).toBe(200);
+      await publish(artifactId, 1);
+      expect((await start(artifactId, '203.0.113.25')).status).toBe(409);
+    });
+
+    const startShown = (artifactId: string, shownVersion: number | undefined, address: string, extra: Record<string, unknown> = {}) =>
+      publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { ...(shownVersion === undefined ? {} : { shownVersion }), ...extra }, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+
+    it('never charges terms set on a newer version than the one the buyer’s open page shows, even once that version is published (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      const sent = gateway();
+      // The buyer opened the page while version 1 was published; the owner then published version 2 with these terms
+      const stale = await startShown(artifactId, 1, '203.0.113.30');
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ error: 'This page was updated. Reload it to see the latest version before you pay', code: 'page_changed' });
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+      // The same through the game's window
+      const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: outsider, start: true, shownVersion: 1 } }), params({ id: artifactId }));
+      expect(game.status).toBe(409);
+      expect(await game.json()).toMatchObject({ error: 'page_changed' });
+      expect(sent).toHaveLength(0);
+      // After a reload the page shows version 2: it checks out
+      expect((await startShown(artifactId, 2, '203.0.113.31')).status).toBe(200);
+    });
+
+    it('makes no new order for a page that does not say which version it shows, on either route, and a reload that says it checks out (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      const sent = gateway();
+      const silent = await startShown(artifactId, undefined, '203.0.113.32', { intentId: wish(), recoveryCode: word() });
+      expect(silent.status).toBe(409);
+      expect(await silent.json()).toEqual({ error: 'This page was updated. Reload it to see the latest version before you pay', code: 'page_changed' });
+      const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: owner, start: true } }), params({ id: artifactId }));
+      expect(game.status).toBe(409);
+      expect(await game.json()).toMatchObject({ error: 'page_changed' });
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(0);
+      expect(sent).toHaveLength(0);
+      expect((await startShown(artifactId, 1, '203.0.113.32', { intentId: wish(), recoveryCode: word() })).status).toBe(200);
+    });
+
+    it('lets a page still open on an older version pay with terms that were set on that version or before it', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      // Version 2 is published after the terms were set on version 1: the terms are the same for both
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await publish(artifactId, 2);
+      gateway();
+      expect((await startShown(artifactId, 1, '203.0.113.33')).status).toBe(200);
+    });
+
+    it('gives a wish the order it already made, not a refusal, when the terms moved to a draft while its first try was on its way (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      gateway();
+      const intentId = wish();
+      const code = word();
+      const first = await startShown(artifactId, 1, '203.0.113.34', { intentId, recoveryCode: code });
+      expect(first.status).toBe(200);
+      const { orderId } = await first.json();
+      // The owner sets terms on a draft version 2; the same wish asks again, and its first look misses the order (as when the first try had not committed yet)
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await job(serverId, artifactId);
+      const look = jest.spyOn(prisma.appPageOrder, 'findFirst').mockResolvedValueOnce(null);
+      try {
+        const again = await startShown(artifactId, 1, '203.0.113.34', { intentId, recoveryCode: code });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ orderId, reused: true });
+      } finally {
+        look.mockRestore();
+      }
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+      // A new wish is refused: nothing new is made on terms the link does not show
+      expect((await startShown(artifactId, 1, '203.0.113.35', { intentId: wish(), recoveryCode: code })).status).toBe(409);
+    });
+
+    it('waits for an earlier try of the same wish that is writing its order right now, and gives that order instead of a refusal (CodeRabbit, 26 Nov)', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(2, 2);
+      await job(serverId, artifactId);
+      gateway();
+      const terms = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const { keyMode } = await prisma.appConnection.findUniqueOrThrow({ where: { id: terms.connectionId } });
+      const intentId = wish();
+      const code = word();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let written: () => void = () => undefined;
+      const writing = new Promise<void>((resolve) => (written = resolve));
+      // The first try of this wish passed its checks and is writing its order under the owner's lock, not committed yet (its start was cut off
+      // long enough ago that a later try may carry it on)
+      const longAgo = new Date(Date.now() - 3_600_000);
+      let firstOrder = '';
+      const first = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${terms.ownerId}`}, 0))`;
+          const made = await tx.appPageOrder.create({
+            data: { jobId: terms.id, ownerId: terms.ownerId, connectionId: terms.connectionId, artifactId, definitionHash: terms.definitionHash, amountMinor: terms.amountMinor, currency: terms.currency, mode: keyMode, status: 'creating', visitorHash: 'first-try', intentId, buyerKey: guestBuyerKey(code), description: terms.description, createdAt: longAgo, checkedAt: longAgo },
+          });
+          firstOrder = made.id;
+          written();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await writing;
+      // Meanwhile the owner publishes the older version again: the retry's own look now finds terms the link no longer shows
+      await publish(artifactId, 1);
+      let finished = false;
+      const retry = startShown(artifactId, 2, '203.0.113.36', { intentId, recoveryCode: code }).then((response) => ((finished = true), response));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // It waits for the first try instead of answering a refusal it cannot be sure of
+      expect(finished).toBe(false);
+      release();
+      await first;
+      const answer = await retry;
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ orderId: firstOrder });
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+    });
+
+    it('still carries on an order made before the terms moved to a draft, at the order’s own amount', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await pageWith(1, 1);
+      await job(serverId, artifactId);
+      // The order's start never finished (the server stopped); then the owner made a draft and set the same terms on it
+      const sent = gateway({ createStatus: 503 });
+      const intentId = wish();
+      const code = word();
+      const first = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId, recoveryCode: code, shownVersion: 1 }, headers: { 'x-forwarded-for': '203.0.113.26' } }), params({ artifactId }));
+      expect(first.status).toBe(409);
+      expect(await first.json()).toMatchObject({ unsure: true });
+      await prisma.artifactVersion.create({ data: { artifactId, number: 2, fileKey: `o2/${artifactId}/2.html`, sizeBytes: 10 } });
+      await prisma.artifact.update({ where: { id: artifactId }, data: { latestVersion: 2 } });
+      await job(serverId, artifactId);
+      // The same wish again finds its order and carries it on, never a refusal and never a second order. It needs no version: the order
+      // already holds the terms its buyer was shown (an older host that never says one still gets its own order back)
+      gateway();
+      await prisma.appPageOrder.updateMany({ where: { artifactId }, data: { checkedAt: new Date(Date.now() - 3_600_000) } });
+      const again = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId, recoveryCode: code }, headers: { 'x-forwarded-for': '203.0.113.26' } }), params({ artifactId }));
+      expect(again.status).toBe(200);
+      expect(await prisma.appPageOrder.count({ where: { artifactId } })).toBe(1);
+      expect(sent.length).toBeGreaterThan(0);
     });
   });
 
@@ -1012,8 +1245,8 @@ run('payments for pages, in a real database', () => {
       await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
       const { artifactId } = await pending();
       gateway();
-      expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
-      expect((await startCheckout({ artifactId, visitor: 'two' })).status).toBe('limit');
+      expect((await startCheckout({ artifactId, visitor: 'one', shownVersion: 1 })).status).toBe('ok');
+      expect((await startCheckout({ artifactId, visitor: 'two', shownVersion: 1 })).status).toBe('limit');
     });
   });
 
@@ -1036,7 +1269,7 @@ run('payments for pages, in a real database', () => {
       );
       await taken;
       let finished = false;
-      const mine = startCheckout({ artifactId, visitor: 'one' }).then((outcome) => ((finished = true), outcome));
+      const mine = startCheckout({ artifactId, visitor: 'one', shownVersion: 1 }).then((outcome) => ((finished = true), outcome));
       await new Promise((resolve) => setTimeout(resolve, 400));
       expect(finished).toBe(false);
       release();
@@ -1052,7 +1285,7 @@ run('payments for pages, in a real database', () => {
         data: Array.from({ length: 5 }, (_, index) => ({ connectionId: jobRow.connectionId, ownerId: sara, botId: brick, callId: `busy-${tag}-${index}`, operation: 'x', state: 'done', outcome: 'ok' })),
       });
       gateway();
-      expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
+      expect((await startCheckout({ artifactId, visitor: 'one', shownVersion: 1 })).status).toBe('ok');
     });
 
     it('does not wait for a Brick\'s key call: checkouts and own-key calls share no lock and no count', async () => {
@@ -1073,7 +1306,7 @@ run('payments for pages, in a real database', () => {
       );
       await taken;
       try {
-        expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
+        expect((await startCheckout({ artifactId, visitor: 'one', shownVersion: 1 })).status).toBe('ok');
       } finally {
         release();
         await call;
@@ -1091,7 +1324,7 @@ run('payments for pages, in a real database', () => {
         return { artifactId: artifact, serverId: gate.serverId };
       })();
       gateway();
-      expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
+      expect((await startCheckout({ artifactId, visitor: 'one', shownVersion: 1 })).status).toBe('ok');
       const [app] = await keyAppsOf(brick);
       const deps = { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 200, redirected: false, body: '{"id":"chg_9","status":"INITIATED"}', truncated: false, contentType: null }) };
       // The order took the checkouts' one place: the Brick's own-key use is not counted against it and is sent
@@ -1114,7 +1347,7 @@ run('payments for pages, in a real database', () => {
       const omarConnection = await prisma.appConnection.findUniqueOrThrow({ where: { id: omarsApp.id } });
       await prisma.appPageJob.create({ data: { ...rest, ownerId: omar, connectionId: omarsApp.id, artifactId: omarsArtifact, definitionHash: omarConnection.definitionHash ?? rest.definitionHash } as never });
       gateway();
-      const [one, two] = await Promise.all([startCheckout({ artifactId: first.artifactId, visitor: 'a' }), startCheckout({ artifactId: omarsArtifact, visitor: 'b' })]);
+      const [one, two] = await Promise.all([startCheckout({ artifactId: first.artifactId, visitor: 'a', shownVersion: 1 }), startCheckout({ artifactId: omarsArtifact, visitor: 'b', shownVersion: 1 })]);
       expect([one.status, two.status].sort()).toEqual(['limit', 'ok']);
       expect(await prisma.appPageOrder.count({ where: { ownerId: { in: [sara, omar] } } })).toBe(1);
     });
@@ -1600,7 +1833,7 @@ run('payments for pages, in a real database', () => {
     const word = () => randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
     const wish = () => `i${randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const buyerOf = (code: string) => guestBuyerKey(code) as string;
-    const begin = (artifactId: string, intentId: string, code: string, visitor = 'visitor-1') => startCheckout({ artifactId, visitor, intentId, buyerKey: buyerOf(code) });
+    const begin = (artifactId: string, intentId: string, code: string, visitor = 'visitor-1') => startCheckout({ artifactId, visitor, intentId, buyerKey: buyerOf(code), shownVersion: 1 });
     const orders = (artifactId: string) => prisma.appPageOrder.findMany({ where: { artifactId }, orderBy: { createdAt: 'asc' } });
     const old = (orderId: string) => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
 
@@ -1854,10 +2087,10 @@ run('payments for pages, in a real database', () => {
         mockSend.current = () => {
           throw new GuardError('timeout', 'no answer');
         };
-        const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId: wish(), recoveryCode: word() }, headers: { 'x-forwarded-for': '203.0.113.77' } }), params({ artifactId }));
+        const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId: wish(), recoveryCode: word(), shownVersion: 1 }, headers: { 'x-forwarded-for': '203.0.113.77' } }), params({ artifactId }));
         expect(response.status).toBe(409);
         expect(await response.json()).toMatchObject({ code: 'unavailable', unsure: true });
-        const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: { person: { signedIn: false, name: 'Visitor' }, inChat: true, chat: { kind: 'dm', ref: `chat-${tag}` } }, start: true, intentId: wish(), recoveryCode: word() } }), params({ id: artifactId }));
+        const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: { person: { signedIn: false, name: 'Visitor' }, inChat: true, chat: { kind: 'dm', ref: `chat-${tag}` } }, start: true, intentId: wish(), recoveryCode: word(), shownVersion: 1 } }), params({ id: artifactId }));
         expect(game.status).toBe(409);
         expect(await game.json()).toMatchObject({ error: 'unavailable', unsure: true });
       });
@@ -2816,7 +3049,7 @@ run('payments for pages, in a real database', () => {
         });
       });
 
-      it('never turns a cut-off or non-object body into a checkout: only no body at all is a plain start', async () => {
+      it('never turns a cut-off or non-object body into a checkout, nor a start that does not say which version its page shows', async () => {
         const { artifactId } = await pending();
         const sent = gateway();
         const raw = (text: string | null, address: string) => publicStart(new NextRequest(`http://localhost/api/pay/${artifactId}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': address }, ...(text === null ? {} : { body: text }) }), params({ artifactId }));
@@ -2826,7 +3059,12 @@ run('payments for pages, in a real database', () => {
           expect(await response.json()).toMatchObject({ code: 'bad_request' });
         }
         expect(POSTS(sent)).toHaveLength(0);
-        expect((await raw(null, '203.0.113.50')).status).toBe(200);
+        // No body at all is a plain start that names no version: refused as a changed page, nothing sent
+        const plain = await raw(null, '203.0.113.50');
+        expect(plain.status).toBe(409);
+        expect(await plain.json()).toMatchObject({ code: 'page_changed' });
+        expect(POSTS(sent)).toHaveLength(0);
+        expect((await raw('{"shownVersion":1}', '203.0.113.51')).status).toBe(200);
         expect(POSTS(sent)).toHaveLength(1);
       });
 
@@ -2932,8 +3170,11 @@ run('payments for pages, in a real database', () => {
 
     describe('through the game’s route and the public link', () => {
       const viewerOf = (identifier: string | null, chat = `chat-${tag}`) => ({ person: identifier ? { signedIn: true, identifier } : { signedIn: false, name: 'Visitor' }, inChat: true, chat: { kind: 'dm', ref: chat } });
-      const game = (artifactId: string, body: Record<string, unknown>) => gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body }), params({ id: artifactId }));
-      const web = (artifactId: string, body: Record<string, unknown>, address = '203.0.113.9') => publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+      // A start says the version its page shows (version 1, the only one these pages have)
+      const game = (artifactId: string, body: Record<string, unknown>) =>
+        gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: body.start ? { shownVersion: 1, ...body } : body }), params({ id: artifactId }));
+      const web = (artifactId: string, body: Record<string, unknown>, address = '203.0.113.9') =>
+        publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: body.check || body.restore ? body : { shownVersion: 1, ...body }, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
 
       it('binds a signed-in buyer to their account and a guest to their code', async () => {
         const { artifactId } = await pending();

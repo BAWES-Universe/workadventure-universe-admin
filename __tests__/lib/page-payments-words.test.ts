@@ -83,5 +83,10 @@ describe('the host line’s wording (mock M1)', () => {
     expect(text({ checking: true, resume: { url: 'https://c.example/x', app: 'ExamplePay' } })?.[2]).toEqual(['Open ExamplePay again']);
     expect(text({ problem: 'unavailable' })?.[0]).toBe('Payments unavailable');
     expect(text({ problem: 'limit' })?.[0]).toBe('Too many tries for now.');
+    // Terms set on a version the link does not show yet (O2): said plainly, nothing to press, no payment service named
+    expect(text({ problem: 'not_published' })).toEqual(['Payments unavailable', 'This page isn’t taking payments right now. Try again later.', [], false]);
+    expect(describeLine(line({ problem: 'not_published' }), { copied: false })?.note).toBeUndefined();
+    // The page open here is older than the one the payment was set on: reload, nothing to press
+    expect(text({ problem: 'page_changed' })).toEqual(['This page was updated.', 'Reload it to see the latest version before you pay.', [], false]);
   });
 });
