@@ -5,13 +5,16 @@ import { useEffect, useId, useRef, useState } from 'react';
 /** One measure of the document as paper: how tall it is when the page is this wide (in CSS pixels). */
 type PaperHeight = readonly [width: number, height: number];
 
+/** The most width and height pairs the page takes from the frame. The frame's script measures every width it lists, so a test checks the list is never longer than this. */
+export const MAX_PAPER_HEIGHTS = 8;
+
 /** A plain number from the frame, and nothing else. */
 const plain = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1_000_000 ? Math.ceil(value) : null;
 
 /** The paper heights the frame reported, if it reported a few sensible pairs, widest last. */
 function paperHeightsOf(value: unknown): PaperHeight[] | null {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 8) return null;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PAPER_HEIGHTS) return null;
   const heights: PaperHeight[] = [];
   for (const pair of value as unknown[]) {
     if (!Array.isArray(pair) || pair.length !== 2) return null;

@@ -1,7 +1,8 @@
 /** @jest-environment jsdom */
 
 import { act, render } from '@testing-library/react';
-import { DocumentFrame } from '@/components/document-frame';
+import { DocumentFrame, MAX_PAPER_HEIGHTS } from '@/components/document-frame';
+import { HEIGHT_SCRIPT } from '@/lib/artifact-public';
 
 /** The frame's window, as the page sees it: it can be sent messages and says what it was sent. */
 function frameWindow(container: HTMLElement) {
@@ -18,6 +19,17 @@ const say = (source: Window | null, data: unknown) =>
   });
 
 describe('DocumentFrame', () => {
+  it('takes every width the frame measures: the script never lists more widths than the page accepts', () => {
+    const widths = (/var W=\[([\d,]+)\]/.exec(HEIGHT_SCRIPT)?.[1] ?? '').split(',').filter(Boolean);
+    expect(widths.length).toBeGreaterThan(0);
+    expect(widths.length).toBeLessThanOrEqual(MAX_PAPER_HEIGHTS);
+    // And the page really accepts a full list
+    const { container } = render(<DocumentFrame title="T" html="<p>x</p>" className="c" />);
+    const { fake } = frameWindow(container);
+    say(fake, { artifactPrintHeights: widths.map((w) => [Number(w), 1000]) });
+    expect(container.querySelectorAll('style')).toHaveLength(1);
+  });
+
   it('asks the frame for its heights once it listens and again when the frame has loaded', () => {
     const { container } = render(<DocumentFrame title="T" html="<p>x</p>" className="c" />);
     const { iframe, sent } = frameWindow(container);
