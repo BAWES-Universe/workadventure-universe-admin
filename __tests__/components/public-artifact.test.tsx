@@ -64,6 +64,29 @@ describe('the public artifact page', () => {
     expect(HEIGHT_SCRIPT).not.toMatch(/cookie|storage|fetch|XMLHttp|location/);
   });
 
+  it('shows a tag written in a document as text, so a document can never send its frame to another address', () => {
+    const doc = markdownDocument(
+      [
+        '<meta http-equiv="refresh" content="0;url=https://evil.example/">',
+        '',
+        'A line with <meta http-equiv="refresh" content="0;url=https://evil.example/"> inside it, and <b onclick="x()">bold</b>.',
+        '',
+        '<iframe src="https://evil.example/"></iframe>',
+        '<form action="https://evil.example/"><input name="a"></form>',
+        '<script>parent.location = "https://evil.example/"</script>',
+      ].join('\n')
+    );
+    // The only tags in the document are the page's own: one policy, one base, one height script
+    const body = doc.slice(doc.indexOf('<body>'));
+    expect(body).not.toMatch(/<(meta|iframe|form|input|script|b )/i);
+    expect(doc.match(/<meta http-equiv=/g)).toHaveLength(1);
+    expect(doc.match(/<script>/g)).toHaveLength(1);
+    // What the writer wrote is still there to read
+    expect(body).toContain('&lt;meta http-equiv=&quot;refresh&quot;');
+    expect(body).toContain('&lt;iframe src=&quot;https://evil.example/&quot;&gt;');
+    expect(body).toContain('&lt;script&gt;parent.location');
+  });
+
   it('prints the whole document: the table fits the paper and the pill stays off it', () => {
     const doc = markdownDocument('| a | b |\n|---|---|\n| 1 | 2 |');
     const print = doc.slice(doc.indexOf('@media print'));

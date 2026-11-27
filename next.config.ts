@@ -5,6 +5,15 @@ import { getPlayOrigin } from "./lib/origin-policy";
 const playOrigin = getPlayOrigin();
 const frameAncestors = `frame-ancestors 'self' ${playOrigin};`;
 
+/** Where the artifacts' own files are served from (ARTIFACTS_PUBLIC_URL), as a policy source; nothing when it is not set. */
+function artifactsOrigin(): string | undefined {
+  try {
+    return process.env.ARTIFACTS_PUBLIC_URL ? new URL(process.env.ARTIFACTS_PUBLIC_URL).origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const nextConfig: NextConfig = {
   // Old addresses, answered before anything renders. The pages at these addresses redirect while rendering, which
   // trips React's development timings ("cannot have a negative time stamp"); these run first.
@@ -89,7 +98,9 @@ const nextConfig: NextConfig = {
           { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },
-          { key: 'Content-Security-Policy', value: "frame-ancestors 'none';" },
+          // A frame on this page can only be one of ours or the address the artifacts are served from: a document that
+          // somehow sends its frame elsewhere (a redirect) is stopped here too
+          { key: 'Content-Security-Policy', value: `frame-ancestors 'none'; frame-src ${['\'self\'', artifactsOrigin()].filter(Boolean).join(' ')};` },
         ],
       },
       {

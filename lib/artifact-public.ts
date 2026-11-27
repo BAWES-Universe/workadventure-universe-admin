@@ -1,4 +1,4 @@
-import { marked } from 'marked';
+import { Marked } from 'marked';
 
 /**
  * The one script a document carries: it tells the page how tall the document is, so printing the page prints all of it (a
@@ -9,13 +9,28 @@ export const HEIGHT_SCRIPT = "(function(){function t(){parent.postMessage({artif
 /** Its sha256, as the policy names it (a test checks it still matches the script). It is a constant because this file also runs in the browser. */
 export const HEIGHT_SCRIPT_HASH = '/QxzRHGhEbVovuN6prREuWyD5P9DPc2sOhEP2J+zejY=';
 
+/** Text that is safe between tags and inside a quoted value. */
+const escapeText = (text: string): string =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/**
+ * A document's own HTML is never drawn as HTML, in a block or inside a line: it shows as the text it is. A tag written in a
+ * document (a meta refresh that sends the frame to another address, a form, a script, a frame) therefore never reaches the
+ * page as a tag at all, whatever the document's policy says.
+ */
+const documents = new Marked({
+  renderer: {
+    html: (html: string) => escapeText(html),
+  },
+});
+
 /**
  * A document for the public link page: the Markdown drawn as HTML, in a page of its own that the page shows in an iframe
  * without its own origin. The document's own policy blocks everything but styles, https images and the one script above
  * (by its hash), so nothing a document says can run or reach anything of the viewer.
  */
 export function markdownDocument(markdown: string): string {
-  const html = marked.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
+  const html = documents.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; script-src 'sha256-${HEIGHT_SCRIPT_HASH}'">
 <base target="_blank">
