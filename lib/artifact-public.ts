@@ -38,6 +38,7 @@ function printRules(scope: string): string {
     on(['blockquote'], 'color: #444;'),
     on(['table'], 'display: table; width: 100%; overflow: visible; font-size: 10pt;'),
     on(['th', 'td'], 'white-space: normal; overflow-wrap: anywhere; border-color: #9ca3af;'),
+    on(['pre'], 'white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere;'),
     on(['th'], 'background: #e5e7eb;'),
     on(['thead'], 'display: table-header-group;'),
     on(['tr', 'img', 'pre'], 'break-inside: avoid;'),

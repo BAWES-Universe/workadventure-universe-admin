@@ -22,7 +22,7 @@ describe('the policy of the shared page', () => {
   });
 
   it('keeps to its own frames when no address is given or the address is not one', () => {
-    expect(sourcesOf(sharedPagePolicy(undefined), 'frame-src')).toEqual(["'self'"]);
+    expect(sourcesOf(sharedPagePolicy(''), 'frame-src')).toEqual(["'self'"]);
     expect(sourcesOf(sharedPagePolicy('not a url'), 'frame-src')).toEqual(["'self'"]);
   });
 
