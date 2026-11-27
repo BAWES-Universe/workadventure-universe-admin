@@ -4481,7 +4481,8 @@ export async function wakeIfStopped(botId: string, /** How long to wait for a st
     console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
     for (const job of jobs) await endJob(job.id, 'stopped', 'error', new Date());
-    await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] } }, data: { machine: 'broken' } });
+    // Never a cold-storage return that another start is running (`restoring`, stage `returning`): the `stopped` read above is old by now, and marking that row broken would make the return's last write fail and leave a computer billed that nothing owns (Opus on #1040; as in the sweep, line `stopAbandonedWakes`)
+    await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] }, data: { machine: 'broken' } });
     return 'up';
   }
 }

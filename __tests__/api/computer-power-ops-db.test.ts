@@ -630,6 +630,30 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).turnUnprovenSince).not.toBeNull();
     });
 
+    it('Opus on #1040: a hand back whose `stopped` read is old (the row is now a cold-storage return that another start runs) and whose bring-up fails does NOT mark that return broken: the row is untouched', async () => {
+      const sara = await owner('handback-returning');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      // The row is now a live return; the hand back read it as `stopped` a moment before
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', packStage: 'returning', turnUnprovenSince: null } });
+      const real = await machineOf(sara);
+      const realFind = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      let reads = 0;
+      jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation(((...args: unknown[]) => (++reads === 1 ? Promise.resolve({ ...real, machine: 'stopped' }) : (realFind as (...a: unknown[]) => unknown)(...args))) as never);
+      // The bring-up of a return then fails at once (a provider that cannot bring a computer back from cold storage)
+      const savedPrepack = (fake as unknown as { prepack?: unknown }).prepack;
+      (fake as unknown as { prepack?: unknown }).prepack = undefined;
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await wakeIfStopped(sara.brickId, { ms: 1_000, dead: false })).toBe('up');
+      } finally {
+        jest.restoreAllMocks();
+        (fake as unknown as { prepack?: unknown }).prepack = savedPrepack;
+      }
+      expect(errors.mock.calls.map((call) => call.join(' ')).some((line) => /did not come back after a hand back/.test(line))).toBe(true);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'restoring', packStage: 'returning' });
+    });
+
     it.each(['waking', 'restoring'] as const)('CodeRabbit on #1040: a turn hold on a machine whose `%s` wake was abandoned (no beat for the whole stale time, no job) is stopped and lifted, never left to hold every start in line for ever', async (state) => {
       const sara = await owner(`abandoned-${state}`);
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
