@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useCallback, useEffect, useState, type ReactNode } from 'react';
+import { use, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,9 +9,10 @@ import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { companyHost, listedModelJobs } from '@/lib/voice-key-companies';
+import { companyHost, listedModelJobs, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
+import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
 import { FormSheet } from '../../../components/form-sheet';
 import { EnabledPill } from '../../components/provider-state';
 import {
@@ -95,6 +96,12 @@ function EditField({
   );
 }
 
+/** A model the company lists for the key, with its short line about it (never saved). */
+type Listed = VoiceModel & { note?: string };
+
+/** The most models the server keeps on one provider (lib/voice-providers.ts). */
+const MAX_PROVIDER_MODELS = 200;
+
 const verbFor = (provider: ServerVoiceProvider) => (provider.recognition && provider.speech ? 'listen and speak' : provider.recognition ? 'listen' : 'speak');
 
 /** A voice provider's own page (#792): on or off, who uses it, its key, models, address, name and delete. */
@@ -108,6 +115,14 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   const [failed, setFailed] = useState(false);
   const [checked, setChecked] = useState<{ ok: true } | { ok: false; message: string } | { ok: 'note'; message: string } | null>(null);
   const [checking, setChecking] = useState(false);
+  /** Which Check key is the latest, so an answer that comes after a key was replaced is dropped. */
+  const checkRun = useRef(0);
+  /** The provider as last read, to see what changed when it is read again. */
+  const seen = useRef<ServerVoiceProvider | null>(null);
+  /** Set while a key replaced on this page is saved: the reload that follows is not a change from elsewhere. */
+  const keyReplacedHere = useRef(false);
+  // The models the company listed for the saved key when it was last checked, to tick (null: not checked, no list, or unreadable)
+  const [listed, setListed] = useState<Listed[] | null>(null);
   const [editing, setEditing] = useState<'key' | 'address' | 'name' | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [turningOff, setTurningOff] = useState(false);
@@ -127,6 +142,25 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       }
       const found = answer.data.providers.find((entry) => entry.id === id);
       if (!found) return replacePage('/admin/ai-providers');
+      // A key, address or region changed since the list was read (here or elsewhere): the list and the check were for the old one,
+      // and a Check key still out is about it too. A change of name or models keeps the list
+      const before = seen.current;
+      seen.current = found;
+      // The first read after a key was replaced here is the one that follows that save, whether or not the key looks different (a new
+      // key can end in the same four characters): the flag is used up by it, so a later change from elsewhere is never taken as ours
+      const ownKey = keyReplacedHere.current;
+      keyReplacedHere.current = false;
+      if (before) {
+        const keyChanged = before.hasKey !== found.hasKey || before.apiKeyLast4 !== found.apiKeyLast4;
+        const moved = before.endpoint !== found.endpoint || before.adapter !== found.adapter || before.region !== found.region;
+        // A key replaced on this page has already cleared the list and said the key is known: that is not undone
+        if (moved || (keyChanged && !ownKey)) {
+          checkRun.current++;
+          setChecking(false);
+          setChecked(null);
+          setListed(null);
+        }
+      }
       setAll(answer.data.providers);
       setProvider(found);
       setFailed(false);
@@ -144,7 +178,14 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     if (Array.isArray(body.models)) saved.models = body.models as VoiceModel[];
     if (typeof body.enabled === 'boolean') saved.enabled = body.enabled;
     if (typeof body.name === 'string') saved.name = body.name;
-    if ('endpoint' in body) saved.endpoint = (body.endpoint as string | null) ?? null;
+    if ('endpoint' in body) {
+      saved.endpoint = (body.endpoint as string | null) ?? null;
+      // The list read, and the check, were for the old address: they don't carry over, and a Check key still out is about it too
+      checkRun.current++;
+      setChecking(false);
+      setChecked(null);
+      setListed(null);
+    }
     setProvider((current) => (current ? { ...current, ...saved } : current));
     setAll((list) => list.map((entry) => (entry.id === id ? { ...entry, ...saved } : entry)));
     reload();
@@ -219,11 +260,33 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       setChecked({ ok: 'note', message: ownAddressNote });
       return;
     }
+    const run = ++checkRun.current;
     setChecking(true);
     setChecked(null);
     const answer = await callOrbit('POST', `/api/admin/voice-providers/${encodeURIComponent(id)}/check`);
+    // A key replaced while this was out has moved on: this answer is about the old key and says nothing about the new one
+    if (run !== checkRun.current) return;
     setChecking(false);
     setChecked(answer.ok ? { ok: true } : { ok: false, message: answer.error });
+    const found = answer.ok ? (answer.data as { models?: unknown } | null)?.models : null;
+    setListed(Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null);
+  }
+
+  /** On the company's list for this key: ticked there, not typed. */
+  const onList = (model: VoiceModel) => listed?.some((entry) => lendModelId(entry) === lendModelId(model)) ?? false;
+
+  /** The ticks on the company's list, saved: models kept in their order, typed ones kept, newly ticked ones last. */
+  function tick(ids: string[]) {
+    const kept = provider!.models.filter((model) => !onList(model) || ids.includes(lendModelId(model)));
+    const added = (listed ?? []).filter((entry) => ids.includes(lendModelId(entry)) && !kept.some((model) => lendModelId(model) === lendModelId(entry)));
+    // What is saved is the model only: the line about it is the company's, read again whenever the list is
+    const next = [...kept, ...added.map(({ id: modelId, label, kind }) => ({ id: modelId, ...(label ? { label } : {}), kind }))];
+    // The server keeps at most 200 models per provider: say so here instead of sending a list it turns down
+    if (next.length > MAX_PROVIDER_MODELS && next.length > provider!.models.length) {
+      setProblem('A provider can list up to 200 models. Take one off first.');
+      return;
+    }
+    void changeModels(next);
   }
 
   async function replaceKey(key: string): Promise<string | null> {
@@ -238,10 +301,19 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key, ...(region ? { region } : {}) });
       if (!asked.ok) return asked.error;
     }
+    keyReplacedHere.current = true;
     const refused = await change({ apiKey: key });
-    if (refused) return refused;
+    if (refused) {
+      keyReplacedHere.current = false;
+      return refused;
+    }
+    // A Check key still out was asked about the old key: let it end without touching the page
+    checkRun.current++;
+    setChecking(false);
     setEditing(null);
     setChecked(ownAddress ? null : { ok: true });
+    // The list read for the old key may not be this one's
+    setListed(null);
     addToast({ description: 'Key replaced', variant: 'success', duration: 2500 });
     return null;
   }
@@ -317,7 +389,11 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
             </Button>
           </div>
         )}
-        {checked?.ok === true && <Answered>{company} knows this key. Checked just now, nothing paid.</Answered>}
+        {checked?.ok === true && (
+          <Answered>
+            {company} knows this key{listed ? ` and lists ${listed.length} ${listed.length === 1 ? 'model' : 'models'} for it` : ''}. Checked just now, nothing paid.
+          </Answered>
+        )}
         {checked?.ok === false && <Refused>{checked.message}</Refused>}
         {checked?.ok === 'note' && <p className="text-[13px] text-muted-foreground">{checked.message}</p>}
       </section>
@@ -327,7 +403,36 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
           {listedModelJobs(provider).length > 0 && provider.hasKey ? `${company} lists these for this key, and new ones show up by themselves. A model you take off stays off. ` : ''}
           Bots on Universe AI, and people’s own {company} keys, can use only these.
         </p>
-        <ModelRows models={provider.models} jobs={jobs} onChange={changeModels} disabled={busy} />
+        {listed ? (
+          <>
+            <p className={FIELD_HINT}>{company} lists these for this key, each with what {company} says about it. Tick one to let bots pick it, untick one to take it off.</p>
+            <VoiceModelPicker
+              models={[...provider.models.filter(onList).map((model) => listed.find((entry) => lendModelId(entry) === lendModelId(model))!), ...listed.filter((entry) => !provider.models.some((model) => lendModelId(model) === lendModelId(entry)))]}
+              mode="many"
+              detailed
+              label={`${company} models`}
+              picked={provider.models.filter(onList).map(lendModelId)}
+              onChange={busy ? undefined : tick}
+            />
+          </>
+        ) : (
+          provider.hasKey && !provider.endpoint && jobs.some((job) => voiceKeyCompanyInfo(provider.adapter)?.jobs[job]?.modelList) && (
+            <p className={FIELD_HINT}>Check the key to tick models from {company}’s own list for it.</p>
+          )
+        )}
+        {/* One ModelRows in both views, so what is typed in its form survives the company's list arriving (Check key) or going (key
+            replaced). With the list, the models the company doesn't list for this key (typed, or for a job it has no list for) stay as rows */}
+        <ModelRows
+          models={listed ? provider.models.filter((model) => !onList(model)) : provider.models}
+          alsoListed={listed ? provider.models.filter(onList) : undefined}
+          jobs={jobs}
+          onChange={
+            listed
+              ? (next) => changeModels([...provider.models.filter((model) => onList(model) || next.includes(model)), ...next.filter((model) => !provider.models.includes(model))])
+              : changeModels
+          }
+          disabled={busy}
+        />
       </section>
       <section className="grid gap-2">
         <Caption>Address</Caption>

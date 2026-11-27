@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /**
  * The Voice part of the Universe AI page (#792, design A): what Universe AI listens and speaks with, the voice providers, and the
@@ -18,6 +18,9 @@ let patchAnswer: { ok: boolean; body: unknown };
 // When set, reading the list never answers: the moment after a save, before the list that follows it arrives
 let holdList = false;
 let checkAnswer: { ok: boolean; body: unknown };
+let savedCheckAnswer: { ok: boolean; body: unknown };
+// When set, Check key on a saved provider answers only once it settles
+let holdSavedCheck: Promise<void> | null = null;
 const push = jest.fn();
 
 jest.mock('@/lib/client-auth', () => ({
@@ -29,6 +32,7 @@ jest.mock('@/lib/client-auth', () => ({
     if (url.split('?')[0].endsWith('/voices')) return (holdVoices ?? Promise.resolve()).then(() => answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status));
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
+    if (url.endsWith('/check')) return (holdSavedCheck ?? Promise.resolve()).then(() => answer(savedCheckAnswer.ok, savedCheckAnswer.body));
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
     return answer(true, {});
   },
@@ -63,6 +67,8 @@ beforeEach(() => {
   patchAnswer = { ok: true, body: { provider: {} } };
   holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
+  savedCheckAnswer = { ok: true, body: { ok: true, models: null } };
+  holdSavedCheck = null;
   push.mockReset();
 });
 
@@ -880,5 +886,223 @@ describe('A voice provider\u2019s key', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     expect(await screen.findByText('This provider uses its own address, so ElevenLabs can\u2019t check its key.')).toBeTruthy();
     expect(calls.some((call) => call.url.endsWith('/check'))).toBe(false);
+  });
+});
+
+describe('A voice provider\u2019s models, from the company\u2019s own list for its key', () => {
+  const open = async (id: string) => {
+    const params = Object.assign(Promise.resolve({ id }), { status: 'fulfilled', value: { id } });
+    render(<VoiceProviderPage params={params} />);
+    return screen.findByRole('button', { name: 'Check key' });
+  };
+
+  it('ticks from what the company lists after Check key, keeping a model it doesn\u2019t list as a row', async () => {
+    savedCheckAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] },
+    };
+    fireEvent.click(await open('v-eleven'));
+    expect(screen.getByText('Check the key to tick models from ElevenLabs\u2019s own list for it.')).toBeTruthy();
+    expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Checked just now, nothing paid.')).toBeTruthy();
+    const boxes = screen.getAllByRole('checkbox');
+    // The saved one it lists first, ticked, then the rest of the company's list
+    expect(boxes.map((box) => box.textContent)).toEqual(['Eleven Flash v2.5eleven_flash_v2_5 · 2 languages', 'Eleven v4 Turboeleven_v4_turbo']);
+    expect(boxes.map((box) => box.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+    // Multilingual v2 isn't on the company's list for this key: it stays a row, to take off by hand
+    expect(listedRows().map((row) => row.textContent)).toEqual(['Multilingual v2eleven_multilingual_v2']);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v4 Turbo/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Saved in order, the new tick last, and only the model: never the company's line about it
+    expect(patches()[0].body).toEqual({
+      models: [
+        { id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' },
+        { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' },
+        { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+      ],
+      // Nothing was taken off by this tick, so nothing is kept off the company's list
+      takenOff: [],
+    });
+  });
+
+  it('keeps a model off the company\u2019s list when it is unticked, so it does not come back by itself', async () => {
+    savedCheckAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] },
+    };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Checked just now, nothing paid.');
+    // What the server holds after the save: the model is off its list, so the next read does not have it
+    providers = [soniox(), { ...eleven(), models: [{ id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }] }];
+    const before = reads();
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven Flash v2\.5/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect((patches()[0].body as { takenOff: string[] }).takenOff).toEqual(['speech:eleven_flash_v2_5']);
+    // After the list is read again it stays unticked: it does not come back by itself
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /^Eleven Flash v2\.5/ }).getAttribute('aria-checked')).toBe('false'));
+    expect(patches()).toHaveLength(1);
+  });
+
+  it('catches a model typed again that is already ticked on the company\u2019s list', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'eleven_flash_v2_5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(await screen.findByText('That model is already on the list.')).toBeTruthy();
+    expect(patches()).toHaveLength(0);
+  });
+
+  it('keeps what is being typed in Add a model when Check key brings the company\u2019s list in', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    const check = await open('v-eleven');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'half_typed_model' } });
+    fireEvent.click(check);
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect((screen.getByLabelText('Model id') as HTMLInputElement).value).toBe('half_typed_model');
+  });
+
+  it('drops the answer of a Check key that was still out when the key was replaced, so the old key\u2019s list never shows for the new one', async () => {
+    let release!: () => void;
+    holdSavedCheck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/v-eleven/check'))).toBe(true));
+    // The key is replaced while that check is still out
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_new_key_0000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(calls.some((call) => call.method === 'PATCH')).toBe(true));
+    await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.');
+    // Now the old key's answer comes in
+    release();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.getByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
+  });
+
+  // The Address section's own Change, then a new address saved
+  const changeAddress = async (address: string) => {
+    const section = screen.getByText('Address', { selector: 'h3, h2, p, span, div, label' }).closest('section') as HTMLElement;
+    fireEvent.click(within(section).getByRole('button', { name: 'Change' }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: address } });
+    fireEvent.submit(screen.getByLabelText('Address').closest('form') as HTMLFormElement);
+  };
+
+  // The Name section's own Change, then a new name saved (it reads the provider again)
+  const rename = async (name: string) => {
+    const section = screen.getByText('Name', { selector: 'h3, h2, p, span, div, label' }).closest('section') as HTMLElement;
+    fireEvent.click(within(section).getByRole('button', { name: 'Rename' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: name } });
+    fireEvent.submit(screen.getByLabelText('Name').closest('form') as HTMLFormElement);
+  };
+  const reads = () => calls.filter((call) => call.method === 'GET' && call.url === '/api/admin/voice-providers').length;
+
+  it('drops the company\u2019s list when the address changes, so models of the old address can\u2019t be ticked', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    await changeAddress('https://eleven.example.com');
+    await waitFor(() => expect(patches().some((patch) => (patch.body as { endpoint?: string }).endpoint === 'https://eleven.example.com')).toBe(true));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+    expect(screen.queryByText(/lists 1 model for it/)).toBeNull();
+  });
+
+  it('drops the answer of a Check key that was still out when the address changed', async () => {
+    let release!: () => void;
+    holdSavedCheck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/v-eleven/check'))).toBe(true));
+    await changeAddress('https://eleven.example.com');
+    await waitFor(() => expect(patches().some((patch) => (patch.body as { endpoint?: string }).endpoint === 'https://eleven.example.com')).toBe(true));
+    release();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.queryByText(/knows this key/)).toBeNull();
+  });
+
+  it('does not save a list over 200 models, says so, and still saves unticking one', async () => {
+    const many = Array.from({ length: 200 }, (_, index) => ({ id: `m${index}`, label: `Model ${index}`, kind: 'speech' }));
+    providers = [soniox(), { ...eleven(), models: many }];
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [...many, { id: 'extra', label: 'Extra model', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 201 models for it. Checked just now, nothing paid.');
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Extra model/ }));
+    expect(await screen.findByText('A provider can list up to 200 models. Take one off first.')).toBeTruthy();
+    expect(patches()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Model 0/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect((patches()[0].body as { models: unknown[] }).models).toHaveLength(199);
+  });
+
+  it('does not say the first ticked model is what bots start on', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect(screen.queryByText(/first ticked/i)).toBeNull();
+    expect(screen.getByText(/Tick one to let bots pick it, untick one to take it off\./)).toBeTruthy();
+  });
+
+  it('drops the list when the provider is read again with another address, and keeps it when only the name changed', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    // Only the name is different when it is read again: the list stays
+    providers = [soniox(), { ...eleven(), name: 'ElevenLabs main' }];
+    const before = reads();
+    await rename('ElevenLabs main');
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await screen.findByRole('heading', { name: 'ElevenLabs main' });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    // The address is different when it is read again (changed elsewhere): the list and the check are dropped, and nothing is saved from it
+    providers = [soniox(), { ...eleven(), name: 'ElevenLabs main', endpoint: 'https://other.example.com' }];
+    const again = reads();
+    await rename('ElevenLabs');
+    await waitFor(() => expect(reads()).toBeGreaterThan(again));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+    expect(screen.queryByText(/lists 1 model for it/)).toBeNull();
+    expect(patches().every((patch) => !('models' in (patch.body as object)))).toBe(true);
+  });
+
+  it('does not take a key changed elsewhere for one replaced here, even when the key replaced here ended in the same four characters', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    await open('v-eleven');
+    // The key is replaced here with one that ends the same as the saved one (a1b2)
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_new_key_a1b2' } });
+    const before = reads();
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.');
+    // The company's list is read for the new key
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    // Then the key is changed from another tab: the next read has another key, which is not ours
+    providers = [soniox(), { ...eleven(), apiKeyLast4: 'zz99' }];
+    const again = reads();
+    await rename('ElevenLabs main');
+    await waitFor(() => expect(reads()).toBeGreaterThan(again));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+  });
+
+  it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
+    fireEvent.click(await open('v-eleven'));
+    expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(listedRows()).toHaveLength(2);
   });
 });
