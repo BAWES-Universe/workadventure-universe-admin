@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ArtifactBox, LinkNotAvailable, PublicArtifact } from '@/components/public-artifact';
+import { marked } from 'marked';
 import { markdownDocument } from '@/lib/artifact-public';
 import type { PublicView } from '@/lib/artifact-service';
 
@@ -54,6 +55,42 @@ describe('the public artifact page', () => {
     expect(doc).not.toContain("script-src");
     expect(doc).toContain('<h1>Notes</h1>');
     expect(doc).toContain('<li>one</li>');
+  });
+
+  describe('single new lines (the same drawing as the docs window in the game)', () => {
+    const body = (markdown: string) => markdownDocument(markdown).split('<body>')[1].replace('</body></html>', '');
+
+    it('keeps a single new line inside a paragraph as a line break, and a blank line as a new paragraph', () => {
+      expect(body('Owner: Dana\nRead from: Hub\n\nNext paragraph\n')).toBe('<p>Owner: Dana<br>Read from: Hub</p>\n<p>Next paragraph</p>\n');
+    });
+
+    it('keeps a hand-wrapped line break mid-sentence (the known cost of the change)', () => {
+      expect(body('A sentence that a writer wrapped\nby hand at the window edge.\n')).toContain('wrapped<br>by hand');
+    });
+
+    it('keeps a new line inside a list item and inside a quote as a line break', () => {
+      const list = body('- one\n  continued\n- two\n');
+      expect(list.match(/<li>/g)).toHaveLength(2);
+      expect(list).toContain('<li>one<br>continued</li>');
+      expect(list).toContain('<li>two</li>');
+      expect(body('> first\n> second\n')).toContain('<blockquote>\n<p>first<br>second</p>\n</blockquote>');
+    });
+
+    it('draws lists, tables, code blocks and task items with no line breaks added', () => {
+      const markdown = '# Title\n\n- one\n- two\n  - nested\n\n1. first\n2. second\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```js\nline 1\nline 2\n```\n\n- [x] done\n- [ ] todo\n';
+      const html = body(markdown);
+      expect(html).not.toContain('<br');
+      expect(html).toContain('<table>');
+      expect(html).toContain('<th>A</th>');
+      expect(html).toContain('<code class="language-js">line 1\nline 2\n</code>');
+      expect(html.match(/<li>/g)).toHaveLength(7);
+      // The same text drawn with the setting off (how it was drawn before) is identical
+      expect(html).toBe(marked.parse(markdown, { async: false, gfm: true, breaks: false }));
+    });
+
+    it('draws a two-space hard break as one line break', () => {
+      expect(body('first  \nsecond\n')).toBe('<p>first<br>second</p>\n');
+    });
   });
 
   it('says one thing when the link is not available, with no way to tell why', () => {

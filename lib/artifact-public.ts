@@ -4,9 +4,13 @@ import { marked } from 'marked';
  * A document for the public link page: the Markdown drawn as HTML, in a page of its own that the page shows in an iframe
  * with every permission off (no scripts, no same origin). The page's own policy blocks everything but styles and https
  * images, so nothing a document says can run or reach anything of the viewer.
+ *
+ * A single new line inside a paragraph, a list item or a quote is drawn as a line break (`breaks: true`), the same as the
+ * docs window in the game, so one document reads the same in both. Lists, code blocks, tables and two-space breaks
+ * are drawn as before.
  */
 export function markdownDocument(markdown: string): string {
-  const html = marked.parse(markdown, { async: false, gfm: true, breaks: false }) as string;
+  const html = marked.parse(markdown, { async: false, gfm: true, breaks: true }) as string;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:">
 <base target="_blank">
