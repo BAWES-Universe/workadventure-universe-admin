@@ -89,7 +89,8 @@ const nextConfig: NextConfig = {
           { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },
-          { key: 'Content-Security-Policy', value: "frame-ancestors 'none';" },
+          // Its Content-Security-Policy (never framed, and which frames it may hold) is set per request in middleware.ts: it
+          // names the address the artifacts are served from, which only the running server knows
         ],
       },
       {

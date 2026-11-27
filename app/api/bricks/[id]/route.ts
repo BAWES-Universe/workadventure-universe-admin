@@ -22,7 +22,8 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * How a Brick moves and what it does when it sees someone (the Behavior row on its page): only these keys of a bot's
  * behavior config can be sent, and each is merged into what is saved, so the rest of the config (what Apps and the other
- * parts keep there) is never replaced by a save from this page. `vision` is where its images go (the Mind row).
+ * parts keep there) is never replaced by a save from this page. `vision` is where its images go (the Mind row);
+ * `showToolCalls` is "Show app use" (the Apps screen): whether chat shows which app it used.
  */
 const brickBehaviorConfigSchema = z
   .object({
@@ -36,6 +37,7 @@ const brickBehaviorConfigSchema = z
     loop: z.boolean(),
     pauseAtWaypoints: z.number().min(0).max(86_400),
     vision: z.unknown(),
+    showToolCalls: z.boolean(),
   })
   .partial()
   .strict();
