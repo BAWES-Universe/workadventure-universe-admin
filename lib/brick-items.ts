@@ -753,11 +753,11 @@ export async function goalsRoom(ownerId: string, now: Date = new Date(), db: Tx 
 
 /**
  * The usage rows that count against a person's Universe AI window: theirs, on the server's own provider (not a personal key), not a failed
- * call, not a greeting, inside the window. A run handed out and not finished holds one place until a row like this names it (the bot server
+ * call, not a greeting, not a look at an image, inside the window. A run handed out and not finished holds one place until a row like this names it (the bot server
  * names the run on the call); a bot server that does not name the run leaves it holding its place, which can only hold too early, never too late.
  */
 function countedUsage(ownerId: string, since: Date): Prisma.Sql {
-  return Prisma.sql`a."talked_person_id" = ${ownerId} AND a."key_owner_id" IS NULL AND a."error" = false AND a."greeting" = false AND a."timestamp" >= ${since}`;
+  return Prisma.sql`a."talked_person_id" = ${ownerId} AND a."key_owner_id" IS NULL AND a."error" = false AND a."greeting" = false AND a."image_read" = false AND a."timestamp" >= ${since}`;
 }
 
 /** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */

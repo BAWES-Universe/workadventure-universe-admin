@@ -34,6 +34,9 @@ const base = {
 const universeAiProvider = { ...base, providerId: 'deepseek-flash', name: 'DeepSeek V4 Flash', ownerId: null, supportsVision: null, isDefault: true, apiKeyEncrypted: 'enc:sk-server' };
 const deepseekKey = { ...base, providerId: 'key-1', name: 'My DeepSeek', ownerId: 'maker', settings: { kind: 'deepseek' } };
 const lmStudioKey = { ...base, providerId: 'key-2', name: 'My LM Studio', ownerId: 'maker', type: 'lmstudio', endpoint: 'https://lm.example.com', model: 'qwen3-8b', supportsVision: null, apiKeyEncrypted: null, settings: { kind: 'lmstudio' } };
+const groqKey = { ...base, providerId: 'key-4', name: 'My Groq', ownerId: 'maker', endpoint: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b', supportsVision: null, settings: { kind: 'groq' } };
+// A hosted kind at an address the person typed: their own NIM
+const ownNimKey = { ...base, providerId: 'key-6', name: 'My NIM', ownerId: 'maker', endpoint: 'https://nim.my-gpu.example/v1', model: 'llama-text', supportsVision: false, settings: { kind: 'nim' } };
 const geminiKey = { ...base, providerId: 'key-3', name: 'My Gemini', ownerId: 'maker', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3-flash', supportsVision: true, settings: { kind: 'gemini' } };
 const pinned = { ...universeAiProvider, providerId: 'lmstudio-local', isDefault: false };
 
@@ -56,7 +59,7 @@ beforeEach(() => {
   verdict.mockReset();
   verdict.mockResolvedValue({ ok: true });
   (requireServiceToken as jest.Mock).mockReset();
-  setRows(universeAiProvider, deepseekKey, lmStudioKey, geminiKey, pinned);
+  setRows(universeAiProvider, deepseekKey, lmStudioKey, geminiKey, groqKey, ownNimKey, pinned);
   provider.findUnique.mockImplementation(async ({ where }: { where: { providerId: string } }) => rows[where.providerId] ?? null);
   provider.findFirst.mockResolvedValue(universeAiProvider);
 });
@@ -72,9 +75,23 @@ describe('nothing picked', () => {
     });
   });
 
-  it('uses Universe AI when the key has no Vision model to offer', async () => {
-    bot.findUnique.mockResolvedValue(botOn('key-2'));
+  it('uses Universe AI when a hosted key has no Vision model to offer', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-4'));
     expect((await ask()).vision).toEqual({ choice: 'universe-ai' });
+  });
+
+  it('keeps the images on a key on the person’s own computer: no Universe AI unless the owner picks it', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-2'));
+    const body = await ask();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-2', keyGroup: 'own-computer' });
+    expect('vision' in body).toBe(false);
+  });
+
+  it('keeps the images on a hosted kind at an address the person typed (their own NIM): no Universe AI unless the owner picks it', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-6'));
+    const body = await ask();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-6', keyGroup: 'hosted', keyAddressTyped: true });
+    expect('vision' in body).toBe(false);
   });
 
   it('uses the key’s check model for images when it sees and the bot’s own model on that key doesn’t (#575)', async () => {
@@ -186,7 +203,9 @@ describe('the owner picked', () => {
   });
 
   it('ignores a saved pick it can’t read, as if nothing were picked', async () => {
-    bot.findUnique.mockResolvedValue(botOn('key-2', { vision: { choice: 'another' } }));
+    bot.findUnique.mockResolvedValue(botOn('key-4', { vision: { choice: 'another' } }));
     expect((await ask()).vision).toEqual({ choice: 'universe-ai' });
+    bot.findUnique.mockResolvedValue(botOn('key-2', { vision: { choice: 'another' } }));
+    expect('vision' in (await ask())).toBe(false);
   });
 });

@@ -168,12 +168,13 @@ async function withLimits(bot: BotForCredentials, body: ServedProvider): Promise
  * Where this bot's images go. What the owner picked, or, when nothing is picked, the default (`autoVision`): none of the
  * three says anything new for a bot whose own model sees, or for Universe AI, so those return nothing and behave as before.
  * A key picked for images that can't be used now (taken away, unlent, Down, or its model changed) never falls back to Universe
- * AI on its own: the images are then left to the bot's own model, and `problem: 'key'` says so.
+ * AI or to the bot's own model on its own: nobody looks at the images until the owner picks again, and `problem: 'key'` says so.
  */
-async function visionPlan(bot: BotForCredentials, main: ServedProvider, others: Others | null = null): Promise<VisionPlan | undefined> {
+export async function visionPlan(bot: BotForCredentials, main: ServedProvider, others: Others | null = null): Promise<VisionPlan | undefined> {
   const picked = readVisionPick(bot.behaviorConfig);
-  // Another of the owner's keys describes images only for the owner: for other people the images are left to the model that answers (game #2005)
-  if (others && picked?.choice === 'another') return { choice: 'this' };
+  // Another of the owner's keys describes images only for the owner (game #2005). For other people the pick can't be used, and an
+  // image never goes to a place the owner did not pick (the model that answers, or Universe AI): nobody looks, as for any pick that can't be used
+  if (others && picked?.choice === 'another') return { choice: 'this', problem: 'key' };
   const own = main.source === 'own-key';
   // Another model on the same key only when the lend there allows it (#575). A Brick stands in no universe: its
   // owner's key runs it with all of its models (lib/ai-key-pay.ts), so there is no lend to narrow them.
@@ -191,6 +192,9 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider, others: 
       ? autoVision({
           ownKeyId: main.providerId,
           sees: mainSees,
+          // A key at an address the person typed (their own computer, or their own server for a hosted kind such as their own NIM)
+          // never sends images to Universe AI unless they pick it: they would leave that computer or server
+          ownComputer: main.keyGroup === 'own-computer' || main.keyAddressTyped === true,
           sameKeyModel:
             keyVisionModels({ model: key.model, supportsVision: key.supportsVision, settings: key.settings }).find(
               (model) => model !== main.model && (!lend || lend.includes(model)),

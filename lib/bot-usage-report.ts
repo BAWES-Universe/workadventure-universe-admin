@@ -87,10 +87,11 @@ export async function botUsageReport(
              (count(*) FILTER (WHERE "cost_basis" IS NULL OR "cost_basis" NOT IN (${Prisma.join(PRICED)})))::int AS unpriced,
              min("timestamp") AS first_at, max("timestamp") AS last_at
         FROM "bots_ai_usage"
-       WHERE "bot_id" = ${bot.id} AND "error" = false AND "timestamp" >= ${roughSince}
+       WHERE "bot_id" = ${bot.id} AND "error" = false AND "image_read" = false AND "timestamp" >= ${roughSince}
          AND to_char(("timestamp" AT TIME ZONE 'UTC') AT TIME ZONE ${timeZone}, 'YYYY-MM-DD') >= ${first}
        GROUP BY 1, 2, 3, 4, 5, 6, 7`),
-    prisma.botsAiUsage.findFirst({ where: { botId: bot.id, error: false }, select: { id: true } }),
+    // A look Universe AI's vision took at an image is not a reply, so this page of replies leaves it out (Universe's books keep its cost)
+    prisma.botsAiUsage.findFirst({ where: { botId: bot.id, error: false, imageRead: false }, select: { id: true } }),
     prisma.botReplyLimitHit.findMany({
       where: { botId: bot.id, createdAt: { gte: roughSince } },
       select: { kind: true, talkedUserId: true, createdAt: true, askedAt: true },

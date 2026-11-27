@@ -77,6 +77,19 @@ describe('where images go when the owner picked nothing', () => {
   });
 });
 
+describe('where images go when the owner picked nothing, on a key on their own computer', () => {
+  it('stays on the model: the images never leave that computer for Universe AI unless the owner picks it', () => {
+    expect(autoVision({ ownKeyId: 'key-1', sees: false, sameKeyModel: null, ownComputer: true })).toEqual({ choice: 'this' });
+  });
+  it('still uses a Vision model on the same key, and a model that sees stays as it is', () => {
+    expect(autoVision({ ownKeyId: 'key-1', sees: false, sameKeyModel: 'v', ownComputer: true })).toEqual({ choice: 'another', keyId: 'key-1', model: 'v' });
+    expect(autoVision({ ownKeyId: 'key-1', sees: true, sameKeyModel: null, ownComputer: true })).toEqual({ choice: 'this' });
+  });
+  it('a hosted key goes to Universe AI as before', () => {
+    expect(autoVision({ ownKeyId: 'key-1', sees: false, sameKeyModel: null, ownComputer: false })).toEqual({ choice: 'universe-ai' });
+  });
+});
+
 describe('a key picked for images', () => {
   it('can be used while it may run the bot, lent here, running a model with Vision, and working', async () => {
     db.findUnique.mockResolvedValue(deepseekKey);

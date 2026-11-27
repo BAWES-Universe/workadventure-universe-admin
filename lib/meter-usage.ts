@@ -89,7 +89,7 @@ export async function chatBar(personId: string, now: Date, extra: RunningExtra |
   if (extra?.noLimit) return { left: 1, words: 'plenty', fullAgainAt: null, extra: extraWords };
   if (!row || !endsAt || endsAt <= now) return { left: perWindow > 0 ? 1 : 0, words: perWindow > 0 ? 'plenty' : 'out', fullAgainAt: null, replies: { available: total, total, running: false, windowHours: limits.windowHours }, ...(extraWords ? { extra: extraWords } : {}) };
   // Replies Universe AI paid for, from every Brick and bot: a reply a person's own key paid for is nobody's here
-  const used = await prisma.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: row.startedAt } } });
+  const used = await prisma.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, imageRead: false, timestamp: { gte: row.startedAt } } });
   const left = total > 0 ? Math.min(1, Math.max(0, 1 - used / total)) : 0;
   return {
     left,

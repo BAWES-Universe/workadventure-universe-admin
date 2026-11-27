@@ -151,7 +151,7 @@ export async function checkReplyAllowance(
         // The replies kept for text grow with the window: they are taken off the window the person really has, after its multiple
         limit: room((guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1)),
         // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
-        where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, imageRead: false, timestamp: { gte: since } }),
         pending: { personKey, notOwnKey: true },
       });
     }
@@ -161,7 +161,7 @@ export async function checkReplyAllowance(
         key: `ua:guests:${bot.id}`,
         hours: limits.windowHours,
         limit: limits.guestPool,
-        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, imageRead: false, timestamp: { gte: since } }),
         pending: { personKey, botId: bot.id, guestsOnly: true, notOwnKey: true },
       });
     }
@@ -172,7 +172,7 @@ export async function checkReplyAllowance(
       key: `bot:${bot.id}:${personKey}`,
       hours: BOT_LIMIT_WINDOW_HOURS,
       limit: bot.dailyReplyCap,
-      where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, timestamp: { gte: since } }),
+      where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, imageRead: false, timestamp: { gte: since } }),
       pending: { personKey, botId: bot.id, notOwnKey: false },
     });
   }
