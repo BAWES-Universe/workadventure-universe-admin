@@ -995,7 +995,19 @@ run('goals and tasks, in a real database', () => {
 
   it('an account that never asked for one has nothing: no items, no runs, whatever the clock says', async () => {
     const quiet = await person('quiet');
-    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY));
+    // Every claim hands out the work of EVERYONE in the database: the goals and tasks the tests above left behind come due every day, so
+    // seven claims over 7 days made 50 to 90 runs each (about 1.2 s a claim, 8 to 9 s in all) against jest's 10 s limit, and the time grew
+    // with every test added to this file. Only the work these tests left is cleared (never anyone else's rows): what is checked is that
+    // asking for work, again and again, makes nothing for an account that never asked
+    await prisma.brickItem.deleteMany({ where: { ownerId: { in: people.filter((id) => id !== quiet.id) } } });
+    // One controlled due item of someone else stays, so every claim really has work to hand out: a fault that makes something for the quiet
+    // account only while it is handing out another person's work cannot pass on an empty database
+    const busy = await person('busy');
+    const busyItem = await set(busy);
+    const claimed = [];
+    for (let day = 1; day <= 7; day++) claimed.push(...(await claimDueRuns(at(day * DAY))));
+    expect(claimed.some((one) => one.itemId === busyItem.id && one.userId === busy.uuid)).toBe(true);
+    expect(await runsOf(busyItem.id)).toHaveLength(1);
     expect(await prisma.brickItem.count({ where: { ownerId: quiet.id } })).toBe(0);
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);

@@ -18,7 +18,7 @@ export const OPTIONS = optionsFor;
  * Round 8, D2: an optional body `{ confirmedJobIds: [ids] }` (the jobs the panel showed when the person confirmed) ends ONLY those that are live and answers `stopped` and `left` beside `computer` (`left` is the snapshot of the jobs live and outside the set when the command was first dispatched, never a live status); the same command id
  * with another set is 409. With no body, as before (today's snapshot).
  */
-// Only the set is read: any other body the panel sends today (none, `{}`) is answered as before
+// Only the set is read: the bodies the panel sends today (none, `{}`, `{ confirmedJobIds }`) are answered as before; a body with any other key is 400
 const confirmedSchema = z.array(z.string().uuid()).min(1).max(STOP_CONFIRMED_MAX);
 
 export const POST = (request: NextRequest, { params }: { params: Promise<{ id: string }> }) =>
@@ -37,6 +37,8 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
       }
       // A JSON `null` is a body that is there and is not an object too: it would reach stopAll with no confirmed set and end every live job (CodeRabbit on #1025, N3)
       if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return brickJson(request, { error: 'Invalid input data' }, 400);
+      // An object with a key this route does not read (a misspelt `confirmedJobId`, say) would otherwise fall through to the unrestricted Stop and end jobs the person did not confirm. Only `confirmedJobIds` is read; `{}` stays today's Stop
+      if (Object.keys(raw).some((name) => name !== 'confirmedJobIds')) return brickJson(request, { error: 'Invalid input data' }, 400);
     }
     const sent = raw !== null && typeof raw === 'object' ? (raw as { confirmedJobIds?: unknown }).confirmedJobIds : undefined;
     let confirmed: string[] | null = null;

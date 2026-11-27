@@ -5,13 +5,13 @@
  */
 import { NextRequest } from 'next/server';
 import { GET as listForChat, POST as makeFromChat } from '@/app/api/bots/[id]/bricks/route';
-import { GET as offers, POST as claim, PUT as answer } from '@/app/api/bots/[id]/brick-offers/route';
+import { DELETE as release, GET as offers, POST as claim, PUT as answer } from '@/app/api/bots/[id]/brick-offers/route';
 import { bricksForChat, makeBrickFromChat } from '@/lib/brick-make';
-import { answerOffer, claimOffer, offersSoFar, topicKey } from '@/lib/brick-offers';
+import { answerOffer, claimOffer, offersSoFar, releaseOffer, topicKey } from '@/lib/brick-offers';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), bricksForChat: jest.fn(), makeBrickFromChat: jest.fn() }));
-jest.mock('@/lib/brick-offers', () => ({ ...jest.requireActual('@/lib/brick-offers'), offersSoFar: jest.fn(), claimOffer: jest.fn(), answerOffer: jest.fn() }));
+jest.mock('@/lib/brick-offers', () => ({ ...jest.requireActual('@/lib/brick-offers'), offersSoFar: jest.fn(), claimOffer: jest.fn(), answerOffer: jest.fn(), releaseOffer: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const list = bricksForChat as jest.Mock;
@@ -19,6 +19,7 @@ const make = makeBrickFromChat as jest.Mock;
 const soFar = offersSoFar as jest.Mock;
 const claimed = claimOffer as jest.Mock;
 const answered = answerOffer as jest.Mock;
+const released = releaseOffer as jest.Mock;
 
 const SERVICE_TOKEN = 'bot-server-secret';
 const BRICK_ID = '7b0f3c1e-52a4-4d0b-9a3e-6f1d2c3b4a5e';
@@ -53,9 +54,10 @@ describe('every one of them is for the bot server only', () => {
     ['reading offers', () => offers(request(`/api/bots/${BRICK_ID}/brick-offers?userId=u`, { token: null }), params)],
     ['claiming an offer', () => claim(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'POST', body: { userId: 'u', topic: 'recipes' }, token: 'wrong' }), params)],
     ['keeping an answer', () => answer(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'PUT', body: { userId: 'u', topic: 'recipes', answer: 'made' }, token: null }), params)],
+    ['taking an offer back', () => release(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'DELETE', body: { userId: 'u', topic: 'recipes' }, token: null }), params)],
   ])('%s answers 401 without its token, and nothing is asked', async (_what, ask) => {
     expect((await ask()).status).toBe(401);
-    for (const fn of [list, make, soFar, claimed, answered]) expect(fn).not.toHaveBeenCalled();
+    for (const fn of [list, make, soFar, claimed, answered, released]) expect(fn).not.toHaveBeenCalled();
   });
 });
 
@@ -135,6 +137,21 @@ describe('/api/bots/:id/brick-offers: the gentle offer', () => {
     answered.mockResolvedValue({ ok: true, kept: true });
     expect(await (await answer(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'PUT', body: { userId: 'uuid-sara', topic: 'Recipes', answer: 'not_now' } }), params)).json()).toEqual({ kept: true });
     expect(answered).toHaveBeenCalledWith(BRICK_ID, { userId: 'uuid-sara', topic: 'Recipes', answer: 'not_now' });
+  });
+
+  it('takes the claim for a card that never reached the person back, only for the owner and only with a person and a topic', async () => {
+    released.mockResolvedValue({ ok: true, released: true });
+    expect(await (await release(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'DELETE', body: { userId: 'uuid-sara', topic: 'Recipes' } }), params)).json()).toEqual({ released: true });
+    expect(released).toHaveBeenCalledWith(BRICK_ID, { userId: 'uuid-sara', topic: 'Recipes' });
+    released.mockResolvedValue({ ok: true, released: false });
+    expect(await (await release(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'DELETE', body: { userId: 'uuid-sara', topic: 'Recipes' } }), params)).json()).toEqual({ released: false });
+    released.mockResolvedValue(NOT_THERE);
+    expect((await release(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'DELETE', body: { userId: 'uuid-omar', topic: 'recipes' } }), params)).status).toBe(404);
+    released.mockClear();
+    for (const body of [{ topic: 'recipes' }, { userId: 'uuid-sara' }, { userId: 'uuid-sara', topic: 'recipes', answer: 'made' }]) {
+      expect((await release(request(`/api/bots/${BRICK_ID}/brick-offers`, { method: 'DELETE', body }), params)).status).toBe(400);
+    }
+    expect(released).not.toHaveBeenCalled();
   });
 
   it('is not there for anyone who does not own the Brick that asks', async () => {

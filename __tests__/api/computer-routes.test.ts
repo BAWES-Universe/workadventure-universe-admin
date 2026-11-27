@@ -192,6 +192,22 @@ describe('the owner’s calls', () => {
     expect(lib.stopAll).toHaveBeenCalledTimes(2);
   });
 
+  it('row 57: a Stop body with a key other than confirmedJobIds (a misspelt confirmedJobId, an extra field beside the set) is 400 and stops nothing, never the unrestricted Stop; the set alone, {} and no body still stop', async () => {
+    lib.stopAll.mockResolvedValue({ ok: true, view: { on: true } as never, stopped: [], left: [] } as never);
+    const job = '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f';
+    for (const body of [{ confirmedJobId: job }, { confirmedJobId: [job] }, { jobId: job }, { confirmedJobIds: [job], extra: 1 }, { confirmedJobIds: undefined, other: true }, { other: null }]) {
+      const answer = await stop(new NextRequest('http://localhost:3333/x', { method: 'POST', body: JSON.stringify(body) }), params);
+      expect(answer.status).toBe(400);
+    }
+    expect(lib.stopAll).not.toHaveBeenCalled();
+    // CONTROL: the real field, an empty object and no body are answered as before
+    expect((await stop(call('/x', { body: { confirmedJobIds: [job] } }), params)).status).toBe(200);
+    expect(lib.stopAll).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), undefined, [job]);
+    expect((await stop(call('/x', { body: {} }), params)).status).toBe(200);
+    expect((await stop(call('/x'), params)).status).toBe(200);
+    expect(lib.stopAll).toHaveBeenCalledTimes(3);
+  });
+
   it('I10: a Stop that left a captured job live is a retryable 503, not a Stop', async () => {
     lib.stopAll.mockResolvedValue({ ok: false, reason: 'not_ended' });
     const answer = await stop(call('/x', { headers: { 'x-computer-command': '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f' } }), params);
@@ -399,6 +415,30 @@ describe('the bot server’s calls', () => {
     const own = () => resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     beforeEach(() => {
       lib.registerStart.mockResolvedValue({ registration: { opened: true, reopened: false, release: jest.fn(async () => undefined) } } as never);
+    });
+
+    it('row 58: the five-minute future tolerance is exact: a key issued up to and including 5 minutes ahead of the start\'s own moment is accepted, one millisecond more is 400 untimed_key', async () => {
+      own();
+      lib.registerStart.mockClear();
+      lib.startJob.mockClear();
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      // Only the clock is pinned (the start reads its own moment from `new Date()` before anything else), so the boundary is exact
+      const now = new Date('2026-11-24T10:00:00.000Z');
+      jest.useFakeTimers({ now, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'performance', 'hrtime'] });
+      try {
+        const send = (issuedMs: number) =>
+          startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': `t${issuedMs.toString(36)}-abcdef012345`, 'X-Computer-Start-Acks': '1' } }), params);
+        const edge = await send(now.getTime() + 5 * 60_000);
+        expect(edge.status).toBe(200);
+        expect(lib.registerStart).toHaveBeenCalledTimes(1);
+        lib.registerStart.mockClear();
+        const past = await send(now.getTime() + 5 * 60_000 + 1);
+        expect(past.status).toBe(400);
+        expect(await past.json()).toMatchObject({ reason: 'untimed_key' });
+        expect(lib.registerStart).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('round 8, A2: a start that acks with a key that carries no issue time, or one more than 5 minutes in the future, is 400 and nothing is asked or made', async () => {

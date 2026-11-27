@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { requireServiceToken } from '@/lib/service-tokens';
-import { answerOffer, claimOffer, offerAnswerSchema, offerSchema, offersSoFar } from '@/lib/brick-offers';
+import { answerOffer, claimOffer, offerAnswerSchema, offerReleaseSchema, offerSchema, offersSoFar, releaseOffer } from '@/lib/brick-offers';
 
 export const runtime = 'nodejs';
 
@@ -72,5 +72,23 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ kept: answer.kept });
   } catch (error) {
     return failed(error, 'Keeping an answer');
+  }
+}
+
+/**
+ * DELETE /api/bots/:id/brick-offers   { userId, topic }
+ *   { released }  the card of a claim never reached the person: the claim is taken back (only an unanswered claim made in the last few minutes), so the topic is suggested again another time
+ */
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    requireServiceToken(request);
+    const { id } = await params;
+    const parsed = offerReleaseSchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
+    const answer = await releaseOffer(id, parsed.data);
+    if (!answer.ok) return NextResponse.json({ error: answer.error }, { status: answer.status });
+    return NextResponse.json({ released: answer.released });
+  } catch (error) {
+    return failed(error, 'Taking an offer back');
   }
 }

@@ -466,11 +466,13 @@ run('one owner per computer job: every write is decided in the write that lands 
       await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
       // The first look at the job has read resp-1; the response changes while the finish waits for the lock: the write finds another response, reads again and cancels THAT one
       const statusAtCancel: string[] = [];
+      const lockFreeAtCancel: boolean[] = [];
       const real = fake.cancelTurn.bind(fake);
       const spy = jest.spyOn(fake, 'cancelTurn').mockImplementation(async (ref: string, responseId: string) => {
         statusAtCancel.push((await jobOf(jobId)).status);
-        // The cutoff lock is FREE at this seam (a separate transaction takes it without waiting), not merely unwanted: a cancel made under the lock would hold it
-        expect(await lockIsFree(cutoffLockKey(jobId))).toBe(true);
+        // The cutoff lock is FREE at this seam (a separate transaction takes it without waiting), not merely unwanted: a cancel made under the lock would hold it.
+        // Recorded and asserted after the finish: the production call swallows an error thrown here (a cancel is best effort), so an `expect` in this seam could never fail the test by itself
+        lockFreeAtCancel.push(await lockIsFree(cutoffLockKey(jobId)));
         return real(ref, responseId);
       });
       const holder = holdCutoff(jobId, (tx) => tx.$executeRaw`UPDATE "computer_jobs" SET "agent_response_id" = 'resp-2' WHERE "id" = ${jobId}`);
@@ -490,6 +492,8 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
       expect(fake.cancelledTurns).toEqual(['resp-2']);
       expect(statusAtCancel).toEqual(['done']);
+      // One cancel, and the cutoff lock was free when it was made (row 15: mutant-tested by making the cancel under the lock)
+      expect(lockFreeAtCancel).toEqual([true]);
       // A finish of a worker that lost cancels nothing
       const other = await running('s-c-order-lost');
       const eo = await claimed(other.jobId, 'rA');
@@ -518,17 +522,44 @@ run('one owner per computer job: every write is decided in the write that lands 
     const betweenSelectAndEnd = (jobId: string, between: () => Promise<unknown>) => {
       const real = actualCalls.endIfCutoffDecided;
       let fired = false;
+      /** The job whose first look took the hook (always `jobId` unless the hook is not scoped to it). */
+      let firedFor: string | null = null;
       const spy = jest.mocked(calls.endIfCutoffDecided).mockImplementation((async (...args: Parameters<typeof real>) => {
         if (!fired && args[0] === jobId) {
           fired = true;
+          firedFor = args[0];
           await between();
         }
         return real(...args);
       }) as never);
-      return { fired: () => fired, restore: () => spy.mockImplementation(real as never) };
+      return { fired: () => fired, firedFor: () => firedFor, restore: () => spy.mockImplementation(real as never) };
     };
     /** A job a sweep has already dealt with is put out of every later sweep's way, so each fixture is judged alone. */
     const putAside = (jobId: string) => prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', endedAt: minutes(121) } });
+
+    it('row 15: the hook belongs to the one job it names: jobs the same sweep looks at before and after it go straight through and are ended as they were selected', async () => {
+      // Several other jobs are in line for the same sweep, so the one it names is not the first it looks at: the target's stretch start is made a second later than the others, so the sweep, which reads waiting jobs oldest first, reads it last
+      const others = [];
+      for (const n of ['a', 'b', 'c', 'd']) others.push(await waitingPastLimit(`s-e5-scope-${n}`));
+      const target = await waitingPastLimit('s-e5-scope-target');
+      await prisma.computerJob.update({ where: { id: target.jobId }, data: { stretchStarted: new Date((await jobOf(target.jobId)).stretchStarted!.getTime() + 1000) } });
+      let ran = 0;
+      const spy = betweenSelectAndEnd(target.jobId, async () => {
+        ran += 1;
+        await prisma.computerJob.update({ where: { id: target.jobId }, data: { control: 'person', controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 } } });
+      });
+      try {
+        await sweepComputers(minutes(120));
+      } finally {
+        spy.restore();
+      }
+      // It ran once, for the named job, and for nobody else
+      expect(ran).toBe(1);
+      expect(spy.firedFor()).toBe(target.jobId);
+      expect(await jobOf(target.jobId)).toMatchObject({ status: 'waiting', control: 'person', endedBy: null });
+      // The others were not touched by it: each was ended as the sweep selected it
+      for (const other of others) expect(await jobOf(other.jobId)).toMatchObject({ status: 'stopped', endedBy: 'unanswered', control: 'brick' });
+    });
 
     it('the sweep selects a waiting job past the wait and the owner takes control meanwhile: not ended as unanswered; CONTROL: a real unanswered wait still ends as `unanswered`', async () => {
       const { jobId } = await waitingPastLimit('s-e5-wait');
